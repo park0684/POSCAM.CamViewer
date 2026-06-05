@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{47F0805C-02D2-4CEC-BCB9-E9647CC494D8}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>CamViewerClient</RootNamespace>
+    <AssemblyName>CamViewerClient</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
+      <HintPath>..\Poscam.CamViewer\packages\Newtonsoft.Json.13.0.4\lib\net45\Newtonsoft.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Security" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Api\ApiClientOptions.cs" />
+    <Compile Include="Api\ViewerConfigApiClient.cs" />
+    <Compile Include="CamViewerClientFacade.cs" />
+    <Compile Include="Config\ViewerConfigPathProvider.cs" />
+    <Compile Include="Config\ViewerConfigSerializer.cs" />
+    <Compile Include="Config\ViewerConfigStore.cs" />
+    <Compile Include="Enums\ScreenPosition.cs" />
+    <Compile Include="Enums\ViewerConfigSyncStatus.cs" />
+    <Compile Include="Mappers\ViewerConfigApiMapper.cs" />
+    <Compile Include="Models\Api\ApiResponseDto.cs" />
+    <Compile Include="Models\Api\ConfigLatestRequestDto.cs" />
+    <Compile Include="Models\Api\ConfigSyncRequestDto.cs" />
+    <Compile Include="Models\Api\ConfigSyncResponseDto.cs" />
+    <Compile Include="Models\Api\ConfigVersionRequestDto.cs" />
+    <Compile Include="Models\Api\ConfigVersionResponseDto.cs" />
+    <Compile Include="Models\Api\CounterMapServerDto.cs" />
+    <Compile Include="Models\Api\NvrConfigServerDto.cs" />
+    <Compile Include="Models\Api\PlaybackOptionServerDto.cs" />
+    <Compile Include="Models\Api\ViewerAuthApiClient.cs" />
+    <Compile Include="Models\Api\ViewerConfigDownloadResponse.cs" />
+    <Compile Include="Models\Api\ViewerConfigServerDto.cs" />
+    <Compile Include="Models\Api\ViewerConfigUploadRequest.cs" />
+    <Compile Include="Models\Api\ViewerDeviceListRequestDto.cs" />
+    <Compile Include="Models\Api\ViewerDeviceReleaseRequestDto.cs" />
+    <Compile Include="Models\Api\ViewerDeviceReleaseResponseDto.cs" />
+    <Compile Include="Models\Api\ViewerDeviceSummaryDto.cs" />
+    <Compile Include="Models\Api\ViewerLoginRequestDto.cs" />
+    <Compile Include="Models\Api\ViewerLoginResponseDto.cs" />
+    <Compile Include="Models\Api\ViewerTokenVerifyRequestDto.cs" />
+    <Compile Include="Models\Api\ViewerTokenVerifyResponseDto.cs" />
+    <Compile Include="Models\Auth\ViewerAuthToken.cs" />
+    <Compile Include="Models\Auth\ViewerTokenPathProvider.cs" />
+    <Compile Include="Models\Auth\ViewerTokenStore.cs" />
+    <Compile Include="Models\Config\CounterMap.cs" />
+    <Compile Include="Models\Config\NvrConfig.cs" />
+    <Compile Include="Models\Config\PlaybackOption.cs" />
+    <Compile Include="Models\Config\ViewerConfig.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Results\ClientResult.cs" />
+    <Compile Include="Security\LocalDataProtector.cs" />
+    <Compile Include="Validation\ConfigValidationError.cs" />
+    <Compile Include="Validation\ConfigValidationErrorCode.cs" />
+    <Compile Include="Validation\ConfigValidationResult.cs" />
+    <Compile Include="Validation\ViewerConfigValidator.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup />
+  <ItemGroup>
+    <WCFMetadata Include="Connected Services\" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
