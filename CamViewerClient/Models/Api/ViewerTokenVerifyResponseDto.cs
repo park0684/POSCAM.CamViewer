@@ -1,7 +1,7 @@
 ﻿namespace CamViewerClient.Models.Api
 {
     /// <summary>
-    /// 캠뷰어 토큰 실행 인증 응답 DTO이다.
+    /// 캠뷰어 토큰 검증 응답 DTO이다.
     /// </summary>
     public sealed class ViewerTokenVerifyResponseDto
     {
@@ -11,7 +11,7 @@
         public bool IsValid { get; set; }
 
         /// <summary>
-        /// 매장 코드.
+        /// 매장 내부 코드.
         /// </summary>
         public int StoreCode { get; set; }
 
@@ -22,12 +22,13 @@
 
         /// <summary>
         /// 서버 설정 버전.
+        /// 현재 서버 응답은 빈 문자열이 올 수 있으므로 string으로 받는다.
         /// </summary>
         public string ConfigVersion { get; set; }
 
         /// <summary>
-        /// 갱신된 캠뷰어 인증 토큰.
+        /// 갱신된 인증 토큰 정보.
         /// </summary>
-        public string Token { get; set; }
+        public AuthTokenDto Token { get; set; }
     }
 }

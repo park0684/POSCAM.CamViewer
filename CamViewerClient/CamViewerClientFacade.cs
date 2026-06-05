@@ -288,11 +288,10 @@ namespace CamViewerClient
         }
 
         /// <summary>
-        /// 매장 로그인 정보로 캠뷰어 인증을 수행하고,
+        /// 매장코드와 비밀번호로 캠뷰어 인증을 수행하고,
         /// 성공 시 로컬 인증 토큰을 저장한다.
         /// </summary>
         public async Task<ClientResult<ViewerAuthToken>> LoginViewerAsync(
-            int storeCode,
             string storeId,
             string storePassword,
             string hwid,
@@ -302,7 +301,6 @@ namespace CamViewerClient
         {
             var request = new ViewerLoginRequestDto
             {
-                StoreCode = storeCode,
                 StoreId = storeId,
                 StorePassword = storePassword,
                 Hwid = hwid,
@@ -467,14 +465,12 @@ namespace CamViewerClient
         /// 슬롯 부족 시 등록해제 화면에서 사용한다.
         /// </summary>
         public Task<ClientResult<IList<ViewerDeviceSummaryDto>>> GetViewerDevicesAsync(
-            int storeCode,
             string storeId,
             string storePassword,
             CancellationToken cancellationToken)
         {
             var request = new ViewerDeviceListRequestDto
             {
-                StoreCode = storeCode,
                 StoreId = storeId,
                 StorePassword = storePassword
             };
@@ -488,7 +484,6 @@ namespace CamViewerClient
         /// 선택한 캠뷰어 장비 등록을 해제한다.
         /// </summary>
         public Task<ClientResult<ViewerDeviceReleaseResponseDto>> ReleaseViewerDeviceAsync(
-            int storeCode,
             string storeId,
             string storePassword,
             int deviceCode,
@@ -497,7 +492,6 @@ namespace CamViewerClient
         {
             var request = new ViewerDeviceReleaseRequestDto
             {
-                StoreCode = storeCode,
                 StoreId = storeId,
                 StorePassword = storePassword,
                 DeviceCode = deviceCode,
@@ -518,16 +512,28 @@ namespace CamViewerClient
         {
             DateTime nowUtc = DateTime.UtcNow;
 
+            AuthTokenDto serverToken = response.Token;
+
             return new ViewerAuthToken
             {
-                Token = response.Token,
+                Token = serverToken == null ? string.Empty : serverToken.Token,
                 StoreCode = response.StoreCode,
                 DeviceCode = response.DeviceCode,
                 DeviceName = deviceName,
-                IssuedAtUtc = nowUtc,
-                ExpireAtUtc = null,
+
+                IssuedAtUtc = serverToken == null
+                    ? nowUtc
+                    : serverToken.IssuedAt.ToUniversalTime(),
+
+                ExpireAtUtc = serverToken == null
+                    ? (DateTime?)null
+                    : serverToken.ExpiresAt.ToUniversalTime(),
+
                 LastVerifiedAtUtc = nowUtc,
-                OfflineExpireAtUtc = nowUtc.AddDays(7)
+
+                OfflineExpireAtUtc = serverToken == null
+                    ? nowUtc.AddDays(7)
+                    : serverToken.OfflineUntil.ToUniversalTime()
             };
         }
 
@@ -540,16 +546,26 @@ namespace CamViewerClient
         {
             DateTime nowUtc = DateTime.UtcNow;
 
+            AuthTokenDto serverToken = response.Token;
+
             return new ViewerAuthToken
             {
-                Token = response.Token,
+                Token = serverToken == null ? string.Empty : serverToken.Token,
                 StoreCode = response.StoreCode,
                 DeviceCode = response.DeviceCode,
                 DeviceName = previousToken.DeviceName,
+
                 IssuedAtUtc = previousToken.IssuedAtUtc,
-                ExpireAtUtc = previousToken.ExpireAtUtc,
+
+                ExpireAtUtc = serverToken == null
+                    ? previousToken.ExpireAtUtc
+                    : serverToken.ExpiresAt.ToUniversalTime(),
+
                 LastVerifiedAtUtc = nowUtc,
-                OfflineExpireAtUtc = nowUtc.AddDays(7)
+
+                OfflineExpireAtUtc = serverToken == null
+                    ? nowUtc.AddDays(7)
+                    : serverToken.OfflineUntil.ToUniversalTime()
             };
         }
 

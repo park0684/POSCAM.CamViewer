@@ -36,6 +36,8 @@
             this.btnLogin = new System.Windows.Forms.Button();
             this.pnlBottom = new System.Windows.Forms.Panel();
             this.btnExit = new System.Windows.Forms.Button();
+            this.txtDeviceName = new System.Windows.Forms.TextBox();
+            this.lblDeviceName = new System.Windows.Forms.Label();
             this.pnlBottom.SuspendLayout();
             this.SuspendLayout();
             // 
@@ -79,11 +81,10 @@
             // 
             this.lblMessage.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.lblMessage.ForeColor = System.Drawing.Color.Red;
-            this.lblMessage.Location = new System.Drawing.Point(25, 125);
+            this.lblMessage.Location = new System.Drawing.Point(25, 165);
             this.lblMessage.Name = "lblMessage";
             this.lblMessage.Size = new System.Drawing.Size(340, 30);
             this.lblMessage.TabIndex = 0;
-            this.lblMessage.Text = "비밀번호";
             // 
             // btnLogin
             // 
@@ -92,7 +93,7 @@
             this.btnLogin.Location = new System.Drawing.Point(240, 12);
             this.btnLogin.Name = "btnLogin";
             this.btnLogin.Size = new System.Drawing.Size(75, 30);
-            this.btnLogin.TabIndex = 3;
+            this.btnLogin.TabIndex = 4;
             this.btnLogin.Text = "로그인";
             this.btnLogin.UseVisualStyleBackColor = true;
             // 
@@ -113,9 +114,27 @@
             this.btnExit.Location = new System.Drawing.Point(325, 12);
             this.btnExit.Name = "btnExit";
             this.btnExit.Size = new System.Drawing.Size(75, 30);
-            this.btnExit.TabIndex = 4;
+            this.btnExit.TabIndex = 5;
             this.btnExit.Text = "종료";
             this.btnExit.UseVisualStyleBackColor = true;
+            // 
+            // txtDeviceName
+            // 
+            this.txtDeviceName.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.txtDeviceName.Location = new System.Drawing.Point(135, 121);
+            this.txtDeviceName.Name = "txtDeviceName";
+            this.txtDeviceName.Size = new System.Drawing.Size(210, 25);
+            this.txtDeviceName.TabIndex = 3;
+            // 
+            // lblDeviceName
+            // 
+            this.lblDeviceName.AutoSize = true;
+            this.lblDeviceName.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.lblDeviceName.Location = new System.Drawing.Point(25, 125);
+            this.lblDeviceName.Name = "lblDeviceName";
+            this.lblDeviceName.Size = new System.Drawing.Size(59, 19);
+            this.lblDeviceName.TabIndex = 3;
+            this.lblDeviceName.Text = "PC 이름";
             // 
             // LoginView
             // 
@@ -123,6 +142,8 @@
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.BackColor = System.Drawing.Color.White;
             this.ClientSize = new System.Drawing.Size(420, 300);
+            this.Controls.Add(this.txtDeviceName);
+            this.Controls.Add(this.lblDeviceName);
             this.Controls.Add(this.pnlBottom);
             this.Controls.Add(this.lblMessage);
             this.Controls.Add(this.txtStorePassword);
@@ -153,5 +174,7 @@
         private System.Windows.Forms.Button btnLogin;
         private System.Windows.Forms.Panel pnlBottom;
         private System.Windows.Forms.Button btnExit;
+        private System.Windows.Forms.TextBox txtDeviceName;
+        private System.Windows.Forms.Label lblDeviceName;
     }
 }

@@ -55,6 +55,7 @@
     <Compile Include="Enums\ViewerConfigSyncStatus.cs" />
     <Compile Include="Mappers\ViewerConfigApiMapper.cs" />
     <Compile Include="Models\Api\ApiResponseDto.cs" />
+    <Compile Include="Models\Api\AuthTokenDto.cs" />
     <Compile Include="Models\Api\ConfigLatestRequestDto.cs" />
     <Compile Include="Models\Api\ConfigSyncRequestDto.cs" />
     <Compile Include="Models\Api\ConfigSyncResponseDto.cs" />

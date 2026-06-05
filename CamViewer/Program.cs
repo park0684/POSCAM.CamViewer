@@ -1,9 +1,11 @@
 ﻿using CamViewer.Factories;
 using CamViewer.Infrastructure;
-using CamViewer.Presenters;
-using CamViewer.Views;
-using CamViewerClient.Models.Config;
 using CamViewer.Nvr.Core.Providers;
+using CamViewer.Presenters;
+using CamViewer.Services;
+using CamViewer.Views;
+using CamViewerClient;
+using CamViewerClient.Models.Config;
 using System;
 using System.IO;
 using System.Windows.Forms;
@@ -73,7 +75,19 @@ namespace CamViewer
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            DevelopmentSettingsLauncher.Run();
+            var loginView = new LoginView();
+
+            var presenter = new LoginPresenter(
+                loginView,
+                new CamViewerClientFacade(),
+                new ClientEnvironmentProvider());
+
+            bool loginSuccess = presenter.ShowDialog();
+
+            MessageBox.Show(
+                loginSuccess
+                    ? "로그인 성공"
+                    : "로그인 취소");
 
         }
     }

@@ -9,11 +9,6 @@
     public sealed class ViewerDeviceReleaseRequestDto
     {
         /// <summary>
-        /// 매장 코드.
-        /// </summary>
-        public int StoreCode { get; set; }
-
-        /// <summary>
         /// 매장 로그인 ID.
         /// </summary>
         public string StoreId { get; set; }
