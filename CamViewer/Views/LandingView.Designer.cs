@@ -31,13 +31,13 @@
             this.label1 = new System.Windows.Forms.Label();
             this.label2 = new System.Windows.Forms.Label();
             this.pnlBody = new System.Windows.Forms.Panel();
+            this.lblDetailMessage = new System.Windows.Forms.Label();
+            this.progressBar = new System.Windows.Forms.ProgressBar();
+            this.lblStatus = new System.Windows.Forms.Label();
             this.pnlBottom = new System.Windows.Forms.Panel();
+            this.btnSettings = new System.Windows.Forms.Button();
             this.pnlHeader = new System.Windows.Forms.Panel();
             this.lblTitle = new System.Windows.Forms.Label();
-            this.lblStatus = new System.Windows.Forms.Label();
-            this.progressBar = new System.Windows.Forms.ProgressBar();
-            this.lblDetailMessage = new System.Windows.Forms.Label();
-            this.btnSettings = new System.Windows.Forms.Button();
             this.pnlBody.SuspendLayout();
             this.pnlBottom.SuspendLayout();
             this.pnlHeader.SuspendLayout();
@@ -77,6 +77,33 @@
             this.pnlBody.Size = new System.Drawing.Size(720, 420);
             this.pnlBody.TabIndex = 1;
             // 
+            // lblDetailMessage
+            // 
+            this.lblDetailMessage.AutoSize = true;
+            this.lblDetailMessage.Location = new System.Drawing.Point(343, 303);
+            this.lblDetailMessage.Name = "lblDetailMessage";
+            this.lblDetailMessage.Size = new System.Drawing.Size(0, 15);
+            this.lblDetailMessage.TabIndex = 2;
+            this.lblDetailMessage.TextAlign = System.Drawing.ContentAlignment.TopCenter;
+            // 
+            // progressBar
+            // 
+            this.progressBar.Location = new System.Drawing.Point(170, 244);
+            this.progressBar.Name = "progressBar";
+            this.progressBar.Size = new System.Drawing.Size(360, 20);
+            this.progressBar.Style = System.Windows.Forms.ProgressBarStyle.Marquee;
+            this.progressBar.TabIndex = 0;
+            // 
+            // lblStatus
+            // 
+            this.lblStatus.AutoSize = true;
+            this.lblStatus.Location = new System.Drawing.Point(273, 212);
+            this.lblStatus.Name = "lblStatus";
+            this.lblStatus.Size = new System.Drawing.Size(154, 15);
+            this.lblStatus.TabIndex = 1;
+            this.lblStatus.Text = "캠뷰어 실행 준비 중입니다.";
+            this.lblStatus.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
+            // 
             // pnlBottom
             // 
             this.pnlBottom.Controls.Add(this.btnSettings);
@@ -86,6 +113,18 @@
             this.pnlBottom.Name = "pnlBottom";
             this.pnlBottom.Size = new System.Drawing.Size(720, 60);
             this.pnlBottom.TabIndex = 2;
+            // 
+            // btnSettings
+            // 
+            this.btnSettings.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
+            this.btnSettings.FlatAppearance.BorderColor = System.Drawing.Color.Silver;
+            this.btnSettings.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.btnSettings.Location = new System.Drawing.Point(620, 15);
+            this.btnSettings.Name = "btnSettings";
+            this.btnSettings.Size = new System.Drawing.Size(80, 30);
+            this.btnSettings.TabIndex = 0;
+            this.btnSettings.Text = "설정";
+            this.btnSettings.UseVisualStyleBackColor = true;
             // 
             // pnlHeader
             // 
@@ -105,45 +144,6 @@
             this.lblTitle.TabIndex = 0;
             this.lblTitle.Text = "POSCAM 캠뷰어";
             // 
-            // lblStatus
-            // 
-            this.lblStatus.AutoSize = true;
-            this.lblStatus.Location = new System.Drawing.Point(273, 212);
-            this.lblStatus.Name = "lblStatus";
-            this.lblStatus.Size = new System.Drawing.Size(154, 15);
-            this.lblStatus.TabIndex = 1;
-            this.lblStatus.Text = "캠뷰어 실행 준비 중입니다.";
-            this.lblStatus.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
-            // 
-            // progressBar
-            // 
-            this.progressBar.Location = new System.Drawing.Point(170, 244);
-            this.progressBar.Name = "progressBar";
-            this.progressBar.Size = new System.Drawing.Size(360, 20);
-            this.progressBar.Style = System.Windows.Forms.ProgressBarStyle.Marquee;
-            this.progressBar.TabIndex = 0;
-            // 
-            // lblDetailMessage
-            // 
-            this.lblDetailMessage.AutoSize = true;
-            this.lblDetailMessage.Location = new System.Drawing.Point(343, 303);
-            this.lblDetailMessage.Name = "lblDetailMessage";
-            this.lblDetailMessage.Size = new System.Drawing.Size(0, 15);
-            this.lblDetailMessage.TabIndex = 2;
-            this.lblDetailMessage.TextAlign = System.Drawing.ContentAlignment.TopCenter;
-            // 
-            // btnSettings
-            // 
-            this.btnSettings.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-            this.btnSettings.FlatAppearance.BorderColor = System.Drawing.Color.Silver;
-            this.btnSettings.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-            this.btnSettings.Location = new System.Drawing.Point(620, 15);
-            this.btnSettings.Name = "btnSettings";
-            this.btnSettings.Size = new System.Drawing.Size(80, 30);
-            this.btnSettings.TabIndex = 0;
-            this.btnSettings.Text = "설정";
-            this.btnSettings.UseVisualStyleBackColor = true;
-            // 
             // LandingView
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
@@ -160,6 +160,7 @@
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.Name = "LandingView";
+            this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = " POSCAM 캠뷰어";
             this.pnlBody.ResumeLayout(false);
             this.pnlBody.PerformLayout();

@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
-using CamViewer.Nvr.Core.Abstractions;
 using CamViewer.Nvr.Core.Models;
 using CamViewer.Nvr.Core.Results;
 

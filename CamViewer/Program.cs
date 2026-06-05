@@ -1,11 +1,10 @@
-﻿using CamViewer.Factories;
-using CamViewer.Infrastructure;
+﻿using CamViewer.Interfaces;
 using CamViewer.Nvr.Core.Providers;
+using CamViewer.Nvr.Core.Results;
 using CamViewer.Presenters;
 using CamViewer.Services;
 using CamViewer.Views;
 using CamViewerClient;
-using CamViewerClient.Models.Config;
 using System;
 using System.IO;
 using System.Windows.Forms;
@@ -20,75 +19,99 @@ namespace CamViewer
         [STAThread]
         private static void Main()
         {
-            //Application.EnableVisualStyles();
-            //Application.SetCompatibleTextRenderingDefault(false);
-
-            //// Provider 등록정보를 관리한다.
-            //var providerCatalog = new NvrProviderCatalog();
-
-            //// providers 폴더의 Provider DLL을 검색하고 등록한다.
-            //var providerLoader = new ProviderAssemblyLoader();
-            //var providerBootstrapper =
-            //    new NvrProviderBootstrapper(
-            //        providerLoader,
-            //        providerCatalog);
-
-            //string providerPath = Path.Combine(
-            //    AppDomain.CurrentDomain.BaseDirectory,
-            //    "providers");
-
-            //providerBootstrapper.LoadAndRegister(providerPath);
-
-            //// ProviderKey를 기준으로 Provider 인스턴스를 생성한다.
-            //var providerFactory =
-            //    new NvrProviderFactory(providerCatalog);
-
-            //// 현재는 서버/로컬 설정 로드 전이므로 임시 설정을 사용한다.
-            //var viewerConfig = new ViewerConfig
-            //{
-            //    StoreCode = 1,
-            //    ConfigVersion = 0,
-            //    NextNvrNo = 1
-            //};
-
-            //var settingsView = new SettingsView();
-            //var settingsViewFactory = new SettingsViewFactory();
-
-            //var settingsPresenter = new SettingsPresenter(
-            //    settingsView,
-            //    settingsViewFactory,
-            //    providerCatalog,
-            //    providerFactory,
-            //    viewerConfig,
-            //    savedConfig =>
-            //    {
-            //        MessageBox.Show(
-            //            "설정 저장 요청이 정상적으로 전달되었습니다.",
-            //            "캠뷰어 설정",
-            //            MessageBoxButtons.OK,
-            //            MessageBoxIcon.Information);
-            //    });
-
-            //// Application.Run(new CounterEditView())를 사용하지 않는다.
-            //settingsPresenter.Show();
-
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            var loginView = new LoginView();
+            var clientFacade = new CamViewerClientFacade();
+            var environmentProvider = new ClientEnvironmentProvider();
 
-            var presenter = new LoginPresenter(
-                loginView,
-                new CamViewerClientFacade(),
-                new ClientEnvironmentProvider());
+            var providerCatalog = new NvrProviderCatalog();
 
-            bool loginSuccess = presenter.ShowDialog();
+            LoadNvrProviders(providerCatalog);
+
+            var providerFactory =
+                new NvrProviderFactory(providerCatalog);
+
+            var settingsFlowService =
+                new SettingsFlowService(
+                    clientFacade,
+                    providerCatalog,
+                    providerFactory);
+
+            var landingView = new LandingView();
+
+            var landingPresenter = new LandingPresenter(
+                landingView,
+                clientFacade,
+                environmentProvider,
+                CreateLoginView,
+                settingsFlowService.OpenSettings,
+                OpenMainTemporary);
+
+            landingPresenter.Show();
+        }
+
+        /// <summary>
+        /// 로그인 View를 생성한다.
+        /// </summary>
+        private static ILoginView CreateLoginView()
+        {
+            return new LoginView();
+        }
+
+        /// <summary>
+        /// 실행 폴더의 providers 하위 DLL을 검색하여 NVR Provider를 등록한다.
+        /// </summary>
+        private static void LoadNvrProviders(
+            NvrProviderCatalog providerCatalog)
+        {
+            string providerPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "providers");
+
+            var providerLoader = new ProviderAssemblyLoader();
+
+            var providerBootstrapper =
+                new NvrProviderBootstrapper(
+                    providerLoader,
+                    providerCatalog);
+
+            ProviderLoadReport loadReport =
+                providerBootstrapper.LoadAndRegister(providerPath);
+
+            if (loadReport.LoadedCount > 0
+                && loadReport.Errors.Count == 0)
+            {
+                return;
+            }
 
             MessageBox.Show(
-                loginSuccess
-                    ? "로그인 성공"
-                    : "로그인 취소");
+                "사용 가능한 NVR Provider를 불러오지 못했거나 일부 오류가 있습니다."
+                + Environment.NewLine
+                + "Provider 경로: "
+                + providerPath
+                + Environment.NewLine
+                + "등록된 Provider 수: "
+                + loadReport.LoadedCount
+                + Environment.NewLine
+                + "오류 수: "
+                + loadReport.Errors.Count,
+                "NVR Provider 로드 확인",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
 
+        /// <summary>
+        /// 메인 화면을 임시로 실행한다.
+        /// 이후 MainView 또는 PlaybackView로 교체한다.
+        /// </summary>
+        private static void OpenMainTemporary()
+        {
+            MessageBox.Show(
+                "메인 화면은 다음 단계에서 연결합니다.",
+                "POSCAM 캠뷰어",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
         }
     }
 }
