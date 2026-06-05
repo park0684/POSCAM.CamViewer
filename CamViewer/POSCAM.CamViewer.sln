@@ -1,0 +1,49 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36623.8
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewer", "CamViewer.csproj", "{95F6C488-7957-49C6-B32C-C7CBE79DB3BD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewerClient", "..\CamViewerClient\CamViewerClient.csproj", "{47F0805C-02D2-4CEC-BCB9-E9647CC494D8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewer.Nvr.Core", "..\CamViewer.Nvr\CamViewerNvr.Core\CamViewer.Nvr.Core.csproj", "{6A2E1715-A4DF-423F-B3A7-3C9AB392A698}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewer.Nvr.Dahua", "..\CamViewer.Nvr\CamViewer.Nvr.Dahua\CamViewer.Nvr.Dahua.csproj", "{EA7A604F-633C-446E-A894-D929E58C0BFA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewer.Nvr.ApiProviders", "..\CamViewer.Nvr\CamViewer.Nvr.ApiProviders\CamViewer.Nvr.ApiProviders.csproj", "{F787A706-B3EE-4E14-BFB6-08038DB92B75}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{95F6C488-7957-49C6-B32C-C7CBE79DB3BD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{95F6C488-7957-49C6-B32C-C7CBE79DB3BD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{95F6C488-7957-49C6-B32C-C7CBE79DB3BD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{95F6C488-7957-49C6-B32C-C7CBE79DB3BD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{47F0805C-02D2-4CEC-BCB9-E9647CC494D8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{47F0805C-02D2-4CEC-BCB9-E9647CC494D8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{47F0805C-02D2-4CEC-BCB9-E9647CC494D8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{47F0805C-02D2-4CEC-BCB9-E9647CC494D8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6A2E1715-A4DF-423F-B3A7-3C9AB392A698}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6A2E1715-A4DF-423F-B3A7-3C9AB392A698}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6A2E1715-A4DF-423F-B3A7-3C9AB392A698}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6A2E1715-A4DF-423F-B3A7-3C9AB392A698}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EA7A604F-633C-446E-A894-D929E58C0BFA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EA7A604F-633C-446E-A894-D929E58C0BFA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EA7A604F-633C-446E-A894-D929E58C0BFA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EA7A604F-633C-446E-A894-D929E58C0BFA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E0E64ABA-9619-42B5-B87C-B1C670459AD3}
+	EndGlobalSection
+EndGlobal
