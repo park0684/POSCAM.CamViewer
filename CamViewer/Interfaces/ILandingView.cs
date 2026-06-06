@@ -64,8 +64,16 @@ namespace CamViewer.Interfaces
         void ShowView();
 
         /// <summary>
+        /// 랜딩페이지를 숨긴다.
+        /// PlayerView로 전환할 때 사용한다.
+        /// </summary>
+        void HideView();
+
+        /// <summary>
         /// 랜딩페이지를 닫는다.
         /// </summary>
         void CloseView();
+
+
     }
 }

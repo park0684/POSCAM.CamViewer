@@ -59,7 +59,7 @@ namespace CamViewer.Nvr.Core.Providers
                 assemblyPaths = Directory
                     .EnumerateFiles(
                         providerRootPath,
-                        "POSCAM.Nvr.*.dll",
+                        "CamViewer.Nvr.*.dll",
                         SearchOption.AllDirectories)
                     .Where(x => !IsCoreAssembly(x))
                     .ToList();
@@ -203,7 +203,7 @@ namespace CamViewer.Nvr.Core.Providers
 
             return string.Equals(
                 fileName,
-                "POSCAM.Nvr.Core.dll",
+                "CamViewer.Nvr.Core.dll",
                 StringComparison.OrdinalIgnoreCase);
         }
 

@@ -1,21 +1,20 @@
-﻿using CamViewer.Interfaces;
+﻿using System;
+using System.IO;
+using System.Windows.Forms;
+using CamViewer.Interfaces;
 using CamViewer.Nvr.Core.Providers;
 using CamViewer.Nvr.Core.Results;
 using CamViewer.Presenters;
 using CamViewer.Services;
 using CamViewer.Views;
 using CamViewerClient;
-using System;
-using System.IO;
-using System.Windows.Forms;
+using CamViewerClient.Models.Config;
+using CamViewerClient.Results;
 
 namespace CamViewer
 {
     internal static class Program
     {
-        /// <summary>
-        /// 애플리케이션의 주 진입점.
-        /// </summary>
         [STAThread]
         private static void Main()
         {
@@ -36,7 +35,8 @@ namespace CamViewer
                 new SettingsFlowService(
                     clientFacade,
                     providerCatalog,
-                    providerFactory);
+                    providerFactory,
+                    environmentProvider);
 
             var landingView = new LandingView();
 
@@ -46,22 +46,16 @@ namespace CamViewer
                 environmentProvider,
                 CreateLoginView,
                 settingsFlowService.OpenSettings,
-                OpenMainTemporary);
+                () => OpenPlayerTemporary(clientFacade));
 
             landingPresenter.Show();
         }
 
-        /// <summary>
-        /// 로그인 View를 생성한다.
-        /// </summary>
         private static ILoginView CreateLoginView()
         {
             return new LoginView();
         }
 
-        /// <summary>
-        /// 실행 폴더의 providers 하위 DLL을 검색하여 NVR Provider를 등록한다.
-        /// </summary>
         private static void LoadNvrProviders(
             NvrProviderCatalog providerCatalog)
         {
@@ -102,16 +96,42 @@ namespace CamViewer
         }
 
         /// <summary>
-        /// 메인 화면을 임시로 실행한다.
-        /// 이후 MainView 또는 PlaybackView로 교체한다.
+        /// PlayerView를 실행한다.
+        /// 현재 단계에서는 실제 NVR 재생 전이며,
+        /// 로컬 설정 기반 화면 표시와 버튼 이벤트만 확인한다.
         /// </summary>
-        private static void OpenMainTemporary()
+        private static void OpenPlayerTemporary(
+            CamViewerClientFacade clientFacade)
         {
-            MessageBox.Show(
-                "메인 화면은 다음 단계에서 연결합니다.",
-                "POSCAM 캠뷰어",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+            ClientResult<ViewerConfig> configResult =
+                clientFacade.LoadLocalConfig();
+
+            if (!configResult.Success || configResult.Data == null)
+            {
+                MessageBox.Show(
+                    "PlayerView를 실행할 설정 정보를 불러오지 못했습니다."
+                    + Environment.NewLine
+                    + configResult.Message,
+                    "POSCAM CamViewer",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+
+                Application.Exit();
+                return;
+            }
+
+            var playerView = new PlayerView();
+
+            playerView.FormClosed += (sender, e) =>
+            {
+                Application.Exit();
+            };
+
+            var playerPresenter = new PlayerPresenter(
+                playerView,
+                configResult.Data);
+
+            playerPresenter.Show();
         }
     }
 }

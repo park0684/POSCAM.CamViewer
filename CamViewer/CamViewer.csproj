@@ -64,13 +64,18 @@
     <Compile Include="Factories\SettingsViewFactory.cs" />
     <Compile Include="Helpers\SettingsViewModelMapper.cs" />
     <Compile Include="Helpers\ViewerConfigCloneHelper.cs" />
-    <Compile Include="Infrastructure\DevelopmentSettingsLauncher.cs" />
+    <None Include="Infrastructure\DevelopmentSettingsLauncher.cs" />
     <Compile Include="Infrastructure\ProviderLoadSmokeTest.cs" />
     <Compile Include="Interfaces\ICounterEditView.cs" />
     <Compile Include="Interfaces\ILandingView.cs" />
     <Compile Include="Interfaces\ILoginView.cs" />
     <Compile Include="Interfaces\INvrEditView.cs" />
+    <Compile Include="Interfaces\IPlayerView.cs" />
     <Compile Include="Interfaces\ISettingsView.cs" />
+    <Compile Include="Models\PlaybackCommand.cs" />
+    <Compile Include="Models\PlaybackState.cs" />
+    <Compile Include="Models\PlayerChannelTarget.cs" />
+    <Compile Include="Models\PlayerPlaybackRequest.cs" />
     <Compile Include="Models\ViewModels\CounterMapKey.cs" />
     <Compile Include="Models\ViewModels\CounterMapListItem.cs" />
     <Compile Include="Models\ViewModels\NvrListItem.cs" />
@@ -80,6 +85,7 @@
     <Compile Include="Presenters\LandingPresenter.cs" />
     <Compile Include="Presenters\LoginPresenter.cs" />
     <Compile Include="Presenters\NvrEditPresenter.cs" />
+    <Compile Include="Presenters\PlayerPresenter.cs" />
     <Compile Include="Presenters\SettingsPresenter.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
@@ -111,6 +117,12 @@
     <Compile Include="Views\NvrEditView.Designer.cs">
       <DependentUpon>NvrEditView.cs</DependentUpon>
     </Compile>
+    <Compile Include="Views\PlayerView.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Views\PlayerView.Designer.cs">
+      <DependentUpon>PlayerView.cs</DependentUpon>
+    </Compile>
     <Compile Include="Views\SettingsView.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -138,6 +150,9 @@
     </EmbeddedResource>
     <EmbeddedResource Include="Views\NvrEditView.resx">
       <DependentUpon>NvrEditView.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Views\PlayerView.resx">
+      <DependentUpon>PlayerView.cs</DependentUpon>
     </EmbeddedResource>
     <EmbeddedResource Include="Views\SettingsView.resx">
       <DependentUpon>SettingsView.cs</DependentUpon>
@@ -176,6 +191,42 @@
       <Project>{47f0805c-02d2-4cec-bcb9-e9647cc494d8}</Project>
       <Name>CamViewerClient</Name>
     </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Search.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\FastReverse.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Paly.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Reverse.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Forward.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\FastForward.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Pause.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Config.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\UnderBar.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Maximum.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Minimum.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Close.png" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

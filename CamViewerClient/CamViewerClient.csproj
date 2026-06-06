@@ -54,14 +54,17 @@
     <Compile Include="Enums\ScreenPosition.cs" />
     <Compile Include="Enums\ViewerConfigSyncStatus.cs" />
     <Compile Include="Mappers\ViewerConfigApiMapper.cs" />
+    <Compile Include="Mappers\ViewerConfigSyncMapper.cs" />
     <Compile Include="Models\Api\ApiResponseDto.cs" />
     <Compile Include="Models\Api\AuthTokenDto.cs" />
+    <Compile Include="Models\Api\ChannelConfigDto.cs" />
     <Compile Include="Models\Api\ConfigLatestRequestDto.cs" />
     <Compile Include="Models\Api\ConfigSyncRequestDto.cs" />
     <Compile Include="Models\Api\ConfigSyncResponseDto.cs" />
     <Compile Include="Models\Api\ConfigVersionRequestDto.cs" />
     <Compile Include="Models\Api\ConfigVersionResponseDto.cs" />
     <Compile Include="Models\Api\CounterMapServerDto.cs" />
+    <Compile Include="Models\Api\NvrConfigDto.cs" />
     <Compile Include="Models\Api\NvrConfigServerDto.cs" />
     <Compile Include="Models\Api\PlaybackOptionServerDto.cs" />
     <Compile Include="Models\Api\ViewerAuthApiClient.cs" />

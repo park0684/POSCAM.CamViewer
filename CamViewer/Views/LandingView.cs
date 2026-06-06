@@ -95,6 +95,16 @@ namespace CamViewer.Views
             Application.Run(this);
         }
 
+
+        /// <summary>
+        /// 랜딩페이지를 숨긴다.
+        /// </summary>
+        public void HideView()
+        {
+            Hide();
+        }
+
+
         /// <summary>
         /// 랜딩페이지를 닫는다.
         /// </summary>

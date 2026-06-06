@@ -27,8 +27,10 @@ namespace CamViewer.Presenters
         private readonly CamViewerClientFacade _clientFacade;
         private readonly IClientEnvironmentProvider _environmentProvider;
         private readonly Func<ILoginView> _loginViewFactory;
-        private readonly Action _openSettingsAction;
-        private readonly Action _openMainAction;
+        //private readonly Action _openSettingsAction; _openSettingsFunc로 대체
+        private readonly Action _openPlayerAction;
+        private bool _playerOpened;
+        private readonly Func<bool> _openSettingsFunc;
 
         private bool _isRunning;
 
@@ -40,8 +42,8 @@ namespace CamViewer.Presenters
             CamViewerClientFacade clientFacade,
             IClientEnvironmentProvider environmentProvider,
             Func<ILoginView> loginViewFactory,
-            Action openSettingsAction,
-            Action openMainAction)
+            Func<bool> opneSettingFunc,
+            Action openPlayerAction)
         {
             if (view == null)
             {
@@ -67,8 +69,8 @@ namespace CamViewer.Presenters
             _clientFacade = clientFacade;
             _environmentProvider = environmentProvider;
             _loginViewFactory = loginViewFactory;
-            _openSettingsAction = openSettingsAction;
-            _openMainAction = openMainAction;
+            _openSettingsFunc = opneSettingFunc;
+            _openPlayerAction = openPlayerAction;
 
             _view.LoadViewEvent += OnLoadView;
             _view.SettingsEvent += OnSettings;
@@ -92,8 +94,9 @@ namespace CamViewer.Presenters
 
         /// <summary>
         /// 설정 버튼 클릭 시 로그인창을 띄운 뒤 설정 화면을 연다.
+        /// 설정 저장에 성공하면 시작 흐름을 다시 실행한다.
         /// </summary>
-        private void OnSettings(object sender, EventArgs e)
+        private async void OnSettings(object sender, EventArgs e)
         {
             if (_isRunning)
             {
@@ -107,57 +110,16 @@ namespace CamViewer.Presenters
                 return;
             }
 
-            if (_openSettingsAction != null)
-            {
-                _openSettingsAction();
-            }
-        }
-
-        /// <summary>
-        /// 프로그램 시작 시 인증 및 설정 확인 흐름을 실행한다.
-        /// </summary>
-        private async Task RunStartupFlowAsync()
-        {
-            if (_isRunning)
+            if (_openSettingsFunc == null)
             {
                 return;
             }
 
-            try
+            bool saved = _openSettingsFunc();
+
+            if (saved)
             {
-                _isRunning = true;
-
-                _view.SetSettingsEnabled(false);
-                _view.SetProgressVisible(true);
-                _view.SetStatus("캠뷰어 인증 정보를 확인하고 있습니다.");
-                _view.SetDetailMessage(string.Empty);
-
-                if (!_clientFacade.HasLocalToken())
-                {
-                    _view.SetProgressVisible(false);
-                    _view.ShowMessage(
-                        "캠뷰어 인증 정보가 없습니다."
-                        + Environment.NewLine
-                        + "캠뷰어를 사용하려면 로그인이 필요합니다.");
-
-                    bool loginSuccess = ShowLoginView();
-
-                    if (!loginSuccess)
-                    {
-                        _view.CloseView();
-                        return;
-                    }
-
-                    await RunStartupFlowAsync();
-                    return;
-                }
-
-                await VerifyTokenAndContinueAsync();
-            }
-            finally
-            {
-                _isRunning = false;
-                _view.SetSettingsEnabled(true);
+                await RunStartupFlowAsync();
             }
         }
 
@@ -210,6 +172,66 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
+        /// 프로그램 시작 시 인증 및 설정 확인 흐름을 실행한다.
+        /// 중복 실행을 방지하는 외부 진입점이다.
+        /// </summary>
+        private async Task RunStartupFlowAsync()
+        {
+            if (_isRunning)
+            {
+                return;
+            }
+
+            try
+            {
+                _isRunning = true;
+                _view.SetSettingsEnabled(false);
+
+                await RunStartupFlowCoreAsync();
+            }
+            finally
+            {
+                _isRunning = false;
+                _view.SetSettingsEnabled(true);
+            }
+        }
+
+        /// <summary>
+        /// 실제 인증 및 설정 확인 흐름을 처리한다.
+        /// 내부에서 재실행이 필요할 때는 이 메서드를 호출한다.
+        /// </summary>
+        private async Task RunStartupFlowCoreAsync()
+        {
+            _view.SetProgressVisible(true);
+            _view.SetStatus("캠뷰어 인증 정보를 확인하고 있습니다.");
+            _view.SetDetailMessage(string.Empty);
+
+            if (!_clientFacade.HasLocalToken())
+            {
+                _view.SetProgressVisible(false);
+
+                _view.ShowMessage(
+                    "캠뷰어 인증 정보가 없습니다."
+                    + Environment.NewLine
+                    + "캠뷰어를 사용하려면 로그인이 필요합니다.");
+
+                bool loginSuccess = ShowLoginView();
+
+                if (!loginSuccess)
+                {
+                    _view.CloseView();
+                    return;
+                }
+
+                await RunStartupFlowCoreAsync();
+                return;
+            }
+
+            await VerifyTokenAndContinueAsync();
+        }
+
+
+        /// <summary>
         /// 서버 접속 실패 시 오프라인 실행 가능 여부를 확인한다.
         /// </summary>
         private void HandleOfflineFlow()
@@ -225,7 +247,7 @@ namespace CamViewer.Presenters
                     + Environment.NewLine
                     + "오프라인 실행 허용 기간 내이므로 캠뷰어를 실행합니다.");
 
-                ContinueToMain();
+                ContinueToPlayer();
                 return;
             }
 
@@ -256,13 +278,12 @@ namespace CamViewer.Presenters
             if (!_clientFacade.HasLocalConfig())
             {
                 _view.SetProgressVisible(false);
+
                 _view.ShowMessage(
                     "로컬 설정 정보가 없습니다."
                     + Environment.NewLine
-                    + "서버에서 캠뷰어 설정 정보를 가져오거나 설정 화면에서 등록해야 합니다.");
+                    + "설정 화면에서 캠뷰어 설정을 등록해 주세요.");
 
-                // 서버 설정 다운로드 API가 완성되면 여기에서 다운로드를 시도한다.
-                // 현재는 설정 화면으로 유도한다.
                 bool loginSuccess = ShowLoginView();
 
                 if (!loginSuccess)
@@ -271,9 +292,16 @@ namespace CamViewer.Presenters
                     return;
                 }
 
-                if (_openSettingsAction != null)
+                if (_openSettingsFunc == null)
                 {
-                    _openSettingsAction();
+                    return;
+                }
+
+                bool saved = _openSettingsFunc();
+
+                if (saved)
+                {
+                    await RunStartupFlowCoreAsync();
                 }
 
                 return;
@@ -285,6 +313,7 @@ namespace CamViewer.Presenters
             if (!loadConfigResult.Success)
             {
                 _view.SetProgressVisible(false);
+
                 _view.ShowMessage(
                     "로컬 설정 정보를 불러올 수 없습니다."
                     + Environment.NewLine
@@ -300,9 +329,16 @@ namespace CamViewer.Presenters
                     return;
                 }
 
-                if (_openSettingsAction != null)
+                if (_openSettingsFunc == null)
                 {
-                    _openSettingsAction();
+                    return;
+                }
+
+                bool saved = _openSettingsFunc();
+
+                if (saved)
+                {
+                    await RunStartupFlowCoreAsync();
                 }
 
                 return;
@@ -311,7 +347,7 @@ namespace CamViewer.Presenters
             // 이후 단계에서 서버 설정 버전 확인 api/config/version을 연결한다.
             await Task.CompletedTask;
 
-            ContinueToMain();
+            ContinueToPlayer();
         }
 
         /// <summary>
@@ -331,23 +367,33 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
-        /// 메인 화면으로 진행한다.
-        /// 현재는 메인 화면 구현 전이므로 임시 메시지만 표시한다.
+        /// PlayerView로 전환한다.
+        ///
+        /// LandingView는 Application.Run의 메인 Form이므로 닫지 않고 숨긴다.
+        /// PlayerView가 종료되면 Program.cs에서 Application.Exit()을 호출한다.
         /// </summary>
-        private void ContinueToMain()
+        private void ContinueToPlayer()
         {
+            if (_playerOpened)
+            {
+                return;
+            }
+
             _view.SetProgressVisible(false);
             _view.SetStatus("캠뷰어 실행 준비가 완료되었습니다.");
-            _view.SetDetailMessage("메인 화면 진입 준비 완료");
+            _view.SetDetailMessage("PlayerView를 실행합니다.");
 
-            if (_openMainAction != null)
+            if (_openPlayerAction == null)
             {
-                _openMainAction();
+                _view.ShowMessage("PlayerView 실행 구성이 없습니다.");
+                return;
             }
-            else
-            {
-                _view.ShowMessage("메인 화면 진입 준비가 완료되었습니다.");
-            }
+
+            _playerOpened = true;
+
+            _view.HideView();
+
+            _openPlayerAction();
         }
 
         /// <summary>

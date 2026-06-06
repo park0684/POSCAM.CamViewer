@@ -182,7 +182,9 @@ namespace CamViewerClient
         /// </summary>
         public async Task<ClientResult<ViewerConfig>> SyncServerConfigAsync(
             string token,
-            int deviceCode,
+            string hwid,
+            string modifiedBy,
+            string programVersion,
             ViewerConfig config,
             CancellationToken cancellationToken)
         {
@@ -193,14 +195,23 @@ namespace CamViewerClient
                     "CONFIG_REQUIRED");
             }
 
-            var request = new ConfigSyncRequestDto
+            ConfigSyncRequestDto request;
+
+            try
             {
-                Token = token,
-                StoreCode = config.StoreCode,
-                DeviceCode = deviceCode,
-                BaseConfigVersion = config.ConfigVersion,
-                Config = ViewerConfigApiMapper.ToServerDto(config)
-            };
+                request = ViewerConfigSyncMapper.ToSyncRequest(
+                    config,
+                    token,
+                    hwid,
+                    modifiedBy,
+                    programVersion);
+            }
+            catch (Exception ex)
+            {
+                return ClientResult<ViewerConfig>.Fail(
+                    ex.Message,
+                    "CONFIG_SYNC_MAP_FAILED");
+            }
 
             ClientResult<ConfigSyncResponseDto> syncResult =
                 await _configApiClient.SyncConfigAsync(
@@ -214,20 +225,9 @@ namespace CamViewerClient
                     syncResult.ErrorCode);
             }
 
-            if (syncResult.Data != null && syncResult.Data.Config != null)
-            {
-                ViewerConfig syncedConfig =
-                    ViewerConfigApiMapper.ToLocalConfig(
-                        syncResult.Data.Config);
-
-                return ClientResult<ViewerConfig>.Ok(
-                    syncedConfig,
-                    "캠뷰어 설정정보를 서버와 동기화했습니다.");
-            }
-
-            config.ConfigVersion = syncResult.Data == null
-                ? config.ConfigVersion
-                : syncResult.Data.ConfigVersion;
+            ViewerConfigSyncMapper.ApplySyncResponse(
+                config,
+                syncResult.Data);
 
             return ClientResult<ViewerConfig>.Ok(
                 config,

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Linq;
+using System.Threading.Tasks;
 using CamViewerClient.Validation;
 using CamViewer.Factories;
 using CamViewer.Helpers;
@@ -26,7 +27,9 @@ namespace CamViewer.Presenters
         private readonly ISettingsViewFactory _viewFactory;
         private readonly INvrProviderCatalog _providerCatalog;
         private readonly INvrProviderFactory _providerFactory;
-        private readonly Action<ViewerConfig> _onSaveRequested;
+        //private readonly Action<ViewerConfig> _onSaveRequested;
+
+        private readonly Func<ViewerConfig, Task<bool>> _onSaveRequested;
         private readonly ViewerConfigValidator _validator;
 
         private readonly ViewerConfig _workingConfig;
@@ -48,7 +51,7 @@ namespace CamViewer.Presenters
             INvrProviderCatalog providerCatalog,
             INvrProviderFactory providerFactory,
             ViewerConfig viewerConfig,
-            Action<ViewerConfig> onSaveRequested)
+            Func<ViewerConfig, Task<bool>> onSaveRequested)
         {
             if (view == null)
             {
@@ -314,8 +317,9 @@ namespace CamViewer.Presenters
 
         /// <summary>
         /// 설정 전체를 검증하고 저장 요청을 상위 흐름에 전달한다.
+        /// 저장이 성공한 경우에만 설정 화면을 닫는다.
         /// </summary>
-        private void OnSave(object sender, EventArgs e)
+        private async void OnSave(object sender, EventArgs e)
         {
             ConfigValidationResult validationResult =
                 _validator.Validate(_workingConfig);
@@ -333,8 +337,15 @@ namespace CamViewer.Presenters
             _workingConfig.SyncStatus =
                 ViewerConfigSyncStatus.LocalModified;
 
-            _onSaveRequested(
+            bool saved = await _onSaveRequested(
                 ViewerConfigCloneHelper.Clone(_workingConfig));
+
+            if (!saved)
+            {
+                return;
+            }
+
+            _view.CloseView();
         }
 
         /// <summary>

@@ -1,15 +1,13 @@
 ﻿using CamViewer.Nvr.Core.Abstractions;
-using POSCAM.Nvr.Core.Abstractions;
-using POSCAM.Nvr.Core.Attributes;
-using POSCAM.Nvr.Core.Enums;
-using POSCAM.Nvr.Core.Models;
-using POSCAM.Nvr.Core.Results;
+using CamViewer.Nvr.Core.Attributes;
+using CamViewer.Nvr.Core.Enums;
+using CamViewer.Nvr.Core.Models;
+using CamViewer.Nvr.Core.Results;
 using System;
-using System.Diagnostics.Eventing.Reader;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace POSCAM.Nvr.ApiProviders.Providers
+namespace CamViewer.Nvr.ApiProviders.Providers
 {
     /// <summary>
     /// TP-Link API 기반 NVR Provider의 기본 골격이다.
@@ -49,6 +47,7 @@ namespace POSCAM.Nvr.ApiProviders.Providers
         public bool IsInitialized { get; private set; }
 
         public bool IsLoggedIn { get; private set; }
+
 
         public ProviderCapabilities GetCapabilities()
         {

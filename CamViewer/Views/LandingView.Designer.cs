@@ -59,9 +59,9 @@
             this.label2.Font = new System.Drawing.Font("맑은 고딕", 32F);
             this.label2.Location = new System.Drawing.Point(218, 128);
             this.label2.Name = "label2";
-            this.label2.Size = new System.Drawing.Size(265, 59);
+            this.label2.Size = new System.Drawing.Size(258, 59);
             this.label2.TabIndex = 0;
-            this.label2.Text = "CAM Viewer";
+            this.label2.Text = "Cam Viewer";
             this.label2.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
             // 
             // pnlBody
@@ -80,10 +80,10 @@
             // lblDetailMessage
             // 
             this.lblDetailMessage.AutoSize = true;
-            this.lblDetailMessage.Location = new System.Drawing.Point(343, 303);
+            this.lblDetailMessage.Location = new System.Drawing.Point(304, 303);
             this.lblDetailMessage.Name = "lblDetailMessage";
             this.lblDetailMessage.Size = new System.Drawing.Size(0, 15);
-            this.lblDetailMessage.TabIndex = 2;
+            this.lblDetailMessage.TabIndex = 0;
             this.lblDetailMessage.TextAlign = System.Drawing.ContentAlignment.TopCenter;
             // 
             // progressBar

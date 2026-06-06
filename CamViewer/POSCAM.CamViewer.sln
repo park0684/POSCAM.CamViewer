@@ -13,6 +13,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewer.Nvr.Dahua", "..\C
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewer.Nvr.ApiProviders", "..\CamViewer.Nvr\CamViewer.Nvr.ApiProviders\CamViewer.Nvr.ApiProviders.csproj", "{F787A706-B3EE-4E14-BFB6-08038DB92B75}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "poscam.AuthServer", "..\..\poscam\AuthServer\poscam.AuthServer.csproj", "{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "poscam.AdminWeb", "..\..\poscam\AdminWeb\poscam.AdminWeb.csproj", "{2A003077-AD59-14EE-B3FA-E75B93A643FB}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -39,6 +43,14 @@ Global
 		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -1,10 +1,12 @@
-﻿namespace CamViewerClient.Models.Api
+﻿using System.Collections.Generic;
+
+namespace CamViewerClient.Models.Api
 {
     /// <summary>
     /// 캠뷰어 설정 동기화 요청 DTO이다.
     ///
-    /// AuthServer의 ConfigSyncRequest와 속성명이 다르면
-    /// 이 DTO를 서버 DTO에 맞게 조정한다.
+    /// AuthServer endpoint:
+    /// POST api/config/sync
     /// </summary>
     public sealed class ConfigSyncRequestDto
     {
@@ -14,23 +16,49 @@
         public string Token { get; set; }
 
         /// <summary>
-        /// 업로드 대상 매장 코드.
+        /// 현재 캠뷰어 장비 HWID.
         /// </summary>
-        public int StoreCode { get; set; }
+        public string Hwid { get; set; }
 
         /// <summary>
-        /// 캠뷰어 장비 코드.
+        /// NVR 설정 정보.
+        /// 현재 AuthServer는 단일 NVR 설정 기준이다.
         /// </summary>
-        public int DeviceCode { get; set; }
+        public NvrConfigDto NvrConfig { get; set; }
 
         /// <summary>
-        /// 클라이언트가 기준으로 삼은 서버 설정 버전.
+        /// 계산대별 채널 매핑 목록.
         /// </summary>
-        public long BaseConfigVersion { get; set; }
+        public List<ChannelConfigDto> Channels { get; set; }
 
         /// <summary>
-        /// 업로드할 설정 데이터.
+        /// 설정 버전.
+        /// 비어 있으면 서버에서 새 버전을 생성한다.
         /// </summary>
-        public ViewerConfigServerDto Config { get; set; }
+        public string ConfigVersion { get; set; }
+
+        /// <summary>
+        /// 수정자.
+        /// </summary>
+        public string ModifiedBy { get; set; }
+
+        /// <summary>
+        /// 프로그램 버전.
+        /// </summary>
+        public string ProgramVersion { get; set; }
+
+        /// <summary>
+        /// 요청 DTO를 초기화한다.
+        /// </summary>
+        public ConfigSyncRequestDto()
+        {
+            Token = string.Empty;
+            Hwid = string.Empty;
+            NvrConfig = new NvrConfigDto();
+            Channels = new List<ChannelConfigDto>();
+            ConfigVersion = string.Empty;
+            ModifiedBy = string.Empty;
+            ProgramVersion = string.Empty;
+        }
     }
 }
