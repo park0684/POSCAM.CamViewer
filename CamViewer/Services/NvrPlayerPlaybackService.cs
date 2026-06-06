@@ -32,6 +32,7 @@ namespace CamViewer.Services
 
         private PlayerPlaybackRequest _currentRequest;
         private DateTime? _currentPlaybackTime;
+        private DateTime? _playbackClockStartedAtUtc;
 
         /// <summary>
         /// 현재 재생 상태.
@@ -85,8 +86,8 @@ namespace CamViewer.Services
                 return stopResult;
             }
 
-            _currentRequest = request;
-            _currentPlaybackTime = request.PlayStartTime;
+
+            CurrentState = PlaybackState.Playing;
 
             foreach (PlayerChannelTarget channel in request.Channels)
             {
@@ -102,14 +103,65 @@ namespace CamViewer.Services
                     return playChannelResult;
                 }
             }
-
             CurrentState = PlaybackState.Playing;
+
+
+            _currentRequest = request;
+            _currentPlaybackTime = request.PlayStartTime;
+            _playbackClockStartedAtUtc = DateTime.UtcNow;
 
             return PlayerPlaybackResult.Ok(
                 "NVR 재생을 시작했습니다. "
                 + request.PlayStartTime.ToString("yyyy-MM-dd HH:mm:ss")
                 + " ~ "
                 + request.PlayEndTime.ToString("yyyy-MM-dd HH:mm:ss"));
+        }
+
+        /// <summary>
+        /// 현재 재생 위치를 추정해서 반환한다.
+        /// 
+        /// NVR SDK에서 현재 재생 위치를 직접 제공하지 않는 단계에서는
+        /// 마지막 기준 재생시각 + 실제 경과시간으로 현재 위치를 계산한다.
+        /// </summary>
+        private DateTime GetEstimatedPlaybackTime()
+        {
+            if (!_currentPlaybackTime.HasValue)
+            {
+                return _currentRequest == null
+                    ? DateTime.Now
+                    : _currentRequest.PlayStartTime;
+            }
+
+            if (CurrentState != PlaybackState.Playing)
+            {
+                return _currentPlaybackTime.Value;
+            }
+
+            if (!_playbackClockStartedAtUtc.HasValue)
+            {
+                return _currentPlaybackTime.Value;
+            }
+
+            TimeSpan elapsed =
+                DateTime.UtcNow - _playbackClockStartedAtUtc.Value;
+
+            return _currentPlaybackTime.Value.Add(elapsed);
+        }
+
+        /// <summary>
+        /// 현재 재생 중인 영상 시각.
+        /// </summary>
+        public DateTime? CurrentPlaybackTime
+        {
+            get
+            {
+                if (_currentRequest == null)
+                {
+                    return null;
+                }
+
+                return GetEstimatedPlaybackTime();
+            }
         }
 
         /// <summary>
@@ -145,6 +197,8 @@ namespace CamViewer.Services
                 }
             }
 
+            _currentPlaybackTime = GetEstimatedPlaybackTime();
+            _playbackClockStartedAtUtc = null;
             CurrentState = PlaybackState.Paused;
 
             return PlayerPlaybackResult.Ok("일시정지했습니다.");
@@ -183,6 +237,7 @@ namespace CamViewer.Services
                 }
             }
 
+            _playbackClockStartedAtUtc = DateTime.UtcNow;
             CurrentState = PlaybackState.Playing;
 
             return PlayerPlaybackResult.Ok("재생을 재개했습니다.");
@@ -214,8 +269,11 @@ namespace CamViewer.Services
                 _currentPlaybackTime = _currentRequest.PlayStartTime;
             }
 
+            DateTime currentTime =
+                GetEstimatedPlaybackTime();
+
             DateTime targetTime =
-                _currentPlaybackTime.Value.AddSeconds(seconds);
+                currentTime.AddSeconds(seconds);
 
             if (targetTime < _currentRequest.PlayStartTime)
             {
@@ -254,6 +312,7 @@ namespace CamViewer.Services
             }
 
             _currentPlaybackTime = targetTime;
+            _playbackClockStartedAtUtc = DateTime.UtcNow;
             CurrentState = PlaybackState.Playing;
 
             return PlayerPlaybackResult.Ok(
@@ -325,6 +384,7 @@ namespace CamViewer.Services
 
             _currentRequest = null;
             _currentPlaybackTime = null;
+            _playbackClockStartedAtUtc = null;
             CurrentState = PlaybackState.Stopped;
 
             return PlayerPlaybackResult.Ok("재생을 중지했습니다.");

@@ -25,6 +25,11 @@ namespace CamViewer.Interfaces
         int SearchAdjustSeconds { get; }
 
         /// <summary>
+        /// 영상 재생 시간. 단위는 초.
+        /// </summary>
+        int PlayAdjustSeconds { get; }
+
+        /// <summary>
         /// 좌측 영상 출력 패널 Handle.
         /// NVR SDK 재생 시 사용한다.
         /// </summary>
@@ -92,6 +97,11 @@ namespace CamViewer.Interfaces
         event EventHandler CloseEvent;
 
         /// <summary>
+        /// 재생 시간 갱신 타이머가 Tick될 때 발생한다.
+        /// </summary>
+        event EventHandler PlaybackTimerTickEvent;
+
+        /// <summary>
         /// 계산대번호 목록을 설정한다.
         /// </summary>
         void SetCounterNumbers(IEnumerable<int> counterNumbers);
@@ -117,9 +127,9 @@ namespace CamViewer.Interfaces
         void SetRightVideoTitle(string title);
 
         /// <summary>
-        /// 현재 영상재생일시를 표시한다.
+        /// 현재 영상재생시간을 표시한다.
         /// </summary>
-        void SetPlaybackDateTime(DateTime? playbackDateTime);
+        void SetPlaybackDateTime(DateTime? playBackTime);
 
         /// <summary>
         /// 재생 상태에 맞게 버튼 표시를 변경한다.
@@ -150,5 +160,20 @@ namespace CamViewer.Interfaces
         /// PlayerView를 최소화한다.
         /// </summary>
         void MinimizeView();
+        /// <summary>
+        /// 현재 영상재생시간을 표시한다.
+        /// </summary>
+        void SetPlaybackTime(DateTime? playbackTime);
+
+
+        /// <summary>
+        /// 재생 시간 갱신 타이머를 시작한다.
+        /// </summary>
+        void StartPlaybackTimer();
+
+        /// <summary>
+        /// 재생 시간 갱신 타이머를 중지한다.
+        /// </summary>
+        void StopPlaybackTimer();
     }
 }

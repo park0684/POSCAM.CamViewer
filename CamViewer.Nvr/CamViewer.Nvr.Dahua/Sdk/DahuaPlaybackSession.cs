@@ -175,10 +175,14 @@ namespace CamViewer.Nvr.Dahua.Sdk
 
         /// <summary>
         /// Seek 또는 재재생 시 기존 재생 핸들을 새 핸들로 교체한다.
+        ///
+        /// 주의:
+        /// StartTime과 EndTime은 사용자가 지정한 전체 조회 구간이므로 변경하지 않는다.
+        /// Seek 후 현재 재생 위치만 변경한다.
         /// </summary>
         public void ReplacePlaybackHandle(
             IntPtr playbackHandle,
-            DateTime startTime)
+            DateTime currentPlaybackTime)
         {
             if (PlaybackHandle != IntPtr.Zero)
             {
@@ -186,11 +190,9 @@ namespace CamViewer.Nvr.Dahua.Sdk
             }
 
             PlaybackHandle = playbackHandle;
-            StartTime = startTime;
-            CurrentPlaybackTime = startTime;
 
             SetState(NvrPlaybackState.Playing);
-            SetCurrentPlaybackTime(startTime);
+            SetCurrentPlaybackTime(currentPlaybackTime);
         }
 
         /// <summary>

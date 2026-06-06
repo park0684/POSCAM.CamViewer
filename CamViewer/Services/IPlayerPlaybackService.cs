@@ -1,6 +1,7 @@
-﻿using System.Threading;
+﻿using CamViewer.Models;
+using System;
+using System.Threading;
 using System.Threading.Tasks;
-using CamViewer.Models;
 
 namespace CamViewer.Services
 {
@@ -16,6 +17,12 @@ namespace CamViewer.Services
         /// 현재 재생 상태.
         /// </summary>
         PlaybackState CurrentState { get; }
+
+        /// <summary>
+        /// 현재 재생 중인 영상 시각.
+        /// 재생 중이면 경과 시간을 반영한 추정 시각을 반환한다.
+        /// </summary>
+        DateTime? CurrentPlaybackTime { get; }
 
         /// <summary>
         /// 재생 요청을 시작한다.

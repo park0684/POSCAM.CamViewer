@@ -61,6 +61,9 @@
             this.btnSettings = new System.Windows.Forms.Button();
             this.lblTitle = new System.Windows.Forms.Label();
             this.pnlBody = new System.Windows.Forms.Panel();
+            this.label1 = new System.Windows.Forms.Label();
+            this.nudPlaydjustSeconds = new System.Windows.Forms.NumericUpDown();
+            this.label2 = new System.Windows.Forms.Label();
             this.tlpBody.SuspendLayout();
             this.pnlRightVideo.SuspendLayout();
             this.pnlSearchArea.SuspendLayout();
@@ -69,6 +72,7 @@
             this.pnlLeftVideo.SuspendLayout();
             this.pnlTitleBar.SuspendLayout();
             this.pnlBody.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)(this.nudPlaydjustSeconds)).BeginInit();
             this.SuspendLayout();
             // 
             // tlpBody
@@ -86,7 +90,7 @@
             this.tlpBody.RowCount = 2;
             this.tlpBody.RowStyles.Add(new System.Windows.Forms.RowStyle());
             this.tlpBody.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 250F));
-            this.tlpBody.Size = new System.Drawing.Size(1280, 678);
+            this.tlpBody.Size = new System.Drawing.Size(1280, 858);
             this.tlpBody.TabIndex = 0;
             // 
             // pnlRightVideo
@@ -115,6 +119,9 @@
             // pnlSearchArea
             // 
             this.pnlSearchArea.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(32)))), ((int)(((byte)(32)))), ((int)(((byte)(32)))));
+            this.pnlSearchArea.Controls.Add(this.label1);
+            this.pnlSearchArea.Controls.Add(this.nudPlaydjustSeconds);
+            this.pnlSearchArea.Controls.Add(this.label2);
             this.pnlSearchArea.Controls.Add(this.lblSecondsBefore);
             this.pnlSearchArea.Controls.Add(this.nudSearchAdjustSeconds);
             this.pnlSearchArea.Controls.Add(this.lblSearchAdjust);
@@ -482,21 +489,62 @@
             this.pnlBody.Dock = System.Windows.Forms.DockStyle.Fill;
             this.pnlBody.Location = new System.Drawing.Point(0, 42);
             this.pnlBody.Name = "pnlBody";
-            this.pnlBody.Size = new System.Drawing.Size(1280, 678);
+            this.pnlBody.Size = new System.Drawing.Size(1280, 858);
             this.pnlBody.TabIndex = 2;
+            // 
+            // label1
+            // 
+            this.label1.AutoSize = true;
+            this.label1.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.label1.ForeColor = System.Drawing.Color.White;
+            this.label1.Location = new System.Drawing.Point(266, 190);
+            this.label1.Name = "label1";
+            this.label1.Size = new System.Drawing.Size(23, 19);
+            this.label1.TabIndex = 14;
+            this.label1.Text = "초";
+            // 
+            // nudPlaydjustSeconds
+            // 
+            this.nudPlaydjustSeconds.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.nudPlaydjustSeconds.Location = new System.Drawing.Point(200, 188);
+            this.nudPlaydjustSeconds.Maximum = new decimal(new int[] {
+            300,
+            0,
+            0,
+            0});
+            this.nudPlaydjustSeconds.Name = "nudPlaydjustSeconds";
+            this.nudPlaydjustSeconds.Size = new System.Drawing.Size(60, 25);
+            this.nudPlaydjustSeconds.TabIndex = 13;
+            this.nudPlaydjustSeconds.TextAlign = System.Windows.Forms.HorizontalAlignment.Center;
+            this.nudPlaydjustSeconds.Value = new decimal(new int[] {
+            30,
+            0,
+            0,
+            0});
+            // 
+            // label2
+            // 
+            this.label2.AutoSize = true;
+            this.label2.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.label2.ForeColor = System.Drawing.Color.White;
+            this.label2.Location = new System.Drawing.Point(80, 190);
+            this.label2.Name = "label2";
+            this.label2.Size = new System.Drawing.Size(93, 19);
+            this.label2.TabIndex = 12;
+            this.label2.Text = "영상재생시간";
             // 
             // PlayerView
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(35)))), ((int)(((byte)(35)))), ((int)(((byte)(35)))));
-            this.ClientSize = new System.Drawing.Size(1280, 720);
+            this.ClientSize = new System.Drawing.Size(1280, 900);
             this.Controls.Add(this.pnlBody);
             this.Controls.Add(this.pnlTitleBar);
             this.Font = new System.Drawing.Font("맑은 고딕", 9F);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.None;
             this.Margin = new System.Windows.Forms.Padding(3, 4, 3, 4);
-            this.MinimumSize = new System.Drawing.Size(1100, 650);
+            this.MinimumSize = new System.Drawing.Size(1100, 900);
             this.Name = "PlayerView";
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = "PlayerView";
@@ -513,6 +561,7 @@
             this.pnlTitleBar.ResumeLayout(false);
             this.pnlTitleBar.PerformLayout();
             this.pnlBody.ResumeLayout(false);
+            ((System.ComponentModel.ISupportInitialize)(this.nudPlaydjustSeconds)).EndInit();
             this.ResumeLayout(false);
 
         }
@@ -552,5 +601,8 @@
         private System.Windows.Forms.Button btnResize;
         private System.Windows.Forms.Button btnMinimize;
         private System.Windows.Forms.Panel pnlBody;
+        private System.Windows.Forms.Label label1;
+        private System.Windows.Forms.NumericUpDown nudPlaydjustSeconds;
+        private System.Windows.Forms.Label label2;
     }
 }

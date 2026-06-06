@@ -1,6 +1,7 @@
-﻿using System.Threading;
+﻿using CamViewer.Models;
+using System;
+using System.Threading;
 using System.Threading.Tasks;
-using CamViewer.Models;
 
 namespace CamViewer.Services
 {
@@ -61,6 +62,18 @@ namespace CamViewer.Services
                     + request.PlayEndTime.ToString("yyyy-MM-dd HH:mm:ss")));
         }
 
+        public DateTime? CurrentPlaybackTime
+        {
+            get
+            {
+                if (_currentRequest == null)
+                {
+                    return null;
+                }
+
+                return _currentRequest.PlayStartTime;
+            }
+        }
         /// <summary>
         /// 재생을 일시정지한다.
         /// </summary>

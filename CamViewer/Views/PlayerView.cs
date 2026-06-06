@@ -40,6 +40,8 @@ namespace CamViewer.Views
         private const int WmNclButtonDown = 0xA1;
         private const int HtCaption = 0x2;
 
+        private readonly System.Windows.Forms.Timer _playbackTimer;
+
         [DllImport("user32.dll")]
         private static extern bool ReleaseCapture();
 
@@ -56,6 +58,10 @@ namespace CamViewer.Views
         public PlayerView()
         {
             InitializeComponent();
+
+            _playbackTimer = new System.Windows.Forms.Timer();
+            _playbackTimer.Interval = 1000;
+            _playbackTimer.Tick += OnPlaybackTimerTick;
 
             InitializeControls();
             WireEvents();
@@ -132,6 +138,15 @@ namespace CamViewer.Views
             }
         }
 
+        public int PlayAdjustSeconds
+        {
+            get
+            {
+                return Convert.ToInt32(
+                    nudPlaydjustSeconds.Value);
+            }
+        }
+
         /// <summary>
         /// 좌측 영상 출력 패널 Handle.
         /// </summary>
@@ -159,6 +174,7 @@ namespace CamViewer.Views
         public event EventHandler SettingsEvent;
         public event EventHandler CloseEvent;
         public event EventHandler MinimizeEvent;
+        public event EventHandler PlaybackTimerTickEvent;
 
         /// <summary>
         /// 계산대번호 목록을 설정한다.
@@ -309,6 +325,40 @@ namespace CamViewer.Views
         public void CloseView()
         {
             Close();
+        }
+
+        /// <summary>
+        /// 재생 시간 갱신 타이머를 시작한다.
+        /// </summary>
+        public void StartPlaybackTimer()
+        {
+            _playbackTimer.Start();
+        }
+
+        /// <summary>
+        /// 재생 시간 갱신 타이머를 중지한다.
+        /// </summary>
+        public void StopPlaybackTimer()
+        {
+            _playbackTimer.Stop();
+        }
+
+        /// <summary>
+        /// 현재 영상재생시간을 표시한다.
+        /// </summary>
+        public void SetPlaybackTime(DateTime? playbackTime)
+        {
+            lblPlaybackDateTime.Text = playbackTime.HasValue
+                ? playbackTime.Value.ToString("yyyy-MM-dd HH:mm:ss")
+                : "-";
+        }
+
+        /// <summary>
+        /// 재생 시간 갱신 타이머 Tick을 Presenter에 전달한다.
+        /// </summary>
+        private void OnPlaybackTimerTick(object sender, EventArgs e)
+        {
+            PlaybackTimerTickEvent?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>

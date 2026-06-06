@@ -74,6 +74,8 @@ public PlayerPresenter(
             _view.SettingsEvent += OnSettings;
             _view.MinimizeEvent += OnMinimize;
             _view.CloseEvent += OnClose;
+
+            _view.PlaybackTimerTickEvent += OnPlaybackTimerTick;
         }
 
         /// <summary>
@@ -659,6 +661,17 @@ public PlayerPresenter(
             return string.Join(
                 Environment.NewLine,
                 lines);
+        }
+
+        /// <summary>
+        /// View의 재생 시간 갱신 Tick을 받아 현재 영상재생일시를 화면에 반영한다.
+        /// </summary>
+        private void OnPlaybackTimerTick(object sender, EventArgs e)
+        {
+            DateTime? playbackTime =
+                _playbackService.CurrentPlaybackTime;
+
+            _view.SetPlaybackDateTime(playbackTime);
         }
     }
 }
