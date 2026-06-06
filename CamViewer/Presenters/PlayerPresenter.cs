@@ -6,6 +6,7 @@ using CamViewerClient.Models.Config;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using static System.Windows.Forms.VisualStyles.VisualStyleElement.ToolTip;
 
 namespace CamViewer.Presenters
@@ -118,12 +119,9 @@ public PlayerPresenter(
         }
 
         /// <summary>
-        /// 영상 검색 버튼 클릭 시 재생 요청 정보를 생성한다.
-        ///
-        /// 현재 단계에서는 실제 NVR 재생을 수행하지 않고,
-        /// 생성된 재생 요청 정보를 메시지로 확인한다.
+        /// 영상 검색 버튼 클릭 시 재생 요청 정보를 생성하고 재생 서비스에 전달한다.
         /// </summary>
-        private void OnSearch(object sender, EventArgs e)
+        private async void OnSearch(object sender, EventArgs e)
         {
             PlayerPlaybackRequest request;
 
@@ -138,7 +136,9 @@ public PlayerPresenter(
             }
 
             PlayerPlaybackResult playResult =
-                _playbackService.Play(request);
+                await _playbackService.PlayAsync(
+                    request,
+                    CancellationToken.None);
 
             if (!playResult.Success)
             {
@@ -151,7 +151,6 @@ public PlayerPresenter(
 
             _view.SetPlaybackDateTime(_currentPlaybackDateTime);
             _view.SetPlaybackState(_playbackState);
-
             _view.SetStatus(playResult.Message);
 
             _view.ShowMessage(
@@ -161,10 +160,11 @@ public PlayerPresenter(
         /// <summary>
         /// 빠른 역재생 버튼 요청을 처리한다.
         /// </summary>
-        private void OnFastReverse(object sender, EventArgs e)
+        private async void OnFastReverse(object sender, EventArgs e)
         {
             PlayerPlaybackResult result =
-                _playbackService.FastReverse();
+                await _playbackService.FastReverseAsync(
+                    CancellationToken.None);
 
             HandlePlaybackCommandResult(result);
         }
@@ -172,10 +172,12 @@ public PlayerPresenter(
         /// <summary>
         /// 10초 전 이동 요청을 처리한다.
         /// </summary>
-        private void OnSeekBackward10(object sender, EventArgs e)
+        private async void OnSeekBackward10(object sender, EventArgs e)
         {
             PlayerPlaybackResult result =
-                _playbackService.SeekSeconds(-10);
+                await _playbackService.SeekSecondsAsync(
+                    -10,
+                    CancellationToken.None);
 
             if (result.Success)
             {
@@ -188,7 +190,7 @@ public PlayerPresenter(
         /// <summary>
         /// 재생/일시정지 전환 요청을 처리한다.
         /// </summary>
-        private void OnPlayPause(object sender, EventArgs e)
+        private async void OnPlayPause(object sender, EventArgs e)
         {
             PlayerPlaybackResult result;
 
@@ -196,11 +198,13 @@ public PlayerPresenter(
                 || _playbackService.CurrentState == PlaybackState.FastForward
                 || _playbackService.CurrentState == PlaybackState.FastReverse)
             {
-                result = _playbackService.Pause();
+                result = await _playbackService.PauseAsync(
+                    CancellationToken.None);
             }
             else
             {
-                result = _playbackService.Resume();
+                result = await _playbackService.ResumeAsync(
+                    CancellationToken.None);
             }
 
             HandlePlaybackCommandResult(result);
@@ -209,10 +213,12 @@ public PlayerPresenter(
         /// <summary>
         /// 10초 뒤 이동 요청을 처리한다.
         /// </summary>
-        private void OnSeekForward10(object sender, EventArgs e)
+        private async void OnSeekForward10(object sender, EventArgs e)
         {
             PlayerPlaybackResult result =
-                _playbackService.SeekSeconds(10);
+                await _playbackService.SeekSecondsAsync(
+                    10,
+                    CancellationToken.None);
 
             if (result.Success)
             {
@@ -225,12 +231,24 @@ public PlayerPresenter(
         /// <summary>
         /// 빠른재생 버튼 요청을 처리한다.
         /// </summary>
-        private void OnFastForward(object sender, EventArgs e)
+        private async void OnFastForward(object sender, EventArgs e)
         {
             PlayerPlaybackResult result =
-                _playbackService.FastForward();
+                await _playbackService.FastForwardAsync(
+                    CancellationToken.None);
 
             HandlePlaybackCommandResult(result);
+        }
+
+        /// <summary>
+        /// PlayerView 종료 요청을 처리한다.
+        /// </summary>
+        private async void OnClose(object sender, EventArgs e)
+        {
+            await _playbackService.StopAsync(
+                CancellationToken.None);
+
+            _view.CloseView();
         }
 
         /// <summary>
@@ -358,11 +376,7 @@ public PlayerPresenter(
             _view.SetPlaybackDateTime(_currentPlaybackDateTime);
         }
         
-        private void OnClose(object sender, EventArgs e)
-        {
-            _playbackService.Stop();
-            _view.CloseView();
-        }
+
 
         /// <summary>
         /// PlayerView에서 설정 버튼 클릭 시 설정 화면을 열고,

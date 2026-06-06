@@ -79,12 +79,16 @@ namespace CamViewer.Nvr.Dahua.Providers
             return new ProviderCapabilities
             {
                 RenderMode = NvrRenderMode.DirectRender,
+
                 CanPause = false,
                 CanResume = false,
                 CanSeek = false,
                 CanPlayByRange = false,
                 CanSnapshot = false,
-                CanTestConnection = false,
+
+                // 로그인 기반 연결 테스트는 먼저 지원한다.
+                CanTestConnection = true,
+
                 CanQueryRecordExists = false,
                 CanGetPlaybackPosition = false
             };
@@ -256,6 +260,9 @@ namespace CamViewer.Nvr.Dahua.Providers
 
         /// <summary>
         /// NVR 접속 가능 여부를 확인한다.
+        ///
+        /// 현재 단계에서는 SDK 초기화 후 로그인 성공 여부로 연결 테스트를 판단한다.
+        /// 테스트용 로그인 세션은 즉시 Dispose하여 로그아웃한다.
         /// </summary>
         public Task<NvrResult> TestConnectionAsync(
             NvrConnectionInfo connectionInfo,
@@ -263,10 +270,56 @@ namespace CamViewer.Nvr.Dahua.Providers
         {
             EnsureNotDisposed();
 
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return Task.FromResult(
+                    NvrResult.Fail(
+                        NvrResultStatus.Cancelled,
+                        "연결 테스트 요청이 취소되었습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode = "CANCELLED",
+                            ErrorMessage = "연결 테스트 요청이 취소되었습니다.",
+                            Operation = "TestConnection"
+                        }));
+            }
+
+            if (!IsInitialized)
+            {
+                NvrResult initializeResult = Initialize();
+
+                if (!initializeResult.Success)
+                {
+                    _lastError = initializeResult.Error;
+                    return Task.FromResult(initializeResult);
+                }
+            }
+
+            NvrResult<DahuaLoginSession> loginResult =
+                DahuaSdkClient.Login(connectionInfo);
+
+            if (!loginResult.Success || loginResult.Data == null)
+            {
+                _lastError = loginResult.Error;
+
+                return Task.FromResult(
+                    NvrResult.Fail(
+                        loginResult.Status,
+                        string.IsNullOrWhiteSpace(loginResult.Message)
+                            ? "Dahua NVR 연결 테스트에 실패했습니다."
+                            : loginResult.Message,
+                        loginResult.Error));
+            }
+
+            using (loginResult.Data)
+            {
+                // 테스트용 로그인 세션은 즉시 로그아웃된다.
+            }
+
+            _lastError = null;
+
             return Task.FromResult(
-                CreateNotSupportedResult(
-                    "TestConnection",
-                    "Dahua SDK 연결 테스트 기능은 아직 구현되지 않았습니다."));
+                NvrResult.Ok("Dahua NVR 연결 테스트에 성공했습니다."));
         }
 
         /// <summary>

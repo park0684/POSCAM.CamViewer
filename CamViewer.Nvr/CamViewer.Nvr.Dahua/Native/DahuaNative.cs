@@ -53,6 +53,29 @@ namespace CamViewer.Nvr.Dahua.Native
             int dvrPort,
             IntPtr userData);
 
+        /// <summary>
+        /// Dahua SDK 재생 진행률 콜백.
+        /// 현재 단계에서는 콜백을 사용하지 않으므로 함수 정의만 둔다.
+        /// </summary>
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        internal delegate void fDownLoadPosCallBack(
+            IntPtr playHandle,
+            uint totalSize,
+            uint downloadSize,
+            IntPtr userData);
+
+        /// <summary>
+        /// Dahua SDK 재생 데이터 콜백.
+        /// 현재 단계에서는 SDK Direct Render를 사용하므로 데이터 콜백은 사용하지 않는다.
+        /// </summary>
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        internal delegate int fDataCallBack(
+            IntPtr playHandle,
+            uint dataType,
+            IntPtr buffer,
+            uint bufferSize,
+            IntPtr userData);
+
         #endregion
 
         #region Enums
@@ -153,6 +176,61 @@ namespace CamViewer.Nvr.Dahua.Native
                     sSerialNumber = new byte[64],
                     byReserved = new byte[2],
                     byReserved2 = new byte[24]
+                };
+            }
+        }
+
+        /// <summary>
+        /// Dahua SDK에서 사용하는 시간 구조체이다.
+        /// 
+        /// Dahua NetSDK의 NET_TIME 구조와 매칭된다.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct NET_TIME
+        {
+            /// <summary>
+            /// 연도.
+            /// </summary>
+            public uint dwYear;
+
+            /// <summary>
+            /// 월.
+            /// </summary>
+            public uint dwMonth;
+
+            /// <summary>
+            /// 일.
+            /// </summary>
+            public uint dwDay;
+
+            /// <summary>
+            /// 시.
+            /// </summary>
+            public uint dwHour;
+
+            /// <summary>
+            /// 분.
+            /// </summary>
+            public uint dwMinute;
+
+            /// <summary>
+            /// 초.
+            /// </summary>
+            public uint dwSecond;
+
+            /// <summary>
+            /// DateTime을 Dahua NET_TIME으로 변환한다.
+            /// </summary>
+            public static NET_TIME FromDateTime(DateTime value)
+            {
+                return new NET_TIME
+                {
+                    dwYear = Convert.ToUInt32(value.Year),
+                    dwMonth = Convert.ToUInt32(value.Month),
+                    dwDay = Convert.ToUInt32(value.Day),
+                    dwHour = Convert.ToUInt32(value.Hour),
+                    dwMinute = Convert.ToUInt32(value.Minute),
+                    dwSecond = Convert.ToUInt32(value.Second)
                 };
             }
         }
@@ -263,6 +341,68 @@ namespace CamViewer.Nvr.Dahua.Native
             CallingConvention = CallingConvention.StdCall,
             CharSet = CharSet.Ansi)]
         internal static extern uint CLIENT_GetLastError();
+
+        #endregion
+
+        #region Playback
+
+        /// <summary>
+        /// 지정 시간 구간의 녹화 영상을 재생한다.
+        /// 
+        /// hWnd에 WinForms Panel Handle을 전달하면 Dahua SDK가 해당 영역에 직접 렌더링한다.
+        /// </summary>
+        /// <param name="loginHandle">로그인 핸들.</param>
+        /// <param name="channelId">채널 번호.</param>
+        /// <param name="startTime">재생 시작 시각.</param>
+        /// <param name="stopTime">재생 종료 시각.</param>
+        /// <param name="renderHandle">영상 출력 윈도우 핸들.</param>
+        /// <param name="positionCallback">재생 진행 콜백.</param>
+        /// <param name="positionUserData">재생 진행 콜백 사용자 데이터.</param>
+        /// <param name="dataCallback">재생 데이터 콜백.</param>
+        /// <param name="dataUserData">재생 데이터 콜백 사용자 데이터.</param>
+        /// <returns>재생 핸들. 실패 시 IntPtr.Zero.</returns>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        internal static extern IntPtr CLIENT_PlayBackByTimeEx(
+            IntPtr loginHandle,
+            int channelId,
+            ref NET_TIME startTime,
+            ref NET_TIME stopTime,
+            IntPtr renderHandle,
+            fDownLoadPosCallBack positionCallback,
+            IntPtr positionUserData,
+            fDataCallBack dataCallback,
+            IntPtr dataUserData);
+
+        /// <summary>
+        /// 재생을 중지한다.
+        /// </summary>
+        /// <param name="playHandle">재생 핸들.</param>
+        /// <returns>성공 여부.</returns>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_StopPlayBack(
+            IntPtr playHandle);
+
+        /// <summary>
+        /// 재생을 일시정지하거나 재개한다.
+        /// </summary>
+        /// <param name="playHandle">재생 핸들.</param>
+        /// <param name="pause">true면 일시정지, false면 재개.</param>
+        /// <returns>성공 여부.</returns>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_PausePlayBack(
+            IntPtr playHandle,
+            [MarshalAs(UnmanagedType.Bool)] bool pause);
 
         #endregion
     }

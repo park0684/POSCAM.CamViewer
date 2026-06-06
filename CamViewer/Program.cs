@@ -1,7 +1,5 @@
-﻿using System;
-using System.IO;
-using System.Windows.Forms;
-using CamViewer.Interfaces;
+﻿using CamViewer.Interfaces;
+using CamViewer.Nvr.Core.Abstractions;
 using CamViewer.Nvr.Core.Providers;
 using CamViewer.Nvr.Core.Results;
 using CamViewer.Presenters;
@@ -10,6 +8,10 @@ using CamViewer.Views;
 using CamViewerClient;
 using CamViewerClient.Models.Config;
 using CamViewerClient.Results;
+using System;
+using System.Data.Common;
+using System.IO;
+using System.Windows.Forms;
 
 namespace CamViewer
 {
@@ -48,7 +50,8 @@ namespace CamViewer
                 settingsFlowService.OpenSettings,
                 () => OpenPlayerTemporary(
                     clientFacade,
-                    settingsFlowService));
+                    settingsFlowService,
+                    providerFactory));
 
             landingPresenter.Show();
         }
@@ -104,7 +107,8 @@ namespace CamViewer
         /// </summary>
         private static void OpenPlayerTemporary(
             CamViewerClientFacade clientFacade,
-            SettingsFlowService settingsFlowService)
+            SettingsFlowService settingsFlowService,
+            INvrProviderFactory providerFactory)
         {
             ClientResult<ViewerConfig> configResult =
                 clientFacade.LoadLocalConfig();
@@ -132,7 +136,7 @@ namespace CamViewer
             var playerPresenter = new PlayerPresenter(
                 playerView,
                 configResult.Data,
-                new DebugPlayerPlaybackService(),
+                new NvrPlayerPlaybackService(providerFactory),
                 settingsFlowService.OpenSettings,
                 () =>
                 {

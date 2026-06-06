@@ -121,48 +121,72 @@ namespace CamViewer.Nvr.Dahua.Sdk
         }
 
         /// <summary>
-        /// Provider DLL 하위의 native 폴더를 네이티브 DLL 검색 경로로 설정한다.
+        /// Dahua SDK native DLL 검색 경로를 설정한다.
+        ///
+        /// 개발/배포 구조가 달라질 수 있으므로 여러 후보 경로를 순서대로 확인한다.
         /// </summary>
         private static NvrResult ConfigureNativeLibraryPath()
         {
+            string baseDirectory =
+                AppDomain.CurrentDomain.BaseDirectory;
+
             string providerAssemblyPath =
                 typeof(DahuaSdkRuntime).Assembly.Location;
 
             string providerDirectory =
-                Path.GetDirectoryName(providerAssemblyPath);
+                Path.GetDirectoryName(providerAssemblyPath) ?? string.Empty;
 
-            string nativeDirectory =
-                Path.Combine(providerDirectory, "native");
-
-            if (!Directory.Exists(nativeDirectory))
+            string[] candidateDirectories =
             {
-                return NvrResult.Fail(
-                    NvrResultStatus.SdkError,
-                    "Dahua SDK native 폴더를 찾을 수 없습니다.",
-                    new NvrErrorInfo
-                    {
-                        ErrorCode = "NATIVE_DIRECTORY_NOT_FOUND",
-                        ErrorMessage = nativeDirectory,
-                        Operation = "ConfigureNativeLibraryPath"
-                    });
+        Path.Combine(baseDirectory, "native", "Dahua"),
+        Path.Combine(baseDirectory, "native", "dahua"),
+        Path.Combine(baseDirectory, "providers", "Dahua", "native"),
+        Path.Combine(baseDirectory, "providers", "Dahua", "native", "Dahua"),
+        Path.Combine(providerDirectory, "native"),
+        Path.Combine(providerDirectory, "native", "Dahua")
+    };
+
+            foreach (string nativeDirectory in candidateDirectories)
+            {
+                if (!Directory.Exists(nativeDirectory))
+                {
+                    continue;
+                }
+
+                bool pathResult =
+                    Kernel32Native.SetDllDirectory(nativeDirectory);
+
+                if (!pathResult)
+                {
+                    return NvrResult.Fail(
+                        NvrResultStatus.SdkError,
+                        "Dahua SDK DLL 검색 경로를 설정할 수 없습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode = "SET_DLL_DIRECTORY_FAILED",
+                            ErrorMessage = nativeDirectory,
+                            Operation = "SetDllDirectory"
+                        });
+                }
+
+                return NvrResult.Ok(
+                    "Dahua SDK native 경로가 설정되었습니다. "
+                    + nativeDirectory);
             }
 
-            bool pathResult = Kernel32Native.SetDllDirectory(nativeDirectory);
-
-            if (!pathResult)
-            {
-                return NvrResult.Fail(
-                    NvrResultStatus.SdkError,
-                    "Dahua SDK DLL 검색 경로를 설정할 수 없습니다.",
-                    new NvrErrorInfo
-                    {
-                        ErrorCode = "SET_DLL_DIRECTORY_FAILED",
-                        ErrorMessage = nativeDirectory,
-                        Operation = "SetDllDirectory"
-                    });
-            }
-
-            return NvrResult.Ok();
+            return NvrResult.Fail(
+                NvrResultStatus.SdkError,
+                "Dahua SDK native 폴더를 찾을 수 없습니다."
+                + Environment.NewLine
+                + "검색 경로:"
+                + Environment.NewLine
+                + string.Join(Environment.NewLine, candidateDirectories),
+                new NvrErrorInfo
+                {
+                    ErrorCode = "NATIVE_DIRECTORY_NOT_FOUND",
+                    ErrorMessage = string.Join(";", candidateDirectories),
+                    Operation = "ConfigureNativeLibraryPath"
+                });
         }
 
         /// <summary>
