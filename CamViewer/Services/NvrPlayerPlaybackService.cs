@@ -202,19 +202,39 @@ namespace CamViewer.Services
                     "PLAYBACK_NOT_STARTED");
             }
 
+            if (_currentRequest == null)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 요청 정보가 없습니다.",
+                    "PLAYBACK_REQUEST_EMPTY");
+            }
+
             if (!_currentPlaybackTime.HasValue)
             {
-                _currentPlaybackTime = _currentRequest == null
-                    ? DateTime.Now
-                    : _currentRequest.PlayStartTime;
+                _currentPlaybackTime = _currentRequest.PlayStartTime;
             }
 
             DateTime targetTime =
                 _currentPlaybackTime.Value.AddSeconds(seconds);
 
+            if (targetTime < _currentRequest.PlayStartTime)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생 시작 시각보다 이전으로 이동할 수 없습니다.",
+                    "SEEK_BEFORE_START");
+            }
+
+            if (targetTime >= _currentRequest.PlayEndTime)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생 종료 시각 이후로 이동할 수 없습니다.",
+                    "SEEK_AFTER_END");
+            }
+
             foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
             {
-                INvrProvider provider = GetProviderByNvrNo(item.Value.NvrNo);
+                INvrProvider provider =
+                    GetProviderByNvrNo(item.Value.NvrNo);
 
                 if (provider == null)
                 {
@@ -234,6 +254,7 @@ namespace CamViewer.Services
             }
 
             _currentPlaybackTime = targetTime;
+            CurrentState = PlaybackState.Playing;
 
             return PlayerPlaybackResult.Ok(
                 "재생 위치를 이동했습니다. "

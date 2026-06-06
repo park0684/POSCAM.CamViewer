@@ -108,10 +108,13 @@ namespace CamViewer.Nvr.Dahua.Sdk
             DahuaNative.NET_TIME endTime =
                 DahuaNative.NET_TIME.FromDateTime(request.EndTime);
 
+            int dahuaChannelId =
+                ToDahuaChannelId(request.ChannelNo);
+
             IntPtr playbackHandle =
                 DahuaNative.CLIENT_PlayBackByTimeEx(
                     loginSession.LoginHandle,
-                    request.ChannelNo,
+                    dahuaChannelId,
                     ref startTime,
                     ref endTime,
                     request.RenderTargetHandle,
@@ -139,11 +142,15 @@ namespace CamViewer.Nvr.Dahua.Sdk
 
             var session = new DahuaPlaybackSession(
                 playbackHandle,
+                request.CounterNo,
                 request.NvrNo,
                 request.ChannelNo,
                 request.ScreenPosition,
+                request.SearchDateTime,
                 request.StartTime,
-                request.EndTime);
+                request.EndTime,
+                request.RenderTargetHandle,
+                request.AutoPlay);
 
             return NvrResult<DahuaPlaybackSession>.Ok(
                 session,
@@ -315,15 +322,15 @@ namespace CamViewer.Nvr.Dahua.Sdk
                     "NVR 재생 요청 정보가 없습니다.");
             }
 
-            if (request.ChannelNo < 0)
+            if (request.ChannelNo <= 0)
             {
                 return NvrResult.Fail(
                     NvrResultStatus.InvalidChannel,
-                    "NVR 채널번호가 올바르지 않습니다.");
+                    "NVR 채널번호가 올바르지 않습니다. 채널번호는 1 이상이어야 합니다.");
             }
 
             if (loginSession.ChannelCount > 0
-                && request.ChannelNo >= loginSession.ChannelCount)
+                && request.ChannelNo > loginSession.ChannelCount)
             {
                 return NvrResult.Fail(
                     NvrResultStatus.InvalidChannel,

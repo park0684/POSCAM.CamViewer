@@ -22,19 +22,29 @@ namespace CamViewer.Nvr.Dahua.Sdk
         /// </summary>
         public DahuaPlaybackSession(
             IntPtr playbackHandle,
+            int counterNo,
             int nvrNo,
             int channelNo,
             int screenPosition,
+            DateTime searchDateTime,
             DateTime startTime,
-            DateTime endTime)
+            DateTime endTime,
+            IntPtr renderTargetHandle,
+            bool autoPlay)
         {
             SessionId = Guid.NewGuid();
             PlaybackHandle = playbackHandle;
+
+            CounterNo = counterNo;
             NvrNo = nvrNo;
             ChannelNo = channelNo;
             ScreenPosition = screenPosition;
+            SearchDateTime = searchDateTime;
             StartTime = startTime;
             EndTime = endTime;
+            RenderTargetHandle = renderTargetHandle;
+            AutoPlay = autoPlay;
+
             CurrentPlaybackTime = startTime;
             State = NvrPlaybackState.Playing;
         }
@@ -45,8 +55,26 @@ namespace CamViewer.Nvr.Dahua.Sdk
         public IntPtr PlaybackHandle { get; private set; }
 
         /// <summary>
-        /// 재생 세션 고유 식별값.
+        /// 조회 대상 계산대번호.
+        /// Seek 또는 재재생 시 요청 복원에 사용한다.
         /// </summary>
+        public int CounterNo { get; private set; }
+
+        /// <summary>
+        /// 사용자가 입력하거나 외부 POS에서 전달한 영상검색일시.
+        /// </summary>
+        public DateTime SearchDateTime { get; private set; }
+
+        /// <summary>
+        /// 영상을 출력할 Windows Handle.
+        /// </summary>
+        public IntPtr RenderTargetHandle { get; private set; }
+
+        /// <summary>
+        /// 재생 준비 후 자동 재생 여부.
+        /// </summary>
+        public bool AutoPlay { get; private set; }
+
         public Guid SessionId { get; private set; }
 
         public int NvrNo { get; private set; }
@@ -143,6 +171,37 @@ namespace CamViewer.Nvr.Dahua.Sdk
                     this,
                     new PlaybackErrorEventArgs(error));
             }
+        }
+
+        /// <summary>
+        /// Seek 또는 재재생 시 기존 재생 핸들을 새 핸들로 교체한다.
+        /// </summary>
+        public void ReplacePlaybackHandle(
+            IntPtr playbackHandle,
+            DateTime startTime)
+        {
+            if (PlaybackHandle != IntPtr.Zero)
+            {
+                DahuaNative.CLIENT_StopPlayBack(PlaybackHandle);
+            }
+
+            PlaybackHandle = playbackHandle;
+            StartTime = startTime;
+            CurrentPlaybackTime = startTime;
+
+            SetState(NvrPlaybackState.Playing);
+            SetCurrentPlaybackTime(startTime);
+        }
+
+        /// <summary>
+        /// 현재 재생 핸들의 소유권을 외부로 넘긴다.
+        /// 이후 이 세션을 Dispose해도 해당 핸들을 중지하지 않는다.
+        /// </summary>
+        public IntPtr DetachPlaybackHandle()
+        {
+            IntPtr handle = PlaybackHandle;
+            PlaybackHandle = IntPtr.Zero;
+            return handle;
         }
 
         /// <summary>
