@@ -46,7 +46,9 @@ namespace CamViewer
                 environmentProvider,
                 CreateLoginView,
                 settingsFlowService.OpenSettings,
-                () => OpenPlayerTemporary(clientFacade));
+                () => OpenPlayerTemporary(
+                    clientFacade,
+                    settingsFlowService));
 
             landingPresenter.Show();
         }
@@ -101,7 +103,8 @@ namespace CamViewer
         /// 로컬 설정 기반 화면 표시와 버튼 이벤트만 확인한다.
         /// </summary>
         private static void OpenPlayerTemporary(
-            CamViewerClientFacade clientFacade)
+            CamViewerClientFacade clientFacade,
+            SettingsFlowService settingsFlowService)
         {
             ClientResult<ViewerConfig> configResult =
                 clientFacade.LoadLocalConfig();
@@ -126,10 +129,20 @@ namespace CamViewer
             {
                 Application.Exit();
             };
-
             var playerPresenter = new PlayerPresenter(
                 playerView,
-                configResult.Data);
+                configResult.Data,
+                new DebugPlayerPlaybackService(),
+                settingsFlowService.OpenSettings,
+                () =>
+                {
+                    ClientResult<ViewerConfig> reloadResult =
+                        clientFacade.LoadLocalConfig();
+
+                    return reloadResult.Success
+                        ? reloadResult.Data
+                        : null;
+                });
 
             playerPresenter.Show();
         }

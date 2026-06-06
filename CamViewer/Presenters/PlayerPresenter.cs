@@ -1,10 +1,12 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using CamViewer.Interfaces;
+﻿using CamViewer.Interfaces;
 using CamViewer.Models;
+using CamViewer.Services;
 using CamViewerClient.Enums;
 using CamViewerClient.Models.Config;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.ToolTip;
 
 namespace CamViewer.Presenters
 {
@@ -17,7 +19,10 @@ namespace CamViewer.Presenters
     public sealed class PlayerPresenter
     {
         private readonly IPlayerView _view;
-        private readonly ViewerConfig _viewerConfig;
+        private ViewerConfig _viewerConfig;
+        private readonly IPlayerPlaybackService _playbackService;
+        private readonly Func<bool> _openSettingsFunc;
+        private readonly Func<ViewerConfig> _reloadConfigFunc;
 
         private PlaybackState _playbackState;
         private DateTime? _currentPlaybackDateTime;
@@ -27,9 +32,12 @@ namespace CamViewer.Presenters
         /// </summary>
         /// <param name="view">영상 재생 View.</param>
         /// <param name="viewerConfig">로컬 또는 서버에서 불러온 캠뷰어 설정.</param>
-        public PlayerPresenter(
-            IPlayerView view,
-            ViewerConfig viewerConfig)
+public PlayerPresenter(
+    IPlayerView view,
+    ViewerConfig viewerConfig,
+    IPlayerPlaybackService playbackService,
+    Func<bool> openSettingsFunc,
+    Func<ViewerConfig> reloadConfigFunc)
         {
             if (view == null)
             {
@@ -41,8 +49,16 @@ namespace CamViewer.Presenters
                 throw new ArgumentNullException("viewerConfig");
             }
 
+            if (playbackService == null)
+            {
+                throw new ArgumentNullException("playbackService");
+            }
+
             _view = view;
             _viewerConfig = viewerConfig;
+            _playbackService = playbackService;
+            _openSettingsFunc = openSettingsFunc;
+            _reloadConfigFunc = reloadConfigFunc;
             _playbackState = PlaybackState.Stopped;
 
             _view.LoadViewEvent += OnLoadView;
@@ -53,6 +69,10 @@ namespace CamViewer.Presenters
             _view.PlayPauseEvent += OnPlayPause;
             _view.SeekForward10Event += OnSeekForward10;
             _view.FastForwardEvent += OnFastForward;
+
+            _view.SettingsEvent += OnSettings;
+            _view.MinimizeEvent += OnMinimize;
+            _view.CloseEvent += OnClose;
         }
 
         /// <summary>
@@ -117,19 +137,22 @@ namespace CamViewer.Presenters
                 return;
             }
 
+            PlayerPlaybackResult playResult =
+                _playbackService.Play(request);
+
+            if (!playResult.Success)
+            {
+                _view.ShowMessage(playResult.Message);
+                return;
+            }
+
             _currentPlaybackDateTime = request.PlayStartTime;
-            _playbackState = PlaybackState.Playing;
+            _playbackState = _playbackService.CurrentState;
 
             _view.SetPlaybackDateTime(_currentPlaybackDateTime);
             _view.SetPlaybackState(_playbackState);
 
-            _view.SetStatus(
-                "영상 조회 요청 준비 완료 - 계산대 "
-                + request.CounterNo
-                + " / "
-                + request.PlayStartTime.ToString("yyyy-MM-dd tt hh:mm:ss")
-                + " ~ "
-                + request.PlayEndTime.ToString("yyyy-MM-dd tt hh:mm:ss"));
+            _view.SetStatus(playResult.Message);
 
             _view.ShowMessage(
                 BuildPlaybackRequestDebugMessage(request));
@@ -140,9 +163,10 @@ namespace CamViewer.Presenters
         /// </summary>
         private void OnFastReverse(object sender, EventArgs e)
         {
-            _playbackState = PlaybackState.FastReverse;
-            _view.SetPlaybackState(_playbackState);
-            _view.SetStatus("빠른 역재생 요청");
+            PlayerPlaybackResult result =
+                _playbackService.FastReverse();
+
+            HandlePlaybackCommandResult(result);
         }
 
         /// <summary>
@@ -150,8 +174,15 @@ namespace CamViewer.Presenters
         /// </summary>
         private void OnSeekBackward10(object sender, EventArgs e)
         {
-            MovePlaybackTime(-10);
-            _view.SetStatus("10초 전으로 이동 요청");
+            PlayerPlaybackResult result =
+                _playbackService.SeekSeconds(-10);
+
+            if (result.Success)
+            {
+                MovePlaybackTime(-10);
+            }
+
+            HandlePlaybackCommandResult(result);
         }
 
         /// <summary>
@@ -159,19 +190,20 @@ namespace CamViewer.Presenters
         /// </summary>
         private void OnPlayPause(object sender, EventArgs e)
         {
-            if (_playbackState == PlaybackState.Playing
-                || _playbackState == PlaybackState.FastForward
-                || _playbackState == PlaybackState.FastReverse)
+            PlayerPlaybackResult result;
+
+            if (_playbackService.CurrentState == PlaybackState.Playing
+                || _playbackService.CurrentState == PlaybackState.FastForward
+                || _playbackService.CurrentState == PlaybackState.FastReverse)
             {
-                _playbackState = PlaybackState.Paused;
-                _view.SetPlaybackState(_playbackState);
-                _view.SetStatus("일시정지 요청");
-                return;
+                result = _playbackService.Pause();
+            }
+            else
+            {
+                result = _playbackService.Resume();
             }
 
-            _playbackState = PlaybackState.Playing;
-            _view.SetPlaybackState(_playbackState);
-            _view.SetStatus("재생 요청");
+            HandlePlaybackCommandResult(result);
         }
 
         /// <summary>
@@ -179,8 +211,15 @@ namespace CamViewer.Presenters
         /// </summary>
         private void OnSeekForward10(object sender, EventArgs e)
         {
-            MovePlaybackTime(10);
-            _view.SetStatus("10초 뒤로 이동 요청");
+            PlayerPlaybackResult result =
+                _playbackService.SeekSeconds(10);
+
+            if (result.Success)
+            {
+                MovePlaybackTime(10);
+            }
+
+            HandlePlaybackCommandResult(result);
         }
 
         /// <summary>
@@ -188,9 +227,33 @@ namespace CamViewer.Presenters
         /// </summary>
         private void OnFastForward(object sender, EventArgs e)
         {
-            _playbackState = PlaybackState.FastForward;
+            PlayerPlaybackResult result =
+                _playbackService.FastForward();
+
+            HandlePlaybackCommandResult(result);
+        }
+
+        /// <summary>
+        /// 재생 서비스 처리 결과를 화면 상태에 반영한다.
+        /// </summary>
+        private void HandlePlaybackCommandResult(
+            PlayerPlaybackResult result)
+        {
+            if (result == null)
+            {
+                return;
+            }
+
+            if (!result.Success)
+            {
+                _view.ShowMessage(result.Message);
+                return;
+            }
+
+            _playbackState = _playbackService.CurrentState;
+
             _view.SetPlaybackState(_playbackState);
-            _view.SetStatus("빠른재생 요청");
+            _view.SetStatus(result.Message);
         }
 
         /// <summary>
@@ -294,7 +357,80 @@ namespace CamViewer.Presenters
 
             _view.SetPlaybackDateTime(_currentPlaybackDateTime);
         }
+        
+        private void OnClose(object sender, EventArgs e)
+        {
+            _playbackService.Stop();
+            _view.CloseView();
+        }
 
+        /// <summary>
+        /// PlayerView에서 설정 버튼 클릭 시 설정 화면을 열고,
+        /// 저장되었으면 로컬 설정을 다시 불러와 화면을 갱신한다.
+        /// </summary>
+        private void OnSettings(object sender, EventArgs e)
+        {
+            if (_openSettingsFunc == null)
+            {
+                _view.ShowMessage("설정 화면 실행 구성이 없습니다.");
+                return;
+            }
+
+            bool saved = _openSettingsFunc();
+
+            if (!saved)
+            {
+                return;
+            }
+
+            if (_reloadConfigFunc == null)
+            {
+                return;
+            }
+
+            ViewerConfig reloadedConfig = _reloadConfigFunc();
+
+            if (reloadedConfig == null)
+            {
+                _view.ShowMessage("변경된 설정을 다시 불러오지 못했습니다.");
+                return;
+            }
+
+            _viewerConfig = reloadedConfig;
+
+            ReloadViewByConfig();
+
+            _view.SetStatus("설정이 변경되어 화면을 갱신했습니다.");
+        }
+
+        /// <summary>
+        /// PlayerView 최소화 요청을 처리한다.
+        /// </summary>
+        private void OnMinimize(object sender, EventArgs e)
+        {
+            _view.MinimizeView();
+        }
+
+        /// <summary>
+        /// 현재 ViewerConfig 기준으로 계산대 목록과 좌/우 영상 표시를 다시 구성한다.
+        /// </summary>
+        private void ReloadViewByConfig()
+        {
+            List<int> counterNumbers = GetCounterNumbers();
+
+            _view.SetCounterNumbers(counterNumbers);
+
+            if (counterNumbers.Count == 0)
+            {
+                _view.SetLeftVideoTitle("좌측 영상 설정 없음");
+                _view.SetRightVideoTitle("우측 영상 설정 없음");
+                _view.SetStatus("등록된 계산대 설정이 없습니다.");
+                return;
+            }
+
+            _view.SelectCounterNo(counterNumbers[0]);
+            UpdateSelectedCounterInfo();
+        }
         /// <summary>
         /// 검색 요청 상태를 확인하기 위한 임시 메시지를 생성한다.
         /// </summary>

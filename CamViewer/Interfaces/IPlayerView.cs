@@ -77,6 +77,21 @@ namespace CamViewer.Interfaces
         event EventHandler FastForwardEvent;
 
         /// <summary>
+        /// 설정 버튼 클릭 시 발생한다.
+        /// </summary>
+        event EventHandler SettingsEvent;
+
+        /// <summary>
+        /// 최소화 버튼 클릭 시 발생한다.
+        /// </summary>
+        event EventHandler MinimizeEvent;
+
+        /// <summary>
+        /// 종료 버튼 클릭 시 발생한다.
+        /// </summary>
+        event EventHandler CloseEvent;
+
+        /// <summary>
         /// 계산대번호 목록을 설정한다.
         /// </summary>
         void SetCounterNumbers(IEnumerable<int> counterNumbers);
@@ -130,5 +145,10 @@ namespace CamViewer.Interfaces
         /// PlayerView를 닫는다.
         /// </summary>
         void CloseView();
+
+        /// <summary>
+        /// PlayerView를 최소화한다.
+        /// </summary>
+        void MinimizeView();
     }
 }

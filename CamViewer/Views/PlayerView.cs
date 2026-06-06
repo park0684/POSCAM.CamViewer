@@ -158,6 +158,7 @@ namespace CamViewer.Views
         public event EventHandler FastForwardEvent;
         public event EventHandler SettingsEvent;
         public event EventHandler CloseEvent;
+        public event EventHandler MinimizeEvent;
 
         /// <summary>
         /// 계산대번호 목록을 설정한다.
@@ -308,6 +309,38 @@ namespace CamViewer.Views
         public void CloseView()
         {
             Close();
+        }
+
+        /// <summary>
+        /// 설정 버튼 클릭을 Presenter에 전달한다.
+        /// </summary>
+        private void OnSettingsButtonClick(object sender, EventArgs e)
+        {
+            SettingsEvent?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// 최소화 버튼 클릭을 Presenter에 전달한다.
+        /// </summary>
+        private void OnMinimizeButtonClick(object sender, EventArgs e)
+        {
+            MinimizeEvent?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// 종료 버튼 클릭을 Presenter에 전달한다.
+        /// </summary>
+        private void OnCloseButtonClick(object sender, EventArgs e)
+        {
+            CloseEvent?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// PlayerView를 최소화한다.
+        /// </summary>
+        public void MinimizeView()
+        {
+            WindowState = FormWindowState.Minimized;
         }
 
         /// <summary>
@@ -639,22 +672,6 @@ namespace CamViewer.Views
         {
             FastForwardEvent?.Invoke(this, EventArgs.Empty);
         }
-
-        private void OnSettingsButtonClick(object sender, EventArgs e)
-        {
-            SettingsEvent?.Invoke(this, EventArgs.Empty);
-        }
-
-        private void OnMinimizeButtonClick(object sender, EventArgs e)
-        {
-            WindowState = FormWindowState.Minimized;
-        }
-
-        private void OnCloseButtonClick(object sender, EventArgs e)
-        {
-            CloseEvent?.Invoke(this, EventArgs.Empty);
-        }
-
 
         /// <summary>
         /// ComboBox 선택값을 숫자로 변환한다.
