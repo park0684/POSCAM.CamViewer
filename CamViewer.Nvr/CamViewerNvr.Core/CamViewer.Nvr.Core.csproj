@@ -55,6 +55,7 @@
     <Compile Include="Abstractions\INvrProviderFactory.cs" />
     <Compile Include="Attributes\NvrProviderExportAttribute.cs" />
     <Compile Include="Enums\NvrConnectionType.cs" />
+    <Compile Include="Enums\NvrPlaybackSpeed.cs" />
     <Compile Include="Enums\NvrPlaybackState.cs" />
     <Compile Include="Enums\NvrRenderMode.cs" />
     <Compile Include="Enums\NvrResultStatus.cs" />

@@ -29,11 +29,17 @@ namespace CamViewer.Presenters
         private DateTime? _currentPlaybackDateTime;
 
         /// <summary>
+        /// 재생 관련 명령이 실행 중인지 여부.
+        /// 중복 클릭으로 인한 Provider 상태 꼬임을 방지한다.
+        /// </summary>
+        private bool _isPlaybackCommandRunning;
+
+        /// <summary>
         /// PlayerPresenter를 초기화한다.
         /// </summary>
         /// <param name="view">영상 재생 View.</param>
         /// <param name="viewerConfig">로컬 또는 서버에서 불러온 캠뷰어 설정.</param>
-public PlayerPresenter(
+        public PlayerPresenter(
     IPlayerView view,
     ViewerConfig viewerConfig,
     IPlayerPlaybackService playbackService,
@@ -91,23 +97,36 @@ public PlayerPresenter(
         /// </summary>
         private void OnLoadView(object sender, EventArgs e)
         {
-            List<int> counterNumbers = GetCounterNumbers();
+            //List<int> counterNumbers = GetCounterNumbers();
 
-            _view.SetCounterNumbers(counterNumbers);
-            _view.SetSearchDateTime(DateTime.Now);
-            _view.SetPlaybackDateTime(null);
+            //_view.SetCounterNumbers(counterNumbers);
+            //_view.SetSearchDateTime(DateTime.Now);
+            ////_view.SetPlaybackDateTime(null);
+            //_view.SetPlaybackState(_playbackState);
+
+            //if (counterNumbers.Count == 0)
+            //{
+            //    _view.SetLeftVideoTitle("좌측 영상 설정 없음");
+            //    _view.SetRightVideoTitle("우측 영상 설정 없음");
+            //    _view.SetStatus("등록된 계산대 설정이 없습니다.");
+            //    return;
+            //}
+
+            //_view.SelectCounterNo(counterNumbers[0]);
+            //UpdateSelectedCounterInfo();
+
+            //_view.SetStatus("캠뷰어 실행 준비 완료");
+
+            DateTime baseTime = DateTime.Now;
+
+            _view.SetSearchRange(
+                baseTime.AddSeconds(-30),
+                baseTime.AddSeconds(3));
+
+            _view.SetPlaybackTime(null);
             _view.SetPlaybackState(_playbackState);
 
-            if (counterNumbers.Count == 0)
-            {
-                _view.SetLeftVideoTitle("좌측 영상 설정 없음");
-                _view.SetRightVideoTitle("우측 영상 설정 없음");
-                _view.SetStatus("등록된 계산대 설정이 없습니다.");
-                return;
-            }
-
-            _view.SelectCounterNo(counterNumbers[0]);
-            UpdateSelectedCounterInfo();
+            ReloadViewByConfig();
 
             _view.SetStatus("캠뷰어 실행 준비 완료");
         }
@@ -125,38 +144,51 @@ public PlayerPresenter(
         /// </summary>
         private async void OnSearch(object sender, EventArgs e)
         {
-            PlayerPlaybackRequest request;
+            if (!TryBeginPlaybackCommand())
+            {
+                return;
+            }
 
             try
             {
-                request = BuildPlaybackRequest();
+                _view.StopPlaybackTimer();
+
+                PlayerPlaybackRequest request;
+
+                try
+                {
+                    request = BuildPlaybackRequest();
+                }
+                catch (Exception ex)
+                {
+                    _view.ShowMessage(ex.Message);
+                    return;
+                }
+
+                PlayerPlaybackResult playResult =
+                    await _playbackService.PlayAsync(
+                        request,
+                        CancellationToken.None);
+
+                if (!playResult.Success)
+                {
+                    _view.ShowMessage(playResult.Message);
+                    _view.SetPlaybackState(_playbackService.CurrentState);
+                    _view.SetPlaybackTime(_playbackService.CurrentPlaybackTime);
+                    return;
+                }
+
+                _playbackState = _playbackService.CurrentState;
+
+                _view.SetPlaybackTime(_playbackService.CurrentPlaybackTime);
+                _view.SetPlaybackState(_playbackState);
+                _view.SetStatus(playResult.Message);
+                _view.StartPlaybackTimer();
             }
-            catch (Exception ex)
+            finally
             {
-                _view.ShowMessage(ex.Message);
-                return;
+                EndPlaybackCommand();
             }
-
-            PlayerPlaybackResult playResult =
-                await _playbackService.PlayAsync(
-                    request,
-                    CancellationToken.None);
-
-            if (!playResult.Success)
-            {
-                _view.ShowMessage(playResult.Message);
-                return;
-            }
-
-            _currentPlaybackDateTime = request.PlayStartTime;
-            _playbackState = _playbackService.CurrentState;
-
-            _view.SetPlaybackDateTime(_currentPlaybackDateTime);
-            _view.SetPlaybackState(_playbackState);
-            _view.SetStatus(playResult.Message);
-
-            _view.ShowMessage(
-                BuildPlaybackRequestDebugMessage(request));
         }
 
         /// <summary>
@@ -164,11 +196,33 @@ public PlayerPresenter(
         /// </summary>
         private async void OnFastReverse(object sender, EventArgs e)
         {
-            PlayerPlaybackResult result =
-                await _playbackService.FastReverseAsync(
-                    CancellationToken.None);
+            if (!TryBeginPlaybackCommand())
+            {
+                return;
+            }
 
-            HandlePlaybackCommandResult(result);
+            try
+            {
+                PlayerPlaybackResult result =
+                    await _playbackService.FastReverseAsync(
+                        CancellationToken.None);
+
+                HandlePlaybackCommandResult(result);
+
+                if (!result.Success)
+                {
+                    return;
+                }
+
+                _view.SetPlaybackTime(
+                    _playbackService.CurrentPlaybackTime);
+
+                _view.StartPlaybackTimer();
+            }
+            finally
+            {
+                EndPlaybackCommand();
+            }
         }
 
         /// <summary>
@@ -176,17 +230,34 @@ public PlayerPresenter(
         /// </summary>
         private async void OnSeekBackward10(object sender, EventArgs e)
         {
-            PlayerPlaybackResult result =
-                await _playbackService.SeekSecondsAsync(
-                    -10,
-                    CancellationToken.None);
-
-            if (result.Success)
+            if (!TryBeginPlaybackCommand())
             {
-                MovePlaybackTime(-10);
+                return;
             }
 
-            HandlePlaybackCommandResult(result);
+            try
+            {
+                PlayerPlaybackResult result =
+                    await _playbackService.SeekSecondsAsync(
+                        -10,
+                        CancellationToken.None);
+
+                HandlePlaybackCommandResult(result);
+
+                if (!result.Success)
+                {
+                    return;
+                }
+
+                _view.SetPlaybackTime(
+                    _playbackService.CurrentPlaybackTime);
+
+                _view.StartPlaybackTimer();
+            }
+            finally
+            {
+                EndPlaybackCommand();
+            }
         }
 
         /// <summary>
@@ -194,22 +265,57 @@ public PlayerPresenter(
         /// </summary>
         private async void OnPlayPause(object sender, EventArgs e)
         {
-            PlayerPlaybackResult result;
-
-            if (_playbackService.CurrentState == PlaybackState.Playing
-                || _playbackService.CurrentState == PlaybackState.FastForward
-                || _playbackService.CurrentState == PlaybackState.FastReverse)
+            if (!TryBeginPlaybackCommand())
             {
-                result = await _playbackService.PauseAsync(
-                    CancellationToken.None);
-            }
-            else
-            {
-                result = await _playbackService.ResumeAsync(
-                    CancellationToken.None);
+                return;
             }
 
-            HandlePlaybackCommandResult(result);
+            try
+            {
+                PlayerPlaybackResult result;
+
+                if (_playbackService.CurrentState == PlaybackState.Playing
+                    || _playbackService.CurrentState == PlaybackState.FastForward
+                    || _playbackService.CurrentState == PlaybackState.FastReverse)
+                {
+                    result = await _playbackService.PauseAsync(
+                        CancellationToken.None);
+                }
+                else if (_playbackService.CurrentState == PlaybackState.Paused)
+                {
+                    result = await _playbackService.ResumeAsync(
+                        CancellationToken.None);
+                }
+                else
+                {
+                    _view.ShowMessage(
+                        "먼저 조회 시작시간과 종료시간을 선택한 뒤 검색 버튼으로 영상을 재생해 주세요.");
+                    return;
+                }
+
+                HandlePlaybackCommandResult(result);
+
+                if (!result.Success)
+                {
+                    return;
+                }
+
+                _view.SetPlaybackTime(
+                    _playbackService.CurrentPlaybackTime);
+
+                if (_playbackService.CurrentState == PlaybackState.Paused)
+                {
+                    _view.StopPlaybackTimer();
+                }
+                else if (_playbackService.CurrentState == PlaybackState.Playing)
+                {
+                    _view.StartPlaybackTimer();
+                }
+            }
+            finally
+            {
+                EndPlaybackCommand();
+            }
         }
 
         /// <summary>
@@ -217,17 +323,34 @@ public PlayerPresenter(
         /// </summary>
         private async void OnSeekForward10(object sender, EventArgs e)
         {
-            PlayerPlaybackResult result =
-                await _playbackService.SeekSecondsAsync(
-                    10,
-                    CancellationToken.None);
-
-            if (result.Success)
+            if (!TryBeginPlaybackCommand())
             {
-                MovePlaybackTime(10);
+                return;
             }
 
-            HandlePlaybackCommandResult(result);
+            try
+            {
+                PlayerPlaybackResult result =
+                    await _playbackService.SeekSecondsAsync(
+                        10,
+                        CancellationToken.None);
+
+                HandlePlaybackCommandResult(result);
+
+                if (!result.Success)
+                {
+                    return;
+                }
+
+                _view.SetPlaybackTime(
+                    _playbackService.CurrentPlaybackTime);
+
+                _view.StartPlaybackTimer();
+            }
+            finally
+            {
+                EndPlaybackCommand();
+            }
         }
 
         /// <summary>
@@ -235,22 +358,69 @@ public PlayerPresenter(
         /// </summary>
         private async void OnFastForward(object sender, EventArgs e)
         {
-            PlayerPlaybackResult result =
-                await _playbackService.FastForwardAsync(
-                    CancellationToken.None);
+            if (!TryBeginPlaybackCommand())
+            {
+                return;
+            }
 
-            HandlePlaybackCommandResult(result);
+            try
+            {
+                PlayerPlaybackResult result =
+                    await _playbackService.FastForwardAsync(
+                        CancellationToken.None);
+
+                HandlePlaybackCommandResult(result);
+
+                if (!result.Success)
+                {
+                    return;
+                }
+
+                _view.SetPlaybackTime(
+                    _playbackService.CurrentPlaybackTime);
+
+                _view.StartPlaybackTimer();
+            }
+            finally
+            {
+                EndPlaybackCommand();
+            }
         }
 
         /// <summary>
         /// PlayerView 종료 요청을 처리한다.
+        /// NVR 재생과 privier 리소스를 정리한 뒤 화면을 닫는다.
         /// </summary>
         private async void OnClose(object sender, EventArgs e)
         {
-            await _playbackService.StopAsync(
-                CancellationToken.None);
+            if (_isPlaybackCommandRunning)
+            {
+                               _view.ShowMessage(
+                    "재생 명령을 처리 중입니다."
+                    + Environment.NewLine
+                    + "처리가 완료된 후 whdfygo 주세요.");
+                return;
+            }
 
-            _view.CloseView();
+            if (!TryBeginPlaybackCommand())
+            {
+                return;
+            }
+
+            try
+            {
+                _view.StopPlaybackTimer();
+
+                await _playbackService.StopAsync(CancellationToken.None);
+
+                _playbackService.Dispose();
+
+                _view.CloseView();
+            }
+            finally
+            {
+                EndPlaybackCommand();
+            }
         }
 
         /// <summary>
@@ -375,21 +545,63 @@ public PlayerPresenter(
             _currentPlaybackDateTime =
                 _currentPlaybackDateTime.Value.AddSeconds(seconds);
 
-            _view.SetPlaybackDateTime(_currentPlaybackDateTime);
+            //_view.SetPlaybackDateTime(_currentPlaybackDateTime);
         }
-        
+
 
 
         /// <summary>
-        /// PlayerView에서 설정 버튼 클릭 시 설정 화면을 열고,
-        /// 저장되었으면 로컬 설정을 다시 불러와 화면을 갱신한다.
+        /// PlayerView에서 설정 버튼 클릭 시 설정 화면을 연다.
+        /// 재생 중이면 먼저 재생을 정지한 뒤 설정 화면을 실행한다.
+        /// 설정 저장 후에는 로컬 설정을 다시 불러와 화면을 갱신한다.
         /// </summary>
-        private void OnSettings(object sender, EventArgs e)
+        private async void OnSettings(object sender, EventArgs e)
         {
+            if (_isPlaybackCommandRunning)
+            {
+                _view.ShowMessage(
+                    "재생 명령을 처리 중입니다."
+                    + Environment.NewLine
+                    + "처리가 완료된 후 설정을 열어 주세요.");
+                return;
+            }
+
             if (_openSettingsFunc == null)
             {
                 _view.ShowMessage("설정 화면 실행 구성이 없습니다.");
                 return;
+            }
+
+            if (_playbackService.CurrentState != PlaybackState.Stopped)
+            {
+                bool confirmStop =
+                    _view.Confirm(
+                        "현재 영상이 재생 중입니다."
+                        + Environment.NewLine
+                        + "설정을 변경하려면 재생을 중지해야 합니다."
+                        + Environment.NewLine
+                        + "재생을 중지하고 설정 화면을 여시겠습니까?");
+
+                if (!confirmStop)
+                {
+                    return;
+                }
+
+                _view.StopPlaybackTimer();
+
+                PlayerPlaybackResult stopResult =
+                    await _playbackService.StopAsync(
+                        CancellationToken.None);
+
+                if (!stopResult.Success)
+                {
+                    _view.ShowMessage(stopResult.Message);
+                    return;
+                }
+
+                _view.SetPlaybackTime(null);
+                _view.SetPlaybackState(_playbackService.CurrentState);
+                _view.SetStatus("재생을 중지했습니다.");
             }
 
             bool saved = _openSettingsFunc();
@@ -404,7 +616,8 @@ public PlayerPresenter(
                 return;
             }
 
-            ViewerConfig reloadedConfig = _reloadConfigFunc();
+            ViewerConfig reloadedConfig =
+                _reloadConfigFunc();
 
             if (reloadedConfig == null)
             {
@@ -432,7 +645,8 @@ public PlayerPresenter(
         /// </summary>
         private void ReloadViewByConfig()
         {
-            List<int> counterNumbers = GetCounterNumbers();
+            List<int> counterNumbers =
+                GetCounterNumbers();
 
             _view.SetCounterNumbers(counterNumbers);
 
@@ -447,6 +661,8 @@ public PlayerPresenter(
             _view.SelectCounterNo(counterNumbers[0]);
             UpdateSelectedCounterInfo();
         }
+
+
         /// <summary>
         /// 검색 요청 상태를 확인하기 위한 임시 메시지를 생성한다.
         /// </summary>
@@ -502,9 +718,15 @@ public PlayerPresenter(
             }
 
             int counterNo = _view.SelectedCounterNo.Value;
-            DateTime searchDateTime = _view.SearchDateTime;
-            int beforeSeconds = _view.SearchAdjustSeconds;
-            int afterCompleteSeconds = GetAfterCompleteSeconds();
+
+            DateTime startTime = _view.SearchStartTime;
+            DateTime endTime = _view.SearchEndTime;
+
+            if (startTime >= endTime)
+            {
+                throw new InvalidOperationException(
+                    "조회 시작시간은 조회 종료시간보다 이전이어야 합니다.");
+            }
 
             CounterMap leftMap =
                 FindCounterMap(counterNo, ScreenPosition.Left);
@@ -521,9 +743,13 @@ public PlayerPresenter(
             var request = new PlayerPlaybackRequest
             {
                 CounterNo = counterNo,
-                SearchDateTime = searchDateTime,
-                PlayStartTime = searchDateTime.AddSeconds(-beforeSeconds),
-                PlayEndTime = searchDateTime.AddSeconds(afterCompleteSeconds)
+
+                // 기존 모델 호환용 기준시간이다.
+                // 직접 구간 조회에서는 조회 시작시간을 기준값으로 사용한다.
+                SearchDateTime = startTime,
+
+                PlayStartTime = startTime,
+                PlayEndTime = endTime
             };
 
             AddChannelTargetIfExists(
@@ -632,9 +858,8 @@ public PlayerPresenter(
 
             lines.Add("영상 재생 요청 정보");
             lines.Add("계산대번호: " + request.CounterNo);
-            lines.Add("영상검색일시: " + request.SearchDateTime.ToString("yyyy-MM-dd tt hh:mm:ss"));
-            lines.Add("재생 시작: " + request.PlayStartTime.ToString("yyyy-MM-dd tt hh:mm:ss"));
-            lines.Add("재생 종료: " + request.PlayEndTime.ToString("yyyy-MM-dd tt hh:mm:ss"));
+            lines.Add("조회 시작시간: " + request.PlayStartTime.ToString("yyyy-MM-dd HH:mm:ss"));
+            lines.Add("조회 종료시간: " + request.PlayEndTime.ToString("yyyy-MM-dd HH:mm:ss"));
             lines.Add("");
 
             foreach (PlayerChannelTarget channel in request.Channels)
@@ -671,7 +896,31 @@ public PlayerPresenter(
             DateTime? playbackTime =
                 _playbackService.CurrentPlaybackTime;
 
-            _view.SetPlaybackDateTime(playbackTime);
+            _view.SetPlaybackTime(playbackTime);
+        }
+
+        /// <summary>
+        /// 재생 명령을 실행할 수 있는지 확인한다.
+        /// 이미 다른 재생 명령이 처리 중이면 false를 반환한다.
+        /// </summary>
+        private bool TryBeginPlaybackCommand()
+        {
+            if (_isPlaybackCommandRunning)
+            {
+                _view.SetStatus("이전 재생 명령을 처리 중입니다.");
+                return false;
+            }
+
+            _isPlaybackCommandRunning = true;
+            return true;
+        }
+
+        /// <summary>
+        /// 재생 명령 실행 상태를 해제한다.
+        /// </summary>
+        private void EndPlaybackCommand()
+        {
+            _isPlaybackCommandRunning = false;
         }
     }
 }

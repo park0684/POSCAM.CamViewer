@@ -33,6 +33,8 @@ namespace CamViewer.Services
         private PlayerPlaybackRequest _currentRequest;
         private DateTime? _currentPlaybackTime;
         private DateTime? _playbackClockStartedAtUtc;
+        private bool _disposed;
+        private PlaybackSpeed _currentSpeed;
 
         /// <summary>
         /// 현재 재생 상태.
@@ -55,6 +57,43 @@ namespace CamViewer.Services
             _sessions = new Dictionary<int, INvrPlaybackSession>();
 
             CurrentState = PlaybackState.Stopped;
+            _currentSpeed = new PlaybackSpeed();
+        }
+
+        /// <summary>
+        /// 서비스가 이미 해제되었는지 확인한다.
+        /// </summary>
+        private void EnsureNotDisposed()
+        {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(
+                    GetType().FullName);
+            }
+        }
+
+        /// <summary>
+        /// NVR 재생 서비스가 보유한 세션과 Provider 리소스를 정리한다.
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            try
+            {
+                StopAsync(CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            catch
+            {
+                // 종료 정리 중 발생한 예외는 프로그램 종료 흐름을 막지 않는다.
+            }
+
+            _disposed = true;
         }
 
         /// <summary>
@@ -64,6 +103,8 @@ namespace CamViewer.Services
             PlayerPlaybackRequest request,
             CancellationToken cancellationToken)
         {
+            EnsureNotDisposed();
+
             if (request == null)
             {
                 return PlayerPlaybackResult.Fail(
@@ -78,6 +119,18 @@ namespace CamViewer.Services
                     "PLAYBACK_CHANNEL_REQUIRED");
             }
 
+            if (_currentSpeed != PlaybackSpeed.Normal)
+            {
+                PlayerPlaybackResult speedResult =
+                    await SetPlaybackSpeedAsync(
+                        _currentSpeed,
+                        cancellationToken);
+
+                if (!speedResult.Success)
+                {
+                    return speedResult;
+                }
+            }
             PlayerPlaybackResult stopResult =
                 await StopAsync(cancellationToken);
 
@@ -170,6 +223,8 @@ namespace CamViewer.Services
         public async Task<PlayerPlaybackResult> PauseAsync(
             CancellationToken cancellationToken)
         {
+            EnsureNotDisposed();
+
             if (_sessions.Count == 0)
             {
                 return PlayerPlaybackResult.Fail(
@@ -210,6 +265,8 @@ namespace CamViewer.Services
         public async Task<PlayerPlaybackResult> ResumeAsync(
             CancellationToken cancellationToken)
         {
+            EnsureNotDisposed();
+
             if (_sessions.Count == 0)
             {
                 return PlayerPlaybackResult.Fail(
@@ -250,6 +307,8 @@ namespace CamViewer.Services
             int seconds,
             CancellationToken cancellationToken)
         {
+            EnsureNotDisposed();
+
             if (_sessions.Count == 0)
             {
                 return PlayerPlaybackResult.Fail(
@@ -322,46 +381,78 @@ namespace CamViewer.Services
 
         /// <summary>
         /// 빠른재생을 요청한다.
+        /// 현재 Dahua Provider 공통 구현 전 단계에서는 미지원으로 처리한다.
         /// </summary>
         public Task<PlayerPlaybackResult> FastForwardAsync(
             CancellationToken cancellationToken)
         {
+            EnsureNotDisposed();
+
+            if (_sessions.Count == 0)
+            {
+                return Task.FromResult(
+                    PlayerPlaybackResult.Fail(
+                        "빠른재생할 재생 세션이 없습니다.",
+                        "PLAYBACK_NOT_STARTED"));
+            }
+
             return Task.FromResult(
                 PlayerPlaybackResult.Fail(
-                    "빠른재생은 현재 NVR 공통 Provider 인터페이스에서 아직 지원하지 않습니다.",
+                    "빠른재생 기능은 아직 지원되지 않습니다.",
                     "FAST_FORWARD_NOT_SUPPORTED"));
         }
 
         /// <summary>
         /// 빠른 역재생을 요청한다.
+        /// 현재 Dahua Provider 공통 구현 전 단계에서는 미지원으로 처리한다.
         /// </summary>
         public Task<PlayerPlaybackResult> FastReverseAsync(
             CancellationToken cancellationToken)
         {
+            if (_sessions.Count == 0)
+            {
+                return Task.FromResult(
+                    PlayerPlaybackResult.Fail(
+                        "빠른 역재생할 재생 세션이 없습니다.",
+                        "PLAYBACK_NOT_STARTED"));
+            }
+
             return Task.FromResult(
                 PlayerPlaybackResult.Fail(
-                    "빠른 역재생은 현재 NVR 공통 Provider 인터페이스에서 아직 지원하지 않습니다.",
+                    "빠른 역재생 기능은 아직 지원되지 않습니다.",
                     "FAST_REVERSE_NOT_SUPPORTED"));
         }
-
         /// <summary>
-        /// 재생을 중지한다.
+        /// 재생을 중지하고 모든 세션/Provider 리소스를 정리한다.
+        /// 일부 정리 실패가 있어도 나머지 리소스 정리는 계속 수행한다.
         /// </summary>
         public async Task<PlayerPlaybackResult> StopAsync(
             CancellationToken cancellationToken)
         {
+            EnsureNotDisposed();
+
+            string warningMessage = string.Empty;
+
             foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions.ToList())
             {
-                INvrProvider provider = GetProviderByNvrNo(item.Value.NvrNo);
-
-                if (provider != null)
+                try
                 {
-                    await provider.StopAsync(
-                        item.Value,
-                        cancellationToken);
-                }
+                    INvrProvider provider =
+                        GetProviderByNvrNo(item.Value.NvrNo);
 
-                item.Value.Dispose();
+                    if (provider != null)
+                    {
+                        await provider.StopAsync(
+                            item.Value,
+                            cancellationToken);
+                    }
+
+                    item.Value.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    warningMessage = ex.Message;
+                }
             }
 
             _sessions.Clear();
@@ -374,10 +465,17 @@ namespace CamViewer.Services
                 }
                 catch
                 {
-                    // 종료 과정에서는 로그아웃 실패로 프로그램 흐름을 막지 않는다.
+                    // 로그아웃 실패 시에도 Dispose는 계속 진행한다.
                 }
 
-                item.Value.Dispose();
+                try
+                {
+                    item.Value.Dispose();
+                }
+                catch
+                {
+                    // 종료 과정에서 Dispose 실패는 무시한다.
+                }
             }
 
             _providers.Clear();
@@ -386,6 +484,13 @@ namespace CamViewer.Services
             _currentPlaybackTime = null;
             _playbackClockStartedAtUtc = null;
             CurrentState = PlaybackState.Stopped;
+
+            if (!string.IsNullOrWhiteSpace(warningMessage))
+            {
+                return PlayerPlaybackResult.Ok(
+                    "재생은 중지되었지만 일부 정리 중 경고가 발생했습니다. "
+                    + warningMessage);
+            }
 
             return PlayerPlaybackResult.Ok("재생을 중지했습니다.");
         }
@@ -621,6 +726,80 @@ namespace CamViewer.Services
                     ? "NVR 처리에 실패했습니다."
                     : result.Message,
                 result.Status.ToString());
+        }
+
+        /// <summary>
+        /// 현재 재생속도를 변경한다.
+        /// </summary>
+        public async Task<PlayerPlaybackResult> SetPlaybackSpeedAsync(
+            PlaybackSpeed speed,
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            _currentSpeed = speed;
+
+            if (_sessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "재생속도가 설정되었습니다. 다음 재생부터 적용됩니다.");
+            }
+
+            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
+            {
+                INvrProvider provider =
+                    GetProviderByNvrNo(item.Value.NvrNo);
+
+                if (provider == null)
+                {
+                    continue;
+                }
+
+                ProviderCapabilities capabilities =
+                    provider.GetCapabilities();
+
+                if (capabilities == null || !capabilities.CanChangeSpeed)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "선택한 NVR Provider는 재생속도 변경을 지원하지 않습니다.",
+                        "PLAYBACK_SPEED_NOT_SUPPORTED");
+                }
+
+                NvrResult result =
+                    await provider.SetPlaybackSpeedAsync(
+                        item.Value,
+                        speed,
+                        cancellationToken);
+
+                if (!result.Success)
+                {
+                    return ToPlayerResult(result);
+                }
+            }
+
+            return PlayerPlaybackResult.Ok(
+                GetPlaybackSpeedText(speed) + "으로 재생속도를 변경했습니다.");
+        }
+
+        private static string GetPlaybackSpeedText(PlaybackSpeed speed)
+        {
+            switch (speed)
+            {
+                case PlaybackSpeed.Half:
+                    return "0.5배속";
+
+                case PlaybackSpeed.Double:
+                    return "2배속";
+
+                case PlaybackSpeed.Quad:
+                    return "4배속";
+
+                case PlaybackSpeed.Octuple:
+                    return "8배속";
+
+                default:
+                    return "1배속";
+            }
         }
     }
 }

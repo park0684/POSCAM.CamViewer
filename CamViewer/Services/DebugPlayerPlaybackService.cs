@@ -186,5 +186,10 @@ namespace CamViewer.Services
             return Task.FromResult(
                 PlayerPlaybackResult.Ok("재생 중지 요청이 처리되었습니다."));
         }
+
+        public void Dispose()
+        {
+            throw new NotImplementedException();
+        }
     }
 }

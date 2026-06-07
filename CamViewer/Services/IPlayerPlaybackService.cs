@@ -11,7 +11,7 @@ namespace CamViewer.Services
     /// 실제 NVR Provider가 비동기 방식으로 동작하므로,
     /// PlayerPlaybackService도 비동기 방식으로 정의한다.
     /// </summary>
-    public interface IPlayerPlaybackService
+    public interface IPlayerPlaybackService : IDisposable
     {
         /// <summary>
         /// 현재 재생 상태.
@@ -66,6 +66,14 @@ namespace CamViewer.Services
         /// 재생을 중지한다.
         /// </summary>
         Task<PlayerPlaybackResult> StopAsync(
+            CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 재생속도를 변경한다.
+        /// 재생 중이면 즉시 적용하고, 재생 전이면 다음 재생부터 적용한다.
+        /// </summary>
+        Task<PlayerPlaybackResult> SetPlaybackSpeedAsync(
+            PlaybackSpeed speed,
             CancellationToken cancellationToken);
     }
 }

@@ -99,25 +99,25 @@ namespace CamViewer.Views
         {
             get
             {
-                DateTime date = dtpSearchDate.Value.Date;
+                DateTime date = dtpSearchStartDate.Value.Date;
 
-                int hour = ParseSelectedNumber(cboHour, 0);
-                int minute = ParseSelectedNumber(cboMinute, 0);
-                int second = ParseSelectedNumber(cboSecond, 0);
+                int hour = ParseSelectedNumber(cboStartHour, 0);
+                int minute = ParseSelectedNumber(cboStartMinute, 0);
+                int second = ParseSelectedNumber(cboStartSecond, 0);
 
-                string ampm = cboAmPm.SelectedItem == null
-                    ? "오전"
-                    : cboAmPm.SelectedItem.ToString();
+                //string ampm = cboStartAmPm.SelectedItem == null
+                //    ? "오전"
+                //    : cboStartAmPm.SelectedItem.ToString();
 
-                if (ampm == "오후" && hour < 12)
-                {
-                    hour += 12;
-                }
+                //if (ampm == "오후" && hour < 12)
+                //{
+                //    hour += 12;
+                //}
 
-                if (ampm == "오전" && hour == 12)
-                {
-                    hour = 0;
-                }
+                //if (ampm == "오전" && hour == 12)
+                //{
+                //    hour = 0;
+                //}
 
                 return date
                     .AddHours(hour)
@@ -148,6 +148,36 @@ namespace CamViewer.Views
         }
 
         /// <summary>
+        /// 조회 시작시간.
+        /// </summary>
+        public DateTime SearchStartTime
+        {
+            get
+            {
+                return BuildDateTime(
+                    dtpSearchStartDate,
+                    cboStartHour,
+                    cboStartMinute,
+                    cboStartSecond);
+            }
+        }
+
+        /// <summary>
+        /// 조회 종료시간.
+        /// </summary>
+        public DateTime SearchEndTime
+        {
+            get
+            {
+                return BuildDateTime(
+                    dtpSearchEndDate,
+                    cboEndHour,
+                    cboEndMinute,
+                    cboEndSecond);
+            }
+        }
+
+        /// <summary>
         /// 좌측 영상 출력 패널 Handle.
         /// </summary>
         public IntPtr LeftVideoHandle
@@ -163,6 +193,35 @@ namespace CamViewer.Views
             get { return pnlRightVideo.Handle; }
         }
 
+        /// <summary>
+        /// 사용자 확인 메시지를 표시한다.
+        /// </summary>
+        public bool Confirm(string message)
+        {
+            return MessageBox.Show(
+                this,
+                message,
+                "POSCAM CamViewer",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) == DialogResult.Yes;
+        }
+
+        public PlaybackSpeed SelectedPlaybackSpeed
+        {
+            get
+            {
+                if (cboPlaybackSpeed.SelectedItem == null)
+                {
+                    return PlaybackSpeed.Normal;
+                }
+                PlaybackSpeedItem item = cboPlaybackSpeed.SelectedItem as PlaybackSpeedItem;
+
+                return item == null ? PlaybackSpeed.Normal: item.Speed ;
+            }
+        }
+
+        /* evetns */
+
         public event EventHandler LoadViewEvent;
         public event EventHandler CounterChangedEvent;
         public event EventHandler SearchEvent;
@@ -175,7 +234,7 @@ namespace CamViewer.Views
         public event EventHandler CloseEvent;
         public event EventHandler MinimizeEvent;
         public event EventHandler PlaybackTimerTickEvent;
-
+        public event EventHandler PlaybackSpeedChangedEvent;
         /// <summary>
         /// 계산대번호 목록을 설정한다.
         /// </summary>
@@ -223,7 +282,7 @@ namespace CamViewer.Views
         /// </summary>
         public void SetSearchDateTime(DateTime searchDateTime)
         {
-            dtpSearchDate.Value = searchDateTime.Date;
+            dtpSearchStartDate.Value = searchDateTime.Date;
 
             int hour24 = searchDateTime.Hour;
             int hour12 = hour24 % 12;
@@ -233,10 +292,10 @@ namespace CamViewer.Views
                 hour12 = 12;
             }
 
-            cboAmPm.SelectedItem = hour24 >= 12 ? "오후" : "오전";
-            cboHour.SelectedItem = hour12.ToString("00");
-            cboMinute.SelectedItem = searchDateTime.Minute.ToString("00");
-            cboSecond.SelectedItem = searchDateTime.Second.ToString("00");
+            //cboStartAmPm.SelectedItem = hour24 >= 12 ? "오후" : "오전";
+            cboStartHour.SelectedItem = hour12.ToString("00");
+            cboStartMinute.SelectedItem = searchDateTime.Minute.ToString("00");
+            cboStartSecond.SelectedItem = searchDateTime.Second.ToString("00");
         }
 
         /// <summary>
@@ -393,6 +452,35 @@ namespace CamViewer.Views
             WindowState = FormWindowState.Minimized;
         }
 
+        public void SetPlaybackSpeedOptions()
+        {
+            cboPlaybackSpeed.Items.Clear();
+
+            cboPlaybackSpeed.Items.Add(new PlaybackSpeedItem("0.5배속", PlaybackSpeed.Half));
+            cboPlaybackSpeed.Items.Add(new PlaybackSpeedItem("1배속", PlaybackSpeed.Normal));
+            cboPlaybackSpeed.Items.Add(new PlaybackSpeedItem("2배속", PlaybackSpeed.Double));
+            cboPlaybackSpeed.Items.Add(new PlaybackSpeedItem("4배속", PlaybackSpeed.Quad));
+            cboPlaybackSpeed.Items.Add(new PlaybackSpeedItem("8배속", PlaybackSpeed.Octuple));
+
+            cboPlaybackSpeed.DropDownStyle = ComboBoxStyle.DropDownList;
+            SelectPlaybackSpeed(PlaybackSpeed.Normal);
+        }
+
+        public void SelectPlaybackSpeed(PlaybackSpeed speed)
+        {
+            for (int index = 0; index < cboPlaybackSpeed.Items.Count; index++)
+            {
+                PlaybackSpeedItem item = cboPlaybackSpeed.Items[index] as PlaybackSpeedItem;
+                if (item != null && item.Speed == speed)
+                {
+                    cboPlaybackSpeed.SelectedIndex = index;
+                    return;
+                }
+            }
+        }
+
+        /*helper*/
+
         /// <summary>
         /// 화면 컨트롤의 기본값을 설정한다.
         /// </summary>
@@ -416,7 +504,7 @@ namespace CamViewer.Views
             nudSearchAdjustSeconds.Value = 30;
 
 
-            SetPlaybackDateTime(null);
+            //SetPlaybackDateTime(null);
             SetPlaybackState(PlaybackState.Stopped);
 
             SetLeftVideoTitle("좌측 영상");
@@ -426,38 +514,51 @@ namespace CamViewer.Views
         }
 
         /// <summary>
-        /// 시간 선택 콤보박스 항목을 초기화한다.
+        /// 시작/종료 시간 선택 콤보박스를 24시간 기준으로 초기화한다.
         /// </summary>
         private void InitializeTimeComboBoxes()
         {
-            cboAmPm.Items.Clear();
-            cboAmPm.Items.Add("오전");
-            cboAmPm.Items.Add("오후");
+            InitializeHourComboBox(cboStartHour);
+            InitializeHourComboBox(cboEndHour);
 
-            cboHour.Items.Clear();
-            for (int hour = 1; hour <= 12; hour++)
+            InitializeMinuteSecondComboBox(cboStartMinute);
+            InitializeMinuteSecondComboBox(cboStartSecond);
+            InitializeMinuteSecondComboBox(cboEndMinute);
+            InitializeMinuteSecondComboBox(cboEndSecond);
+        }
+
+        /// <summary>
+        /// 시간 콤보박스를 00~23 기준으로 초기화한다.
+        /// </summary>
+        private static void InitializeHourComboBox(
+            ComboBox comboBox)
+        {
+            comboBox.Items.Clear();
+
+            for (int hour = 0; hour <= 23; hour++)
             {
-                cboHour.Items.Add(hour.ToString("00"));
+                comboBox.Items.Add(hour.ToString("00"));
             }
 
-            cboMinute.Items.Clear();
-            cboSecond.Items.Clear();
+            comboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            comboBox.SelectedIndex = 0;
+        }
+
+        /// <summary>
+        /// 분/초 콤보박스를 00~59 기준으로 초기화한다.
+        /// </summary>
+        private static void InitializeMinuteSecondComboBox(
+            ComboBox comboBox)
+        {
+            comboBox.Items.Clear();
 
             for (int value = 0; value <= 59; value++)
             {
-                cboMinute.Items.Add(value.ToString("00"));
-                cboSecond.Items.Add(value.ToString("00"));
+                comboBox.Items.Add(value.ToString("00"));
             }
 
-            cboAmPm.DropDownStyle = ComboBoxStyle.DropDownList;
-            cboHour.DropDownStyle = ComboBoxStyle.DropDownList;
-            cboMinute.DropDownStyle = ComboBoxStyle.DropDownList;
-            cboSecond.DropDownStyle = ComboBoxStyle.DropDownList;
-
-            cboAmPm.SelectedIndex = 0;
-            cboHour.SelectedIndex = 0;
-            cboMinute.SelectedIndex = 0;
-            cboSecond.SelectedIndex = 0;
+            comboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            comboBox.SelectedIndex = 0;
         }
 
         /// <summary>
@@ -514,6 +615,7 @@ namespace CamViewer.Views
 
             pnlTitleBar.MouseDown += OnTitleBarMouseDown;
             lblTitle.MouseDown += OnTitleBarMouseDown;
+            cboPlaybackSpeed.SelectedIndexChanged += OnPlaybackSpeedChanged;
         }
 
         /// <summary>
@@ -724,6 +826,14 @@ namespace CamViewer.Views
         }
 
         /// <summary>
+        /// 재생속도 선택 변경을 Presenter에 전달한다.
+        /// </summary>
+        private void OnPlaybackSpeedChanged(object sender, EventArgs e)
+        {
+            PlaybackSpeedChangedEvent?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
         /// ComboBox 선택값을 숫자로 변환한다.
         /// </summary>
         private static int ParseSelectedNumber(
@@ -774,5 +884,114 @@ namespace CamViewer.Views
                 HtCaption,
                 0);
         }
+
+        /// <summary>
+        /// 날짜 선택 컨트롤과 24시간 콤보박스 값을 DateTime으로 조합한다.
+        /// </summary>
+        private static DateTime BuildDateTime(
+            DateTimePicker datePicker,
+            ComboBox hourComboBox,
+            ComboBox minuteComboBox,
+            ComboBox secondComboBox)
+        {
+            DateTime date = datePicker.Value.Date;
+
+            int hour = ParseSelectedNumber(hourComboBox, 0);
+            int minute = ParseSelectedNumber(minuteComboBox, 0);
+            int second = ParseSelectedNumber(secondComboBox, 0);
+
+            return date
+                .AddHours(hour)
+                .AddMinutes(minute)
+                .AddSeconds(second);
+        }
+
+        /// <summary>
+        /// 조회 시작시간과 종료시간을 설정한다.
+        /// </summary>
+        public void SetSearchRange(
+            DateTime startTime,
+            DateTime endTime)
+        {
+            SetDateTimeToControls(
+                dtpSearchStartDate,
+                cboStartHour,
+                cboStartMinute,
+                cboStartSecond,
+                startTime);
+
+            SetDateTimeToControls(
+                dtpSearchEndDate,
+                cboEndHour,
+                cboEndMinute,
+                cboEndSecond,
+                endTime);
+        }
+
+        /// <summary>
+        /// DateTime 값을 날짜/시/분/초 컨트롤에 반영한다.
+        /// </summary>
+        private static void SetDateTimeToControls(
+            DateTimePicker datePicker,
+            ComboBox hourComboBox,
+            ComboBox minuteComboBox,
+            ComboBox secondComboBox,
+            DateTime value)
+        {
+            datePicker.Value = value.Date;
+
+            SelectComboValue(
+                hourComboBox,
+                value.Hour.ToString("00"));
+
+            SelectComboValue(
+                minuteComboBox,
+                value.Minute.ToString("00"));
+
+            SelectComboValue(
+                secondComboBox,
+                value.Second.ToString("00"));
+        }
+
+        /// <summary>
+        /// ComboBox에서 지정한 값을 선택한다.
+        /// </summary>
+        private static void SelectComboValue(
+            ComboBox comboBox,
+            string value)
+        {
+            for (int index = 0; index < comboBox.Items.Count; index++)
+            {
+                if (comboBox.Items[index].ToString() == value)
+                {
+                    comboBox.SelectedIndex = index;
+                    return;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 재생속도 ComboBox 표시 항목이다.
+        /// </summary>
+        private sealed class PlaybackSpeedItem
+        {
+            public PlaybackSpeedItem(
+                string text,
+                PlaybackSpeed speed)
+            {
+                Text = text;
+                Speed = speed;
+            }
+
+            public string Text { get; private set; }
+
+            public PlaybackSpeed Speed { get; private set; }
+
+            public override string ToString()
+            {
+                return Text;
+            }
+        }
     }
+
 }

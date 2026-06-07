@@ -94,6 +94,7 @@
     <Compile Include="Presenters\LandingPresenter.cs" />
     <Compile Include="Presenters\LoginPresenter.cs" />
     <Compile Include="Presenters\NvrEditPresenter.cs" />
+    <Compile Include="Presenters\PlaybackSpeed.cs" />
     <Compile Include="Presenters\PlayerPresenter.cs" />
     <Compile Include="Presenters\SettingsPresenter.cs" />
     <Compile Include="Program.cs" />

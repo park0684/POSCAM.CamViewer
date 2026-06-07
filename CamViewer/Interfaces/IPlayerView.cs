@@ -30,6 +30,16 @@ namespace CamViewer.Interfaces
         int PlayAdjustSeconds { get; }
 
         /// <summary>
+        /// 조회 시작시간.
+        /// </summary>
+        DateTime SearchStartTime { get; }
+
+        /// <summary>
+        /// 조회 종료시간.
+        /// </summary>
+        DateTime SearchEndTime { get; }
+
+        /// <summary>
         /// 좌측 영상 출력 패널 Handle.
         /// NVR SDK 재생 시 사용한다.
         /// </summary>
@@ -40,6 +50,16 @@ namespace CamViewer.Interfaces
         /// NVR SDK 재생 시 사용한다.
         /// </summary>
         IntPtr RightVideoHandle { get; }
+
+        /// <summary>
+        /// 사용자 확인 메시지를 표시한다.
+        /// </summary>
+        bool Confirm(string message);
+
+        /// <summary>
+        /// 선택된 재생속도.
+        /// </summary>
+        PlaybackSpeed SelectedPlaybackSpeed { get; }
 
         /// <summary>
         /// PlayerView가 최초 표시될 때 발생한다.
@@ -97,6 +117,11 @@ namespace CamViewer.Interfaces
         event EventHandler CloseEvent;
 
         /// <summary>
+        /// 재생속도 선택값이 변경될 때 발생한다.
+        /// </summary>
+        event EventHandler PlaybackSpeedChangedEvent;
+
+        /// <summary>
         /// 재생 시간 갱신 타이머가 Tick될 때 발생한다.
         /// </summary>
         event EventHandler PlaybackTimerTickEvent;
@@ -128,8 +153,10 @@ namespace CamViewer.Interfaces
 
         /// <summary>
         /// 현재 영상재생시간을 표시한다.
+        /// 
+        /// SetPalybackTime으로 대체
         /// </summary>
-        void SetPlaybackDateTime(DateTime? playBackTime);
+        //void SetPlaybackDateTime(DateTime? playBackTime);
 
         /// <summary>
         /// 재생 상태에 맞게 버튼 표시를 변경한다.
@@ -175,5 +202,22 @@ namespace CamViewer.Interfaces
         /// 재생 시간 갱신 타이머를 중지한다.
         /// </summary>
         void StopPlaybackTimer();
+
+        /// <summary>
+        /// 조회 시작시간과 종료시간을 설정한다.
+        /// </summary>
+        void SetSearchRange(
+            DateTime startTime,
+            DateTime endTime);
+
+        /// <summary>
+        /// 재생속도 목록을 초기화한다.
+        /// </summary>
+        void SetPlaybackSpeedOptions();
+
+        /// <summary>
+        /// 재생속도를 선택한다.
+        /// </summary>
+        void SelectPlaybackSpeed(PlaybackSpeed speed);
     }
 }

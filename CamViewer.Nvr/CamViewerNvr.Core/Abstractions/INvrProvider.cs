@@ -1,8 +1,9 @@
-﻿using System;
-using System.Threading;
-using System.Threading.Tasks;
+﻿using CamViewer.Nvr.Core.Enums;
 using CamViewer.Nvr.Core.Models;
 using CamViewer.Nvr.Core.Results;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace CamViewer.Nvr.Core.Abstractions
 {
@@ -108,5 +109,14 @@ namespace CamViewer.Nvr.Core.Abstractions
         /// Provider에서 마지막으로 발생한 오류 정보를 반환한다.
         /// </summary>
         NvrErrorInfo GetLastError();
+
+        /// <summary>
+        /// 재생속도를 변경한다.
+        /// Provider가 지원하지 않으면 NotSupported를 반환한다.
+        /// </summary>
+        Task<NvrResult> SetPlaybackSpeedAsync(
+            INvrPlaybackSession session,
+            NvrPlaybackSpeed speed,
+            CancellationToken cancellationToken);
     }
 }
