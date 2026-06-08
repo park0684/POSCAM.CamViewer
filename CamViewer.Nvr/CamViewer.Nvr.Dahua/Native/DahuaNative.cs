@@ -259,6 +259,83 @@ namespace CamViewer.Nvr.Dahua.Native
             }
         }
 
+        private const int MAX_VIDEO_STREAM_NUM = 3;
+
+        /// <summary>
+        /// Dahua 영상 인코딩 옵션 중 해상도 확인에 필요한 최소 필드이다.
+        /// 
+        /// 주의:
+        /// 실제 SDK의 CFG_VIDEOENC_OPT 전체 구조체와 레이아웃이 다르면 파싱 결과가 틀릴 수 있다.
+        /// 반드시 사용 중인 Dahua SDK C# 예제의 CFG_VIDEOENC_OPT 정의와 비교해야 한다.
+        /// </summary>
+        [StructLayout(
+            LayoutKind.Sequential,
+            Pack = 1,
+            CharSet = CharSet.Ansi)]
+        internal struct CFG_VIDEOENC_OPT
+        {
+            /// <summary>
+            /// 너비 값 유효 여부.
+            /// </summary>
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool abWidth;
+
+            /// <summary>
+            /// 영상 너비.
+            /// </summary>
+            public int nWidth;
+
+            /// <summary>
+            /// 높이 값 유효 여부.
+            /// </summary>
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool abHeight;
+
+            /// <summary>
+            /// 영상 높이.
+            /// </summary>
+            public int nHeight;
+        }
+
+        /// <summary>
+        /// Dahua 채널 인코딩 설정.
+        /// 
+        /// 주의:
+        /// 이 구조체는 해상도 조회를 위한 최소 구조체 예시이다.
+        /// SDK 실제 정의와 다르면 반드시 SDK 예제 기준으로 교체해야 한다.
+        /// </summary>
+        [StructLayout(
+            LayoutKind.Sequential,
+            Pack = 1,
+            CharSet = CharSet.Ansi)]
+        internal struct CFG_ENCODE_INFO
+        {
+            /// <summary>
+            /// Main Stream 인코딩 설정 목록.
+            /// 일반적으로 0번 요소를 기본 Main Stream으로 사용한다.
+            /// </summary>
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = MAX_VIDEO_STREAM_NUM)]
+            public CFG_VIDEOENC_OPT[] stuMainStream;
+
+            /// <summary>
+            /// Sub Stream 인코딩 설정 목록.
+            /// </summary>
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = MAX_VIDEO_STREAM_NUM)]
+            public CFG_VIDEOENC_OPT[] stuExtraStream;
+
+            /// <summary>
+            /// 구조체 배열을 초기화한다.
+            /// </summary>
+            public static CFG_ENCODE_INFO Create()
+            {
+                return new CFG_ENCODE_INFO
+                {
+                    stuMainStream = new CFG_VIDEOENC_OPT[MAX_VIDEO_STREAM_NUM],
+                    stuExtraStream = new CFG_VIDEOENC_OPT[MAX_VIDEO_STREAM_NUM]
+                };
+            }
+        }
+
         #endregion
 
         #region SDK Initialization
@@ -508,6 +585,44 @@ namespace CamViewer.Nvr.Dahua.Native
             DahuaPlaybackControlType controlType,
             uint inValue,
             IntPtr outValue);
+
+        #endregion
+
+        #region Config
+
+        /// <summary>
+        /// Dahua New Config 인터페이스로 장비 설정을 조회한다.
+        /// 예: Encode 설정.
+        /// </summary>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi,
+            EntryPoint = "CLIENT_GetNewDevConfig")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_GetNewDevConfig(
+            IntPtr loginHandle,
+            [MarshalAs(UnmanagedType.LPStr)] string command,
+            int channelNo,
+            IntPtr outBuffer,
+            int outBufferSize,
+            ref int error,
+            int waitTime);
+
+        /// <summary>
+        /// Dahua New Config 조회 결과를 지정 구조체로 파싱한다.
+        /// </summary>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_ParseData(
+            [MarshalAs(UnmanagedType.LPStr)] string command,
+            IntPtr inBuffer,
+            ref CFG_ENCODE_INFO config,
+            int configSize,
+            IntPtr reserved);
 
         #endregion
     }

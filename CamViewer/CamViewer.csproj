@@ -87,8 +87,8 @@
     <Compile Include="Models\PlayerChannelTarget.cs" />
     <Compile Include="Models\PlayerPlaybackRequest.cs" />
     <Compile Include="Models\PlayerPlaybackResult.cs" />
+    <Compile Include="Models\PlayerVideoSourceInfoResult.cs" />
     <Compile Include="Models\TimelineSeekRequestedEventArgs.cs" />
-    <Compile Include="Models\VideoRenderMode.cs" />
     <Compile Include="Models\ViewModels\CounterMapKey.cs" />
     <Compile Include="Models\ViewModels\CounterMapListItem.cs" />
     <Compile Include="Models\ViewModels\NvrListItem.cs" />

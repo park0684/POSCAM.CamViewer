@@ -70,5 +70,13 @@ namespace CamViewerClient.Models.Config
         /// 삭제된 NVR번호를 다시 사용하지 않기 위해 설정에 함께 저장한다.
         /// </summary>
         public int NextNvrNo { get; set; }
+
+        /// <summary>
+        /// 영상 표시 방식.
+        /// </summary>
+        public VideoRenderMode VideoRenderMode { get; set; } =
+            VideoRenderMode.KeepAspectRatio;
+
+
     }
 }

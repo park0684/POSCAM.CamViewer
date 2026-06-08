@@ -621,5 +621,168 @@ namespace CamViewer.Nvr.Dahua.Sdk
                     Operation = "CLIENT_PlayBackControl"
                 });
         }
+
+        /// <summary>
+        /// Dahua NVR 채널의 영상 원본 정보를 조회한다.
+        /// 
+        /// PlayerView의 원본 비율 표시 모드에서 사용할
+        /// 채널 영상 Width / Height를 반환한다.
+        /// 
+        /// 주의:
+        /// Dahua SDK Native 설정 조회 과정에서 예외가 발생할 수 있으므로,
+        /// 반드시 여기서 예외를 NvrResult 실패 결과로 변환한다.
+        /// </summary>
+        public static NvrResult<NvrVideoSourceInfo> GetVideoSourceInfo(
+            DahuaLoginSession loginSession,
+            int channelNo)
+        {
+            if (loginSession == null || !loginSession.IsValid)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.LoginFailed,
+                    "Dahua 로그인 세션이 유효하지 않습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "INVALID_DAHUA_LOGIN_SESSION",
+                        ErrorMessage = "Dahua 로그인 세션이 유효하지 않습니다.",
+                        Operation = "GetVideoSourceInfo"
+                    });
+            }
+
+            if (channelNo < 0)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    "채널 번호가 올바르지 않습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "INVALID_CHANNEL_NO",
+                        ErrorMessage = "채널 번호가 올바르지 않습니다.",
+                        Operation = "GetVideoSourceInfo"
+                    });
+            }
+
+            DahuaEncodeConfigResult configResult;
+
+            try
+            {
+                configResult =
+                    DahuaEncodeConfigReader.ReadMainStreamEncodeConfig(
+                        loginSession.LoginHandle,
+                        channelNo);
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    "현재 Dahua SDK DLL에서 인코딩 설정 조회 함수를 찾을 수 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "DAHUA_CONFIG_ENTRYPOINT_NOT_FOUND",
+                        ErrorMessage = ex.Message,
+                        Operation = "ReadMainStreamEncodeConfig"
+                    });
+            }
+            catch (DllNotFoundException ex)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua SDK DLL을 찾을 수 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "DAHUA_SDK_DLL_NOT_FOUND",
+                        ErrorMessage = ex.Message,
+                        Operation = "ReadMainStreamEncodeConfig"
+                    });
+            }
+            catch (BadImageFormatException ex)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua SDK DLL의 32/64bit 구성이 현재 CamViewer와 맞지 않습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "DAHUA_SDK_BITNESS_MISMATCH",
+                        ErrorMessage = ex.Message,
+                        Operation = "ReadMainStreamEncodeConfig"
+                    });
+            }
+            catch (AccessViolationException ex)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 인코딩 설정 조회 중 메모리 접근 오류가 발생했습니다. Native 함수 선언 또는 구조체 정의가 SDK와 맞지 않을 가능성이 높습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "DAHUA_CONFIG_ACCESS_VIOLATION",
+                        ErrorMessage = ex.Message,
+                        Operation = "ReadMainStreamEncodeConfig"
+                    });
+            }
+            catch (Exception ex)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 인코딩 설정 조회 중 예외가 발생했습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "DAHUA_CONFIG_READ_EXCEPTION",
+                        ErrorMessage = ex.Message,
+                        Operation = "ReadMainStreamEncodeConfig"
+                    });
+            }
+
+            if (configResult == null)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 인코딩 설정 조회 결과가 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "DAHUA_CONFIG_RESULT_NULL",
+                        ErrorMessage = "DahuaEncodeConfigResult가 null입니다.",
+                        Operation = "GetVideoSourceInfo"
+                    });
+            }
+
+            if (!configResult.Success)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    configResult.Message,
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = configResult.ErrorCode,
+                        ErrorMessage = configResult.Message,
+                        NativeErrorCode = configResult.NativeErrorCode,
+                        Operation = "ReadMainStreamEncodeConfig"
+                    });
+            }
+
+            if (configResult.Width <= 0 || configResult.Height <= 0)
+            {
+                return NvrResult<NvrVideoSourceInfo>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 채널 해상도 정보가 올바르지 않습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "INVALID_DAHUA_VIDEO_SIZE",
+                        ErrorMessage =
+                            "Width="
+                            + configResult.Width
+                            + ", Height="
+                            + configResult.Height,
+                        Operation = "GetVideoSourceInfo"
+                    });
+            }
+
+            return NvrResult<NvrVideoSourceInfo>.Ok(
+                new NvrVideoSourceInfo
+                {
+                    Width = configResult.Width,
+                    Height = configResult.Height
+                },
+                "Dahua 채널 영상 원본 정보를 조회했습니다.");
+        }
     }
 }

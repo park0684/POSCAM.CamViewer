@@ -1,6 +1,7 @@
 ﻿using CamViewer.Interfaces;
 using CamViewer.Models;
 using CamViewerClient.Enums;
+using CamViewerClient.Models.Config;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -263,6 +264,23 @@ namespace CamViewer.Views
             }
         }
 
+        /// <summary>
+        /// 현재 선택된 영상 표시 방식.
+        /// </summary>
+        public VideoRenderMode SelectedVideoRenderMode
+        {
+            get
+            {
+                VideoRenderModeItem item =
+                    cmbRenderSelect.SelectedItem as VideoRenderModeItem;
+
+                return item == null
+                    ? VideoRenderMode.KeepAspectRatio
+                    : item.RenderMode;
+            }
+        }
+
+
         /* evetns */
 
         public event EventHandler LoadViewEvent;
@@ -330,18 +348,14 @@ namespace CamViewer.Views
         {
             dtpSearchStartDate.Value = searchDateTime.Date;
 
-            int hour24 = searchDateTime.Hour;
-            int hour12 = hour24 % 12;
+            cboStartHour.SelectedItem =
+                searchDateTime.Hour.ToString("00");
 
-            if (hour12 == 0)
-            {
-                hour12 = 12;
-            }
+            cboStartMinute.SelectedItem =
+                searchDateTime.Minute.ToString("00");
 
-            //cboStartAmPm.SelectedItem = hour24 >= 12 ? "오후" : "오전";
-            cboStartHour.SelectedItem = hour12.ToString("00");
-            cboStartMinute.SelectedItem = searchDateTime.Minute.ToString("00");
-            cboStartSecond.SelectedItem = searchDateTime.Second.ToString("00");
+            cboStartSecond.SelectedItem =
+                searchDateTime.Second.ToString("00");
         }
 
         /// <summary>
@@ -625,6 +639,27 @@ namespace CamViewer.Views
             UpdateVideoRenderTargetLayout();
         }
 
+        /// <summary>
+        /// 영상 표시 방식을 선택한다.
+        /// </summary>
+        public void SelectVideoRenderMode(VideoRenderMode renderMode)
+        {
+            for (int index = 0; index < cmbRenderSelect.Items.Count; index++)
+            {
+                VideoRenderModeItem item =
+                    cmbRenderSelect.Items[index] as VideoRenderModeItem;
+
+                if (item != null && item.RenderMode == renderMode)
+                {
+                    cmbRenderSelect.SelectedIndex = index;
+                    _videoRenderMode = renderMode;
+                    UpdateVideoRenderTargetLayout();
+                    return;
+                }
+            }
+        }
+
+
         /*내부 메서드*/
 
         /// <summary>
@@ -676,9 +711,9 @@ namespace CamViewer.Views
             InitializeBodyRows();
             InitializeTimeComboBoxes();
 
-            nudTiemAdjustSeconds.Minimum = 0;
-            nudTiemAdjustSeconds.Maximum = 300;
-            nudTiemAdjustSeconds.Value = 30;
+            nudTiemAdjustSeconds.Minimum = 1;
+            nudTiemAdjustSeconds.Maximum = 60;
+            nudTiemAdjustSeconds.Value = 10;
 
 
             //SetPlaybackDateTime(null);
@@ -751,24 +786,14 @@ namespace CamViewer.Views
         /// </summary>
         private void InitializeBodyRows()
         {
-            int controlRowHeight = 170;
-
-            int[] rowHeights = tlpBody.GetRowHeights();
-
-            if (rowHeights != null && rowHeights.Length > 1 && rowHeights[1] > 0)
-            {
-                controlRowHeight = rowHeights[1];
-            }
-
             tlpBody.Dock = DockStyle.Fill;
             tlpBody.RowCount = 1;
             tlpBody.RowStyles.Clear();
 
             tlpBody.RowStyles.Add(
-                new RowStyle(SizeType.Percent, 100F));
-
-            tlpBody.RowStyles.Add(
-                new RowStyle(SizeType.Absolute, controlRowHeight));
+                new RowStyle(
+                    SizeType.Percent,
+                    100F));
         }
 
         /// <summary>
@@ -870,24 +895,7 @@ namespace CamViewer.Views
             UpdateVideoRenderTargetLayout();
         }
 
-        /// <summary>
-        /// 영상 표시 방식을 선택한다.
-        /// </summary>
-        private void SelectVideoRenderMode(
-            VideoRenderMode renderMode)
-        {
-            for (int index = 0; index < cmbRenderSelect.Items.Count; index++)
-            {
-                VideoRenderModeItem item =
-                    cmbRenderSelect.Items[index] as VideoRenderModeItem;
 
-                if (item != null && item.RenderMode == renderMode)
-                {
-                    cmbRenderSelect.SelectedIndex = index;
-                    return;
-                }
-            }
-        }
 
         /// <summary>
         /// 하나의 영상 렌더링 패널을 Host 영역 안에 맞춘다.
@@ -958,6 +966,7 @@ namespace CamViewer.Views
                     targetWidth,
                     targetHeight);
 
+
             renderTarget.Invalidate();
         }
 
@@ -1019,22 +1028,13 @@ namespace CamViewer.Views
         /// </summary>
         private void OnFormResizeOrMove(object sender, EventArgs e)
         {
-            if (_isMaximized)
+            if (!_isMaximized
+                && _normalBoundsCaptured
+                && WindowState == FormWindowState.Normal)
             {
-                return;
+                _normalBounds = Bounds;
             }
 
-            if (!_normalBoundsCaptured)
-            {
-                return;
-            }
-
-            if (WindowState != FormWindowState.Normal)
-            {
-                return;
-            }
-
-            _normalBounds = Bounds;
             UpdateVideoRenderTargetLayout();
         }
 
@@ -1070,6 +1070,7 @@ namespace CamViewer.Views
                 Padding = Padding.Empty;
 
                 Bounds = workingArea;
+                UpdateVideoRenderTargetLayout();
                 btnResize.Image = Properties.Resources.Minimum;
                 return;
             }
@@ -1089,6 +1090,7 @@ namespace CamViewer.Views
             Padding = new Padding(ResizeBorderThickness);
 
             Bounds = _normalBounds;
+            UpdateVideoRenderTargetLayout();
             btnResize.Image = Properties.Resources.Maximum;
         }
 

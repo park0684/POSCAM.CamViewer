@@ -38,5 +38,11 @@ namespace CamViewer.Nvr.Core.Models
         /// </summary>
         public bool CanChangeSpeed { get; set; }
 
+        /// <summary>
+        /// 채널 영상 원본 정보 조회 지원 여부.
+        /// 예: 영상 너비, 높이, 원본 비율 계산용 정보.
+        /// </summary>
+        public bool CanGetVideoSourceInfo { get; set; }
+
     }
 }

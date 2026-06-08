@@ -1,14 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using CamViewer.Models;
+﻿using CamViewer.Models;
 using CamViewer.Nvr.Core.Abstractions;
 using CamViewer.Nvr.Core.Enums;
 using CamViewer.Nvr.Core.Models;
 using CamViewer.Nvr.Core.Results;
+using CamViewerClient.Enums;
 using CamViewerClient.Models.Config;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace CamViewer.Services
 {
@@ -739,6 +740,74 @@ namespace CamViewer.Services
                 + "초");
         }
 
+        /// <summary>
+        /// 재생 대상 채널의 영상 원본 정보를 조회한다.
+        /// Provider가 지원하지 않으면 실패 결과를 반환한다.
+        /// </summary>
+        public async Task<PlayerVideoSourceInfoResult> GetVideoSourceInfoAsync(
+            PlayerChannelTarget channel,
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            if (channel == null || channel.NvrConfig == null)
+            {
+                return PlayerVideoSourceInfoResult.Fail(
+                    ScreenPosition.Left,
+                    "NVR 채널 설정이 없습니다.");
+            }
+
+            INvrProvider provider =
+                await GetOrCreateLoggedInProviderAsync(
+                    channel.NvrConfig,
+                    cancellationToken);
+
+            if (provider == null)
+            {
+                return PlayerVideoSourceInfoResult.Fail(
+                    channel.ScreenPosition,
+                    "NVR Provider를 생성하지 못했습니다.");
+            }
+
+            ProviderCapabilities capabilities =
+                provider.GetCapabilities();
+
+            if (capabilities == null || !capabilities.CanGetVideoSourceInfo)
+            {
+                return PlayerVideoSourceInfoResult.Fail(
+                    channel.ScreenPosition,
+                    "현재 NVR Provider는 영상 원본 정보 조회를 지원하지 않습니다.");
+            }
+
+            INvrVideoSourceInfoProvider sourceInfoProvider =
+                provider as INvrVideoSourceInfoProvider;
+
+            if (sourceInfoProvider == null)
+            {
+                return PlayerVideoSourceInfoResult.Fail(
+                    channel.ScreenPosition,
+                    "현재 NVR Provider는 영상 원본 정보 조회 인터페이스를 구현하지 않았습니다.");
+            }
+
+            NvrResult<NvrVideoSourceInfo> result =
+                await sourceInfoProvider.GetVideoSourceInfoAsync(
+                    channel.ChannelNo,
+                    cancellationToken);
+
+            if (!result.Success || result.Data == null)
+            {
+                return PlayerVideoSourceInfoResult.Fail(
+                    channel.ScreenPosition,
+                    string.IsNullOrWhiteSpace(result.Message)
+                        ? "영상 원본 정보 조회에 실패했습니다."
+                        : result.Message);
+            }
+
+            return PlayerVideoSourceInfoResult.Ok(
+                channel.ScreenPosition,
+                result.Data.Width,
+                result.Data.Height);
+        }
 
         /// <summary>
         /// 단일 좌/우 채널 재생을 시작한다.

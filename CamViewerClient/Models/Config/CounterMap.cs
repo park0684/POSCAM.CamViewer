@@ -28,5 +28,8 @@ namespace CamViewerClient.Models.Config
         /// 내부값은 좌측 0, 우측 1이다.
         /// </summary>
         public ScreenPosition ScreenPosition { get; set; }
+
+        public int VideoWidth { get; set; }
+        public int VideoHeight { get; set; }
     }
 }

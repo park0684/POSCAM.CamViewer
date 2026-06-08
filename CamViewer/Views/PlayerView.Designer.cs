@@ -34,6 +34,8 @@
             this.pnlLeftVideo = new System.Windows.Forms.Panel();
             this.lblLeftVideoEmpty = new System.Windows.Forms.Label();
             this.pnlSearchArea = new System.Windows.Forms.Panel();
+            this.cmbRenderSelect = new System.Windows.Forms.ComboBox();
+            this.lblRender = new System.Windows.Forms.Label();
             this.btnSearch = new System.Windows.Forms.Button();
             this.cboEndSecond = new System.Windows.Forms.ComboBox();
             this.cboStartSecond = new System.Windows.Forms.ComboBox();
@@ -70,8 +72,6 @@
             this.btnRewind = new System.Windows.Forms.Button();
             this.lblPlaybackDateTime = new System.Windows.Forms.Label();
             this.lblPlaybackDateTimeTitle = new System.Windows.Forms.Label();
-            this.lblRender = new System.Windows.Forms.Label();
-            this.cmbRenderSelect = new System.Windows.Forms.ComboBox();
             this.tlpBody.SuspendLayout();
             this.pnlRightVideo.SuspendLayout();
             this.pnlLeftVideo.SuspendLayout();
@@ -95,17 +95,19 @@
             this.tlpBody.RowCount = 1;
             this.tlpBody.RowStyles.Add(new System.Windows.Forms.RowStyle());
             this.tlpBody.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 838F));
-            this.tlpBody.Size = new System.Drawing.Size(1280, 518);
+            this.tlpBody.Size = new System.Drawing.Size(1280, 338);
             this.tlpBody.TabIndex = 0;
             // 
             // pnlRightVideo
             // 
+            this.pnlRightVideo.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
             this.pnlRightVideo.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(60)))), ((int)(((byte)(60)))), ((int)(((byte)(60)))));
             this.pnlRightVideo.Controls.Add(this.lblRightVideoEmpty);
-            this.pnlRightVideo.Dock = System.Windows.Forms.DockStyle.Fill;
             this.pnlRightVideo.Location = new System.Drawing.Point(643, 3);
             this.pnlRightVideo.Name = "pnlRightVideo";
-            this.pnlRightVideo.Size = new System.Drawing.Size(634, 832);
+            this.pnlRightVideo.Size = new System.Drawing.Size(634, 335);
             this.pnlRightVideo.TabIndex = 0;
             // 
             // lblRightVideoEmpty
@@ -123,12 +125,14 @@
             // 
             // pnlLeftVideo
             // 
+            this.pnlLeftVideo.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
             this.pnlLeftVideo.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(60)))), ((int)(((byte)(60)))), ((int)(((byte)(60)))));
             this.pnlLeftVideo.Controls.Add(this.lblLeftVideoEmpty);
-            this.pnlLeftVideo.Dock = System.Windows.Forms.DockStyle.Fill;
             this.pnlLeftVideo.Location = new System.Drawing.Point(3, 3);
             this.pnlLeftVideo.Name = "pnlLeftVideo";
-            this.pnlLeftVideo.Size = new System.Drawing.Size(634, 832);
+            this.pnlLeftVideo.Size = new System.Drawing.Size(634, 335);
             this.pnlLeftVideo.TabIndex = 0;
             // 
             // lblLeftVideoEmpty
@@ -168,6 +172,27 @@
             this.pnlSearchArea.Size = new System.Drawing.Size(634, 254);
             this.pnlSearchArea.TabIndex = 0;
             // 
+            // cmbRenderSelect
+            // 
+            this.cmbRenderSelect.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.cmbRenderSelect.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.cmbRenderSelect.FormattingEnabled = true;
+            this.cmbRenderSelect.Location = new System.Drawing.Point(165, 171);
+            this.cmbRenderSelect.Name = "cmbRenderSelect";
+            this.cmbRenderSelect.Size = new System.Drawing.Size(125, 25);
+            this.cmbRenderSelect.TabIndex = 10;
+            // 
+            // lblRender
+            // 
+            this.lblRender.AutoSize = true;
+            this.lblRender.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.lblRender.ForeColor = System.Drawing.Color.White;
+            this.lblRender.Location = new System.Drawing.Point(45, 174);
+            this.lblRender.Name = "lblRender";
+            this.lblRender.Size = new System.Drawing.Size(98, 19);
+            this.lblRender.TabIndex = 9;
+            this.lblRender.Text = "영상 원본비율";
+            // 
             // btnSearch
             // 
             this.btnSearch.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(32)))), ((int)(((byte)(32)))), ((int)(((byte)(32)))));
@@ -177,7 +202,7 @@
             this.btnSearch.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
             this.btnSearch.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(110)))), ((int)(((byte)(55)))), ((int)(((byte)(210)))));
             this.btnSearch.Image = global::CamViewer.Properties.Resources.Search1;
-            this.btnSearch.Location = new System.Drawing.Point(542, 80);
+            this.btnSearch.Location = new System.Drawing.Point(499, 77);
             this.btnSearch.Name = "btnSearch";
             this.btnSearch.Size = new System.Drawing.Size(80, 80);
             this.btnSearch.TabIndex = 8;
@@ -188,7 +213,7 @@
             this.cboEndSecond.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.cboEndSecond.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.cboEndSecond.FormattingEnabled = true;
-            this.cboEndSecond.Location = new System.Drawing.Point(469, 130);
+            this.cboEndSecond.Location = new System.Drawing.Point(426, 127);
             this.cboEndSecond.Name = "cboEndSecond";
             this.cboEndSecond.Size = new System.Drawing.Size(58, 25);
             this.cboEndSecond.TabIndex = 7;
@@ -198,7 +223,7 @@
             this.cboStartSecond.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.cboStartSecond.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.cboStartSecond.FormattingEnabled = true;
-            this.cboStartSecond.Location = new System.Drawing.Point(469, 83);
+            this.cboStartSecond.Location = new System.Drawing.Point(426, 80);
             this.cboStartSecond.Name = "cboStartSecond";
             this.cboStartSecond.Size = new System.Drawing.Size(58, 25);
             this.cboStartSecond.TabIndex = 7;
@@ -208,7 +233,7 @@
             this.cboEndMinute.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.cboEndMinute.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.cboEndMinute.FormattingEnabled = true;
-            this.cboEndMinute.Location = new System.Drawing.Point(404, 130);
+            this.cboEndMinute.Location = new System.Drawing.Point(361, 127);
             this.cboEndMinute.Name = "cboEndMinute";
             this.cboEndMinute.Size = new System.Drawing.Size(58, 25);
             this.cboEndMinute.TabIndex = 6;
@@ -218,7 +243,7 @@
             this.cboStartMinute.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.cboStartMinute.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.cboStartMinute.FormattingEnabled = true;
-            this.cboStartMinute.Location = new System.Drawing.Point(404, 83);
+            this.cboStartMinute.Location = new System.Drawing.Point(361, 80);
             this.cboStartMinute.Name = "cboStartMinute";
             this.cboStartMinute.Size = new System.Drawing.Size(58, 25);
             this.cboStartMinute.TabIndex = 6;
@@ -228,7 +253,7 @@
             this.cboEndHour.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.cboEndHour.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.cboEndHour.FormattingEnabled = true;
-            this.cboEndHour.Location = new System.Drawing.Point(339, 130);
+            this.cboEndHour.Location = new System.Drawing.Point(296, 127);
             this.cboEndHour.Name = "cboEndHour";
             this.cboEndHour.Size = new System.Drawing.Size(58, 25);
             this.cboEndHour.TabIndex = 5;
@@ -238,7 +263,7 @@
             this.cboStartHour.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.cboStartHour.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.cboStartHour.FormattingEnabled = true;
-            this.cboStartHour.Location = new System.Drawing.Point(339, 83);
+            this.cboStartHour.Location = new System.Drawing.Point(296, 80);
             this.cboStartHour.Name = "cboStartHour";
             this.cboStartHour.Size = new System.Drawing.Size(58, 25);
             this.cboStartHour.TabIndex = 5;
@@ -247,7 +272,7 @@
             // 
             this.dtpSearchEndDate.CalendarFont = new System.Drawing.Font("맑은 고딕", 10F);
             this.dtpSearchEndDate.Font = new System.Drawing.Font("맑은 고딕", 10F);
-            this.dtpSearchEndDate.Location = new System.Drawing.Point(208, 131);
+            this.dtpSearchEndDate.Location = new System.Drawing.Point(165, 128);
             this.dtpSearchEndDate.Name = "dtpSearchEndDate";
             this.dtpSearchEndDate.Size = new System.Drawing.Size(125, 25);
             this.dtpSearchEndDate.TabIndex = 3;
@@ -256,7 +281,7 @@
             // 
             this.dtpSearchStartDate.CalendarFont = new System.Drawing.Font("맑은 고딕", 10F);
             this.dtpSearchStartDate.Font = new System.Drawing.Font("맑은 고딕", 10F);
-            this.dtpSearchStartDate.Location = new System.Drawing.Point(208, 84);
+            this.dtpSearchStartDate.Location = new System.Drawing.Point(165, 81);
             this.dtpSearchStartDate.Name = "dtpSearchStartDate";
             this.dtpSearchStartDate.Size = new System.Drawing.Size(125, 25);
             this.dtpSearchStartDate.TabIndex = 3;
@@ -266,7 +291,7 @@
             this.label3.AutoSize = true;
             this.label3.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.label3.ForeColor = System.Drawing.Color.White;
-            this.label3.Location = new System.Drawing.Point(88, 136);
+            this.label3.Location = new System.Drawing.Point(45, 133);
             this.label3.Name = "label3";
             this.label3.Size = new System.Drawing.Size(98, 19);
             this.label3.TabIndex = 0;
@@ -277,7 +302,7 @@
             this.lblSearchStartDate.AutoSize = true;
             this.lblSearchStartDate.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.lblSearchStartDate.ForeColor = System.Drawing.Color.White;
-            this.lblSearchStartDate.Location = new System.Drawing.Point(88, 91);
+            this.lblSearchStartDate.Location = new System.Drawing.Point(45, 88);
             this.lblSearchStartDate.Name = "lblSearchStartDate";
             this.lblSearchStartDate.Size = new System.Drawing.Size(98, 19);
             this.lblSearchStartDate.TabIndex = 0;
@@ -288,7 +313,7 @@
             this.cboCounterNo.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
             this.cboCounterNo.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.cboCounterNo.FormattingEnabled = true;
-            this.cboCounterNo.Location = new System.Drawing.Point(208, 41);
+            this.cboCounterNo.Location = new System.Drawing.Point(165, 38);
             this.cboCounterNo.Name = "cboCounterNo";
             this.cboCounterNo.Size = new System.Drawing.Size(70, 25);
             this.cboCounterNo.TabIndex = 1;
@@ -298,7 +323,7 @@
             this.lblCounterNo.AutoSize = true;
             this.lblCounterNo.Font = new System.Drawing.Font("맑은 고딕", 10F);
             this.lblCounterNo.ForeColor = System.Drawing.Color.White;
-            this.lblCounterNo.Location = new System.Drawing.Point(93, 46);
+            this.lblCounterNo.Location = new System.Drawing.Point(50, 43);
             this.lblCounterNo.Name = "lblCounterNo";
             this.lblCounterNo.Size = new System.Drawing.Size(79, 19);
             this.lblCounterNo.TabIndex = 0;
@@ -428,7 +453,7 @@
             // pnlTimeLIne
             // 
             this.pnlTimeLIne.Dock = System.Windows.Forms.DockStyle.Bottom;
-            this.pnlTimeLIne.Location = new System.Drawing.Point(0, 560);
+            this.pnlTimeLIne.Location = new System.Drawing.Point(0, 380);
             this.pnlTimeLIne.Name = "pnlTimeLIne";
             this.pnlTimeLIne.Size = new System.Drawing.Size(1280, 80);
             this.pnlTimeLIne.TabIndex = 0;
@@ -441,7 +466,7 @@
             this.tplMenuArea.Controls.Add(this.pnlPalyerMenu, 1, 0);
             this.tplMenuArea.Controls.Add(this.pnlSearchArea, 0, 0);
             this.tplMenuArea.Dock = System.Windows.Forms.DockStyle.Bottom;
-            this.tplMenuArea.Location = new System.Drawing.Point(0, 640);
+            this.tplMenuArea.Location = new System.Drawing.Point(0, 460);
             this.tplMenuArea.Name = "tplMenuArea";
             this.tplMenuArea.RowCount = 1;
             this.tplMenuArea.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 260F));
@@ -608,33 +633,12 @@
             this.lblPlaybackDateTimeTitle.TabIndex = 0;
             this.lblPlaybackDateTimeTitle.Text = "재생시간";
             // 
-            // lblRender
-            // 
-            this.lblRender.AutoSize = true;
-            this.lblRender.Font = new System.Drawing.Font("맑은 고딕", 10F);
-            this.lblRender.ForeColor = System.Drawing.Color.White;
-            this.lblRender.Location = new System.Drawing.Point(88, 177);
-            this.lblRender.Name = "lblRender";
-            this.lblRender.Size = new System.Drawing.Size(98, 19);
-            this.lblRender.TabIndex = 9;
-            this.lblRender.Text = "영상 원본비율";
-            // 
-            // cmbRenderSelect
-            // 
-            this.cmbRenderSelect.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
-            this.cmbRenderSelect.Font = new System.Drawing.Font("맑은 고딕", 10F);
-            this.cmbRenderSelect.FormattingEnabled = true;
-            this.cmbRenderSelect.Location = new System.Drawing.Point(208, 174);
-            this.cmbRenderSelect.Name = "cmbRenderSelect";
-            this.cmbRenderSelect.Size = new System.Drawing.Size(125, 25);
-            this.cmbRenderSelect.TabIndex = 10;
-            // 
             // PlayerView
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(35)))), ((int)(((byte)(35)))), ((int)(((byte)(35)))));
-            this.ClientSize = new System.Drawing.Size(1280, 900);
+            this.ClientSize = new System.Drawing.Size(1280, 720);
             this.Controls.Add(this.tlpBody);
             this.Controls.Add(this.pnlTimeLIne);
             this.Controls.Add(this.tplMenuArea);
@@ -642,7 +646,7 @@
             this.Font = new System.Drawing.Font("맑은 고딕", 9F);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.None;
             this.Margin = new System.Windows.Forms.Padding(3, 4, 3, 4);
-            this.MinimumSize = new System.Drawing.Size(1100, 900);
+            this.MinimumSize = new System.Drawing.Size(1100, 700);
             this.Name = "PlayerView";
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = "PlayerView";

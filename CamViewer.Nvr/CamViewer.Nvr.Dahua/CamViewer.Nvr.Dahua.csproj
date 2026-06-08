@@ -53,12 +53,18 @@
     <Compile Include="Native\Kernel32Native.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Providers\DahuaNvrProvider.cs" />
+    <Compile Include="Sdk\DahuaEncodeConfigReader.cs" />
+    <Compile Include="Sdk\DahuaEncodeConfigResult.cs" />
     <Compile Include="Sdk\DahuaLoginSession.cs" />
     <Compile Include="Sdk\DahuaPlaybackSession.cs" />
     <Compile Include="Sdk\DahuaSdkClient.cs" />
     <Compile Include="Sdk\DahuaSdkRuntime.cs" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\..\CamViewer_External\Dahua\NetSDKCS\NetSDKCS.csproj">
+      <Project>{60cfba25-f7ce-4140-a7e3-5355a25198e5}</Project>
+      <Name>NetSDKCS</Name>
+    </ProjectReference>
     <ProjectReference Include="..\CamViewerNvr.Core\CamViewer.Nvr.Core.csproj">
       <Project>{6a2e1715-a4df-423f-b3a7-3c9ab392a698}</Project>
       <Name>CamViewer.Nvr.Core</Name>

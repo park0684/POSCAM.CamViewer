@@ -115,5 +115,13 @@ namespace CamViewer.Services
         Task<PlayerPlaybackResult> SeekToTimeAsync(
             DateTime targetTime,
             CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 재생 대상 채널의 영상 원본 정보를 조회한다.
+        /// Provider가 지원하지 않으면 실패 결과를 반환한다.
+        /// </summary>
+        Task<PlayerVideoSourceInfoResult> GetVideoSourceInfoAsync(
+            PlayerChannelTarget channel,
+            CancellationToken cancellationToken);
     }
 }

@@ -352,6 +352,36 @@ namespace CamViewer.Presenters
             }
         }
 
+        private async Task ApplyVideoSourceInfoAsync(
+    PlayerPlaybackRequest request)
+        {
+            if (request == null || request.Channels == null)
+            {
+                return;
+            }
+
+            foreach (PlayerChannelTarget channel in request.Channels)
+            {
+                PlayerVideoSourceInfoResult infoResult =
+                    await _playbackService.GetVideoSourceInfoAsync(
+                        channel,
+                        CancellationToken.None);
+
+                if (!infoResult.Success)
+                {
+                    continue;
+                }
+
+                _view.SetVideoSourceSize(
+                    infoResult.ScreenPosition,
+                    infoResult.Width,
+                    infoResult.Height);
+            }
+
+            _view.UpdateVideoLayout();
+        }
+
+
         /// <summary>
         /// 현재 PlayerView의 조회 조건을 기준으로 재생을 시작한다.
         /// </summary>
@@ -371,6 +401,8 @@ namespace CamViewer.Presenters
             }
 
             _view.StopPlaybackTimer();
+
+            await ApplyVideoSourceInfoAsync(request);
 
             PlayerPlaybackResult playResult =
                 await _playbackService.PlayAsync(
@@ -479,9 +511,7 @@ namespace CamViewer.Presenters
             finally
             {
                 EndPlaybackCommand();
-            }
-            EndPlaybackCommand();
-            
+            }            
         }
 
         /// <summary>
@@ -570,6 +600,10 @@ namespace CamViewer.Presenters
             {
                 _view.SetLeftVideoTitle("좌측 영상 설정 없음");
                 _view.SetRightVideoTitle("우측 영상 설정 없음");
+
+                _view.SetVideoSourceSize(ScreenPosition.Left, 0, 0);
+                _view.SetVideoSourceSize(ScreenPosition.Right, 0, 0);
+
                 return;
             }
 
@@ -586,6 +620,28 @@ namespace CamViewer.Presenters
 
             _view.SetRightVideoTitle(
                 BuildVideoTitle("우측", counterNo, rightMap));
+
+            // 현재 CounterMap에 원본 해상도 정보가 없다면 0, 0으로 전달한다.
+            // 이 경우 원본 비율 모드는 안전하게 전체 채우기로 동작한다.
+            //_view.SetVideoSourceSize(
+            //    ScreenPosition.Left,
+            //    leftMap == null ? 0 : leftMap.VideoWidth,
+            //    leftMap == null ? 0 : leftMap.VideoHeight);
+
+            //_view.SetVideoSourceSize(
+            //    ScreenPosition.Right,
+            //    rightMap == null ? 0 : rightMap.VideoWidth,
+            //    rightMap == null ? 0 : rightMap.VideoHeight);
+
+            _view.SetVideoSourceSize(
+                ScreenPosition.Left,
+                1024,
+                768);
+
+            _view.SetVideoSourceSize(
+                ScreenPosition.Right,
+                1024,
+                768);
         }
 
         /// <summary>
@@ -738,10 +794,19 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
-        /// 현재 ViewerConfig 기준으로 계산대 목록과 좌/우 영상 표시를 다시 구성한다.
+        /// 현재 ViewerConfig 기준으로 PlayerView 화면을 갱신한다.
         /// </summary>
         private void ReloadViewByConfig()
         {
+            if (_viewerConfig == null)
+            {
+                _view.SetStatus("설정 정보가 없습니다.");
+                return;
+            }
+
+            _view.SelectVideoRenderMode(
+                _viewerConfig.VideoRenderMode);
+
             List<int> counterNumbers =
                 GetCounterNumbers();
 
@@ -751,14 +816,25 @@ namespace CamViewer.Presenters
             {
                 _view.SetLeftVideoTitle("좌측 영상 설정 없음");
                 _view.SetRightVideoTitle("우측 영상 설정 없음");
+
+                _view.SetVideoSourceSize(
+                    ScreenPosition.Left,
+                    0,
+                    0);
+
+                _view.SetVideoSourceSize(
+                    ScreenPosition.Right,
+                    0,
+                    0);
+
                 _view.SetStatus("등록된 계산대 설정이 없습니다.");
                 return;
             }
 
             _view.SelectCounterNo(counterNumbers[0]);
+
             UpdateSelectedCounterInfo();
         }
-
 
 
         /// <summary>

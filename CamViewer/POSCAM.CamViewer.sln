@@ -17,6 +17,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "poscam.AuthServer", "..\..\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "poscam.AdminWeb", "..\..\poscam\AdminWeb\poscam.AdminWeb.csproj", "{2A003077-AD59-14EE-B3FA-E75B93A643FB}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "External", "External", "{C8D5274F-AC00-46C7-1F8D-E88E81087A52}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetSDKCS", "..\..\CamViewer_External\Dahua\NetSDKCS\NetSDKCS.csproj", "{60CFBA25-F7CE-4140-A7E3-5355A25198E5}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -79,9 +83,20 @@ Global
 		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|Any CPU.Build.0 = Release|Any CPU
 		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|x64.ActiveCfg = Release|Any CPU
 		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|x64.Build.0 = Release|Any CPU
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Debug|Any CPU.ActiveCfg = Debug|x64
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Debug|Any CPU.Build.0 = Debug|x64
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Debug|x64.ActiveCfg = Debug|x64
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Debug|x64.Build.0 = Debug|x64
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Release|Any CPU.ActiveCfg = Release|x64
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Release|Any CPU.Build.0 = Release|x64
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Release|x64.ActiveCfg = Release|x64
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{60CFBA25-F7CE-4140-A7E3-5355A25198E5} = {C8D5274F-AC00-46C7-1F8D-E88E81087A52}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {E0E64ABA-9619-42B5-B87C-B1C670459AD3}

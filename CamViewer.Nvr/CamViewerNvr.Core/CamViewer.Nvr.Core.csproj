@@ -54,6 +54,7 @@
     <Compile Include="Abstractions\INvrProvider.cs" />
     <Compile Include="Abstractions\INvrProviderCatalog.cs" />
     <Compile Include="Abstractions\INvrProviderFactory.cs" />
+    <Compile Include="Abstractions\INvrVideoSourceInfoProvider.cs" />
     <Compile Include="Attributes\NvrProviderExportAttribute.cs" />
     <Compile Include="Enums\NvrConnectionType.cs" />
     <Compile Include="Enums\NvrPlaybackSpeed.cs" />
@@ -66,6 +67,7 @@
     <Compile Include="Models\NvrConnectionInfo.cs" />
     <Compile Include="Models\NvrPlaybackRequest.cs" />
     <Compile Include="Models\NvrRecordQueryRequest.cs" />
+    <Compile Include="Models\NvrVideoSourceInfo.cs" />
     <Compile Include="Models\ProviderCapabilities.cs" />
     <Compile Include="Models\ProviderMetadata.cs" />
     <Compile Include="Models\ProviderRegistration.cs" />

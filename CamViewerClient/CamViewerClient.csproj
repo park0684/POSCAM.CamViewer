@@ -93,6 +93,7 @@
     <Compile Include="Models\Config\CounterMap.cs" />
     <Compile Include="Models\Config\NvrConfig.cs" />
     <Compile Include="Models\Config\PlaybackOption.cs" />
+    <Compile Include="Models\Config\VideoRenderMode.cs" />
     <Compile Include="Models\Config\ViewerConfig.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Results\ClientResult.cs" />

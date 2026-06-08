@@ -21,7 +21,7 @@ namespace CamViewer.Nvr.Dahua.Providers
         "Dahua NetSDK",
         "Dahua",
         NvrConnectionType.Sdk)]
-    public sealed class DahuaNvrProvider : INvrProvider,INvrPlaybackPositionProvider
+    public sealed class DahuaNvrProvider : INvrProvider,INvrPlaybackPositionProvider,INvrVideoSourceInfoProvider
     {
         private bool _disposed;
         private bool _runtimeAcquired;
@@ -88,7 +88,8 @@ namespace CamViewer.Nvr.Dahua.Providers
                 CanQueryRecordExists = false,
                 CanGetPlaybackPosition = true,
 
-                CanChangeSpeed = true
+                CanChangeSpeed = true,
+                CanGetVideoSourceInfo = true
             };
         }
 
@@ -801,6 +802,183 @@ namespace CamViewer.Nvr.Dahua.Providers
 
             _lastError = null;
             return Task.FromResult(result);
+        }
+        /// <summary>
+        /// Dahua NVR의 지정 채널 영상 원본 정보를 조회한다.
+        /// 
+        /// PlayerView의 "원본 비율" 표시 모드에서 사용할
+        /// 영상 원본 Width / Height를 반환한다.
+        /// 
+        /// 주의:
+        /// Dahua Native SDK 호출 과정에서 예외가 발생할 수 있으므로,
+        /// Provider 레벨에서도 예외를 반드시 NvrResult 실패 결과로 변환한다.
+        /// </summary>
+        public Task<NvrResult<NvrVideoSourceInfo>> GetVideoSourceInfoAsync(
+            int channelNo,
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return Task.FromResult(
+                    NvrResult<NvrVideoSourceInfo>.Fail(
+                        NvrResultStatus.Cancelled,
+                        "영상 원본 정보 조회 요청이 취소되었습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode = "CANCELLED",
+                            ErrorMessage = "영상 원본 정보 조회 요청이 취소되었습니다.",
+                            Operation = "GetVideoSourceInfo"
+                        }));
+            }
+
+            if (!IsLoggedIn || _loginSession == null)
+            {
+                return Task.FromResult(
+                    NvrResult<NvrVideoSourceInfo>.Fail(
+                        NvrResultStatus.LoginFailed,
+                        "Dahua NVR에 로그인되어 있지 않습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode = "DAHUA_NOT_LOGGED_IN",
+                            ErrorMessage = "Dahua NVR에 로그인되어 있지 않습니다.",
+                            Operation = "GetVideoSourceInfo"
+                        }));
+            }
+
+            if (channelNo < 0)
+            {
+                return Task.FromResult(
+                    NvrResult<NvrVideoSourceInfo>.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 채널 번호가 올바르지 않습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode = "DAHUA_INVALID_CHANNEL_NO",
+                            ErrorMessage = "Dahua 채널 번호가 올바르지 않습니다.",
+                            Operation = "GetVideoSourceInfo"
+                        }));
+            }
+
+            try
+            {
+                NvrResult<NvrVideoSourceInfo> result =
+                    DahuaSdkClient.GetVideoSourceInfo(
+                        _loginSession,
+                        channelNo);
+
+                if (!result.Success)
+                {
+                    _lastError = result.Error;
+                    return Task.FromResult(result);
+                }
+
+                _lastError = null;
+
+                return Task.FromResult(result);
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                NvrErrorInfo error =
+                    CreateVideoSourceInfoExceptionError(
+                        "DAHUA_CONFIG_ENTRYPOINT_NOT_FOUND",
+                        "현재 Dahua SDK DLL에서 설정 조회 함수를 찾을 수 없습니다.",
+                        ex);
+
+                _lastError = error;
+
+                return Task.FromResult(
+                    NvrResult<NvrVideoSourceInfo>.Fail(
+                        NvrResultStatus.Failed,
+                        error.ErrorMessage,
+                        error));
+            }
+            catch (DllNotFoundException ex)
+            {
+                NvrErrorInfo error =
+                    CreateVideoSourceInfoExceptionError(
+                        "DAHUA_SDK_DLL_NOT_FOUND",
+                        "Dahua SDK DLL을 찾을 수 없습니다.",
+                        ex);
+
+                _lastError = error;
+
+                return Task.FromResult(
+                    NvrResult<NvrVideoSourceInfo>.Fail(
+                        NvrResultStatus.Failed,
+                        error.ErrorMessage,
+                        error));
+            }
+            catch (BadImageFormatException ex)
+            {
+                NvrErrorInfo error =
+                    CreateVideoSourceInfoExceptionError(
+                        "DAHUA_SDK_BITNESS_MISMATCH",
+                        "Dahua SDK DLL의 32/64bit 구성이 현재 CamViewer와 맞지 않습니다.",
+                        ex);
+
+                _lastError = error;
+
+                return Task.FromResult(
+                    NvrResult<NvrVideoSourceInfo>.Fail(
+                        NvrResultStatus.Failed,
+                        error.ErrorMessage,
+                        error));
+            }
+            catch (AccessViolationException ex)
+            {
+                NvrErrorInfo error =
+                    CreateVideoSourceInfoExceptionError(
+                        "DAHUA_CONFIG_ACCESS_VIOLATION",
+                        "Dahua 해상도 조회 중 메모리 접근 오류가 발생했습니다. Native 함수 선언 또는 구조체 정의가 SDK와 맞지 않을 가능성이 높습니다.",
+                        ex);
+
+                _lastError = error;
+
+                return Task.FromResult(
+                    NvrResult<NvrVideoSourceInfo>.Fail(
+                        NvrResultStatus.Failed,
+                        error.ErrorMessage,
+                        error));
+            }
+            catch (Exception ex)
+            {
+                NvrErrorInfo error =
+                    CreateVideoSourceInfoExceptionError(
+                        "DAHUA_VIDEO_SOURCE_INFO_EXCEPTION",
+                        "Dahua 영상 원본 정보 조회 중 예외가 발생했습니다.",
+                        ex);
+
+                _lastError = error;
+
+                return Task.FromResult(
+                    NvrResult<NvrVideoSourceInfo>.Fail(
+                        NvrResultStatus.Failed,
+                        error.ErrorMessage,
+                        error));
+            }
+        }
+
+        /// <summary>
+        /// Dahua 영상 원본 정보 조회 중 발생한 예외를 NvrErrorInfo로 변환한다.
+        /// </summary>
+        private static NvrErrorInfo CreateVideoSourceInfoExceptionError(
+            string errorCode,
+            string message,
+            Exception exception)
+        {
+            return new NvrErrorInfo
+            {
+                ErrorCode = errorCode,
+                ErrorMessage =
+                    message
+                    + " "
+                    + exception.GetType().Name
+                    + ": "
+                    + exception.Message,
+                Operation = "GetVideoSourceInfo"
+            };
         }
     }
 }

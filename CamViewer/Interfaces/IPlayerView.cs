@@ -1,5 +1,6 @@
 ﻿using CamViewer.Models;
 using CamViewerClient.Enums;
+using CamViewerClient.Models.Config;
 using System;
 using System.Collections.Generic;
 
@@ -66,6 +67,11 @@ namespace CamViewer.Interfaces
         /// 10초 전/뒤 버튼에서 사용할 이동 간격 초.
         /// </summary>
         int TimeAdjustSeconds { get; }
+
+        /// <summary>
+        /// 현재 선택된 영상 표시 방식.
+        /// </summary>
+        VideoRenderMode SelectedVideoRenderMode { get; }
 
         /// <summary>
         /// PlayerView가 최초 표시될 때 발생한다.
@@ -265,5 +271,10 @@ namespace CamViewer.Interfaces
         /// 영상 렌더링 대상 패널의 크기와 위치를 현재 View 크기에 맞게 갱신한다.
         /// </summary>
         void UpdateVideoLayout();
+
+        /// <summary>
+        /// 영상 표시 방식을 선택한다.
+        /// </summary>
+        void SelectVideoRenderMode(VideoRenderMode renderMode);
     }
 }

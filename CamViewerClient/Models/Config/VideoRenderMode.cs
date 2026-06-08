@@ -1,4 +1,4 @@
-﻿namespace CamViewer.Models
+﻿namespace CamViewerClient.Models.Config
 {
     /// <summary>
     /// PlayerView 영상 표시 방식이다.

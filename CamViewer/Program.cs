@@ -10,6 +10,7 @@ using CamViewerClient.Models.Config;
 using CamViewerClient.Results;
 using System;
 using System.Data.Common;
+using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
 
@@ -20,6 +21,7 @@ namespace CamViewer
         [STAThread]
         private static void Main()
         {
+            
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
@@ -149,6 +151,102 @@ namespace CamViewer
                 });
 
             playerPresenter.Show();
+        }
+
+        /// <summary>
+        /// CamViewer 디버그 파일 로그를 초기화한다.
+        /// 
+        /// 기본 빌드에서는 실행되지 않는다.
+        /// CAMVIEWER_DEBUG_LOG 컴파일 심볼을 켰을 때만 동작한다.
+        /// </summary>
+        [Conditional("CAMVIEWER_DEBUG_LOG")]
+        private static void InitializeDebugFileLog()
+        {
+            try
+            {
+                string logDirectory =
+                    Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        "logs");
+
+                if (!Directory.Exists(logDirectory))
+                {
+                    Directory.CreateDirectory(logDirectory);
+                }
+
+                string logPath =
+                    Path.Combine(
+                        logDirectory,
+                        "camviewer_debug.log");
+
+                string startMessage =
+                    Environment.NewLine
+                    + "=================================================="
+                    + Environment.NewLine
+                    + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                    + " | CamViewer debug log started"
+                    + Environment.NewLine
+                    + "BaseDirectory: "
+                    + AppDomain.CurrentDomain.BaseDirectory
+                    + Environment.NewLine
+                    + "LogPath: "
+                    + logPath
+                    + Environment.NewLine
+                    + "=================================================="
+                    + Environment.NewLine;
+
+                File.AppendAllText(
+                    logPath,
+                    startMessage,
+                    System.Text.Encoding.UTF8);
+            }
+            catch
+            {
+                // 디버그 로그 실패는 프로그램 실행을 막지 않는다.
+            }
+        }
+
+        /// <summary>
+        /// CamViewer 디버그 로그를 파일에 직접 기록한다.
+        /// 
+        /// 기본 빌드에서는 호출 코드가 컴파일 결과에서 제외된다.
+        /// CAMVIEWER_DEBUG_LOG 컴파일 심볼을 켰을 때만 동작한다.
+        /// </summary>
+        [Conditional("CAMVIEWER_DEBUG_LOG")]
+        internal static void WriteDebugLog(string message)
+        {
+            try
+            {
+                string logDirectory =
+                    Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        "logs");
+
+                if (!Directory.Exists(logDirectory))
+                {
+                    Directory.CreateDirectory(logDirectory);
+                }
+
+                string logPath =
+                    Path.Combine(
+                        logDirectory,
+                        "camviewer_debug.log");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                    + " | "
+                    + message
+                    + Environment.NewLine;
+
+                File.AppendAllText(
+                    logPath,
+                    line,
+                    System.Text.Encoding.UTF8);
+            }
+            catch
+            {
+                // 디버그 로그 실패는 프로그램 실행을 막지 않는다.
+            }
         }
     }
 }
