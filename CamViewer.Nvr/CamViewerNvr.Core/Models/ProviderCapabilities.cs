@@ -31,5 +31,12 @@ namespace CamViewer.Nvr.Core.Models
         /// Provider가 현재 재생 중인 영상 시각을 제공할 수 있는지 여부.
         /// </summary>
         public bool CanGetPlaybackPosition { get; set; }
+
+        /// <summary>
+        /// 재생속도 변경 지원 여부.
+        /// 예: 0.5배속, 1배속, 2배속, 4배속, 8배속.
+        /// </summary>
+        public bool CanChangeSpeed { get; set; }
+
     }
 }

@@ -38,5 +38,13 @@ namespace CamViewer.Models
         /// 이후 NVR Provider 재생 요청을 만들 때 사용한다.
         /// </summary>
         public NvrConfig NvrConfig { get; set; }
+
+        /// <summary>
+        /// 해당 채널의 재생시간 보정 초.
+        /// 
+        /// CCTV와 POS 화면의 녹화 지연 차이를 보정할 때 사용한다.
+        /// 현재 단계에서는 기본값 0으로 사용한다.
+        /// </summary>
+        public int TimeOffsetSeconds { get; set; }
     }
 }

@@ -25,6 +25,11 @@ namespace CamViewer.Services
         DateTime? CurrentPlaybackTime { get; }
 
         /// <summary>
+        /// 현재 선택된 재생속도.
+        /// </summary>
+        PlaybackSpeed CurrentPlaybackSpeed { get; }
+
+        /// <summary>
         /// 재생 요청을 시작한다.
         /// </summary>
         Task<PlayerPlaybackResult> PlayAsync(
@@ -50,16 +55,23 @@ namespace CamViewer.Services
             int seconds,
             CancellationToken cancellationToken);
 
-        /// <summary>
-        /// 빠른재생을 요청한다.
-        /// </summary>
-        Task<PlayerPlaybackResult> FastForwardAsync(
-            CancellationToken cancellationToken);
+        ///// <summary>
+        ///// 빠른재생을 요청한다.
+        ///// </summary>
+        //Task<PlayerPlaybackResult> FastForwardAsync(
+        //    CancellationToken cancellationToken);
+
+        ///// <summary>
+        ///// 빠른 역재생을 요청한다.
+        ///// </summary>
+        //Task<PlayerPlaybackResult> FastReverseAsync(
+        //    CancellationToken cancellationToken);
 
         /// <summary>
-        /// 빠른 역재생을 요청한다.
+        /// 역재생을 요청한다.
+        /// 현재 Provider가 지원하지 않으면 실패 결과를 반환한다.
         /// </summary>
-        Task<PlayerPlaybackResult> FastReverseAsync(
+        Task<PlayerPlaybackResult> RewindAsync(
             CancellationToken cancellationToken);
 
         /// <summary>
@@ -74,6 +86,34 @@ namespace CamViewer.Services
         /// </summary>
         Task<PlayerPlaybackResult> SetPlaybackSpeedAsync(
             PlaybackSpeed speed,
+            CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Provider가 실제 재생시간 조회를 지원하면 실제 시간을 동기화한다.
+        /// 지원하지 않거나 실패하면 추정 시간을 반환한다.
+        /// </summary>
+        Task<DateTime?> SyncPlaybackTimeAsync(
+            CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 현재 재생 중인 채널들의 시간 동기화 상태를 조회한다.
+        /// Provider가 실제 재생시간을 지원하면 실제 시간을 사용하고,
+        /// 지원하지 않으면 추정 시간을 사용한다.
+        /// </summary>
+        Task<PlaybackSyncStatus> GetPlaybackSyncStatusAsync(
+            CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 현재 재생 세션을 수동으로 동기화한다.
+        /// </summary>
+        Task<PlayerPlaybackResult> ResyncPlaybackSessionsAsync(
+            CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 지정한 영상재생시간으로 이동한다.
+        /// </summary>
+        Task<PlayerPlaybackResult> SeekToTimeAsync(
+            DateTime targetTime,
             CancellationToken cancellationToken);
     }
 }

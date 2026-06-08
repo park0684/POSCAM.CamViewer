@@ -21,13 +21,8 @@
         Paused = 2,
 
         /// <summary>
-        /// 정방향 빠른 재생 중.
+        /// 역재생 중.
         /// </summary>
-        FastForward = 3,
-
-        /// <summary>
-        /// 역방향 빠른 재생 중.
-        /// </summary>
-        FastReverse = 4
+        Rewinding = 3
     }
 }

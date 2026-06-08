@@ -6,9 +6,9 @@
     public enum PlaybackCommand
     {
         /// <summary>
-        /// 빠른 역재생.
+        /// 역재생.
         /// </summary>
-        FastReverse = 1,
+        Rewind = 1,
 
         /// <summary>
         /// 현재 재생 위치에서 10초 전으로 이동.
@@ -16,7 +16,7 @@
         SeekBackward10 = 2,
 
         /// <summary>
-        /// 재생 또는 일시정지 전환.
+        /// 재생, 일시정지, 재개 전환.
         /// </summary>
         PlayPause = 3,
 
@@ -26,8 +26,8 @@
         SeekForward10 = 4,
 
         /// <summary>
-        /// 빠른 재생.
+        /// 재생 정지.
         /// </summary>
-        FastForward = 5
+        Stop = 5
     }
 }

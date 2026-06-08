@@ -44,7 +44,7 @@ namespace CamViewer.Nvr.Dahua.Sdk
             EndTime = endTime;
             RenderTargetHandle = renderTargetHandle;
             AutoPlay = autoPlay;
-
+            PlaybackSpeed = NvrPlaybackSpeed.Normal;
             CurrentPlaybackTime = startTime;
             State = NvrPlaybackState.Playing;
         }
@@ -69,6 +69,11 @@ namespace CamViewer.Nvr.Dahua.Sdk
         /// 영상을 출력할 Windows Handle.
         /// </summary>
         public IntPtr RenderTargetHandle { get; private set; }
+
+        /// <summary>
+        /// 현재 Dahua 재생속도.
+        /// </summary>
+        public NvrPlaybackSpeed PlaybackSpeed { get; private set; }
 
         /// <summary>
         /// 재생 준비 후 자동 재생 여부.
@@ -225,6 +230,15 @@ namespace CamViewer.Nvr.Dahua.Sdk
             SetState(NvrPlaybackState.Stopped);
 
             _disposed = true;
+        }
+
+        /// <summary>
+        /// 현재 재생속도를 변경한다.
+        /// </summary>
+        public void SetPlaybackSpeed(
+            NvrPlaybackSpeed speed)
+        {
+            PlaybackSpeed = speed;
         }
     }
 }

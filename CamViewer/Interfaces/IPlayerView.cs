@@ -1,6 +1,7 @@
-﻿using System;
+﻿using CamViewer.Models;
+using CamViewerClient.Enums;
+using System;
 using System.Collections.Generic;
-using CamViewer.Models;
 
 namespace CamViewer.Interfaces
 {
@@ -62,6 +63,11 @@ namespace CamViewer.Interfaces
         PlaybackSpeed SelectedPlaybackSpeed { get; }
 
         /// <summary>
+        /// 10초 전/뒤 버튼에서 사용할 이동 간격 초.
+        /// </summary>
+        int TimeAdjustSeconds { get; }
+
+        /// <summary>
         /// PlayerView가 최초 표시될 때 발생한다.
         /// </summary>
         event EventHandler LoadViewEvent;
@@ -76,10 +82,6 @@ namespace CamViewer.Interfaces
         /// </summary>
         event EventHandler SearchEvent;
 
-        /// <summary>
-        /// 빠른 역재생 버튼 클릭 시 발생한다.
-        /// </summary>
-        event EventHandler FastReverseEvent;
 
         /// <summary>
         /// 10초 전 버튼 클릭 시 발생한다.
@@ -97,9 +99,14 @@ namespace CamViewer.Interfaces
         event EventHandler SeekForward10Event;
 
         /// <summary>
-        /// 빠른재생 버튼 클릭 시 발생한다.
+        /// 역재생 버튼 클릭 시 발생한다.
         /// </summary>
-        event EventHandler FastForwardEvent;
+        event EventHandler RewindEvent;
+
+        /// <summary>
+        /// 정지 버튼 클릭 시 발생한다.
+        /// </summary>
+        event EventHandler StopEvent;
 
         /// <summary>
         /// 설정 버튼 클릭 시 발생한다.
@@ -125,6 +132,16 @@ namespace CamViewer.Interfaces
         /// 재생 시간 갱신 타이머가 Tick될 때 발생한다.
         /// </summary>
         event EventHandler PlaybackTimerTickEvent;
+
+        /// <summary>
+        /// 영상 동기화 버튼 클릭 시 발생한다.
+        /// </summary>
+        event EventHandler SyncEvent;
+
+        /// <summary>
+        /// 타임라인에서 특정 위치 이동 요청 시 발생한다.
+        /// </summary>
+        event EventHandler<TimelineSeekRequestedEventArgs> TimelineSeekRequestedEvent;
 
         /// <summary>
         /// 계산대번호 목록을 설정한다.
@@ -219,5 +236,34 @@ namespace CamViewer.Interfaces
         /// 재생속도를 선택한다.
         /// </summary>
         void SelectPlaybackSpeed(PlaybackSpeed speed);
+
+        /// <summary>
+        /// 좌/우 영상 동기화 상태를 표시한다.
+        /// </summary>
+        void SetPlaybackSyncStatus(string statusText);
+
+        /// <summary>
+        /// 타임라인의 전체 조회 구간을 설정한다.
+        /// </summary>
+        void SetTimelineRange(DateTime? startTime, DateTime? endTime);
+
+        /// <summary>
+        /// 타임라인의 현재 재생 위치를 설정한다.
+        /// </summary>
+        void SetTimelinePlaybackTime(DateTime? playbackTime);
+
+        /// <summary>
+        /// 좌측/우측 영상의 원본 크기를 설정한다.
+        /// 원본 비율 표시 모드에서 사용한다.
+        /// </summary>
+        void SetVideoSourceSize(
+            ScreenPosition screenPosition,
+            int width,
+            int height);
+
+        /// <summary>
+        /// 영상 렌더링 대상 패널의 크기와 위치를 현재 View 크기에 맞게 갱신한다.
+        /// </summary>
+        void UpdateVideoLayout();
     }
 }

@@ -49,6 +49,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Abstractions\INvrPlaybackPositionProvider.cs" />
     <Compile Include="Abstractions\INvrPlaybackSession.cs" />
     <Compile Include="Abstractions\INvrProvider.cs" />
     <Compile Include="Abstractions\INvrProviderCatalog.cs" />

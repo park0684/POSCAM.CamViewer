@@ -233,6 +233,30 @@ namespace CamViewer.Nvr.Dahua.Native
                     dwSecond = Convert.ToUInt32(value.Second)
                 };
             }
+
+            /// <summary>
+            /// Dahua NET_TIME 값을 DateTime으로 변환한다.
+            /// </summary>
+            public DateTime ToDateTime()
+            {
+                if (dwYear < 1
+                    || dwMonth < 1 || dwMonth > 12
+                    || dwDay < 1 || dwDay > 31
+                    || dwHour > 23
+                    || dwMinute > 59
+                    || dwSecond > 59)
+                {
+                    return DateTime.MinValue;
+                }
+
+                return new DateTime(
+                    Convert.ToInt32(dwYear),
+                    Convert.ToInt32(dwMonth),
+                    Convert.ToInt32(dwDay),
+                    Convert.ToInt32(dwHour),
+                    Convert.ToInt32(dwMinute),
+                    Convert.ToInt32(dwSecond));
+            }
         }
 
         #endregion
@@ -404,6 +428,88 @@ namespace CamViewer.Nvr.Dahua.Native
             IntPtr playHandle,
             [MarshalAs(UnmanagedType.Bool)] bool pause);
 
+        /// <summary>
+        /// 재생 속도를 빠르게 한다.
+        /// SDK 내부 기준으로 호출할 때마다 한 단계씩 빨라진다.
+        /// </summary>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_FastPlayBack(
+            IntPtr playHandle);
+
+        /// <summary>
+        /// 재생 속도를 느리게 한다.
+        /// SDK 내부 기준으로 호출할 때마다 한 단계씩 느려진다.
+        /// </summary>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_SlowPlayBack(
+            IntPtr playHandle);
+
+        /// <summary>
+        /// 재생 속도를 일반 속도로 되돌린다.
+        /// </summary>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_NormalPlayBack(
+            IntPtr playHandle);
+
+        /// <summary>
+        /// Dahua 재생 핸들의 현재 OSD 재생 시간을 조회한다.
+        /// </summary>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_GetPlayBackOsdTime(
+            IntPtr playHandle,
+            ref NET_TIME osdTime,
+            ref NET_TIME startTime,
+            ref NET_TIME endTime);
+
+        /// <summary>
+        /// Dahua SDK 재생 제어 타입.
+        /// 
+        /// 주의:
+        /// 이 값은 Dahua SDK의 PlayBackType enum 값과 맞아야 한다.
+        /// NetSDKCS의 PlayBackType 값과 다를 경우 반드시 SDK enum 값에 맞춰 수정해야 한다.
+        /// </summary>
+        internal enum DahuaPlaybackControlType
+        {
+            Play = 0,
+            Stop = 1,
+            Pause = 2,
+            Fast = 3,
+            Slow = 4,
+            Normal = 5
+        }
+
+        /// <summary>
+        /// Dahua SDK 재생 제어 함수.
+        /// Fast, Slow, Normal, Pause, Play, Stop 등의 제어를 처리한다.
+        /// </summary>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_PlayBackControl(
+            IntPtr playHandle,
+            DahuaPlaybackControlType controlType,
+            uint inValue,
+            IntPtr outValue);
+
         #endregion
     }
+
 }

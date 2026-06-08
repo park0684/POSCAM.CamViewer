@@ -248,5 +248,26 @@ namespace CamViewer.Nvr.ApiProviders.Providers
                 message,
                 _lastError);
         }
+
+        /// <summary>
+        /// TP-Link Provider의 재생속도를 변경한다.
+        /// 현재 단계에서는 미지원으로 처리한다.
+        /// </summary>
+        public Task<NvrResult> SetPlaybackSpeedAsync(
+            INvrPlaybackSession session,
+            NvrPlaybackSpeed speed,
+            CancellationToken cancellationToken)
+        {
+            return Task.FromResult(
+                NvrResult.Fail(
+                    NvrResultStatus.NotSupported,
+                    "TP-Link 재생속도 변경 기능은 아직 지원되지 않습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "PLAYBACK_SPEED_NOT_SUPPORTED",
+                        ErrorMessage = "TP-Link Provider는 재생속도 변경을 지원하지 않습니다.",
+                        Operation = "SetPlaybackSpeed"
+                    }));
+        }
     }
 }

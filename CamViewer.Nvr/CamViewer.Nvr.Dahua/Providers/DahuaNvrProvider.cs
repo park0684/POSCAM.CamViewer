@@ -21,13 +21,13 @@ namespace CamViewer.Nvr.Dahua.Providers
         "Dahua NetSDK",
         "Dahua",
         NvrConnectionType.Sdk)]
-    public sealed class DahuaNvrProvider : INvrProvider
+    public sealed class DahuaNvrProvider : INvrProvider,INvrPlaybackPositionProvider
     {
         private bool _disposed;
         private bool _runtimeAcquired;
         private DahuaLoginSession _loginSession;
         private NvrErrorInfo _lastError;
-
+        
         /// <summary>
         /// Dahua Provider를 초기화한다.
         /// ProviderAssemblyLoader에서 생성할 수 있도록 public 기본 생성자를 유지한다.
@@ -80,15 +80,15 @@ namespace CamViewer.Nvr.Dahua.Providers
 
                 CanPause = true,
                 CanResume = true,
-
-                // Seek는 아직 직접 구현하지 않았으므로 false로 둔다.
-                CanSeek = false,
+                CanSeek = true,
 
                 CanPlayByRange = false,
                 CanSnapshot = false,
                 CanTestConnection = true,
                 CanQueryRecordExists = false,
-                CanGetPlaybackPosition = false
+                CanGetPlaybackPosition = true,
+
+                CanChangeSpeed = true
             };
         }
 
@@ -683,6 +683,124 @@ namespace CamViewer.Nvr.Dahua.Providers
                 NvrResultStatus.Failed,
                 "Dahua 재생 세션이 아닙니다.",
                 _lastError);
+        }
+
+        /// <summary>
+        /// Dahua 재생속도를 변경한다.
+        /// 
+        /// Dahua SDK의 속도 제어 함수 호출 후 일시정지 상태가 풀릴 수 있으므로,
+        /// 기존 상태가 Paused였으면 속도 변경 후 다시 Pause를 적용한다.
+        /// </summary>
+        public Task<NvrResult> SetPlaybackSpeedAsync(
+            INvrPlaybackSession session,
+            NvrPlaybackSpeed speed,
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return Task.FromResult(
+                    CreateCancelledResult("SetPlaybackSpeed"));
+            }
+
+            DahuaPlaybackSession dahuaSession =
+                session as DahuaPlaybackSession;
+
+            if (dahuaSession == null)
+            {
+                return Task.FromResult(
+                    CreateInvalidSessionResult("SetPlaybackSpeed"));
+            }
+
+            // 여기서 선언한다.
+            // 속도 변경 전 상태가 Paused였는지 확인하기 위한 값이다.
+            NvrPlaybackState stateBeforeChange =
+                dahuaSession.State;
+
+            NvrResult speedResult =
+                DahuaSdkClient.SetPlaybackSpeed(
+                    dahuaSession,
+                    speed);
+
+            if (!speedResult.Success)
+            {
+                _lastError = speedResult.Error;
+                return Task.FromResult(speedResult);
+            }
+
+            // Dahua SDK의 속도 변경 호출 과정에서 일시정지가 풀릴 수 있으므로
+            // 변경 전 상태가 Paused였다면 다시 Pause를 걸어준다.
+            if (stateBeforeChange == NvrPlaybackState.Paused)
+            {
+                NvrResult pauseResult =
+                    DahuaSdkClient.PausePlayback(dahuaSession);
+
+                if (!pauseResult.Success)
+                {
+                    _lastError = pauseResult.Error;
+                    return Task.FromResult(pauseResult);
+                }
+
+                dahuaSession.SetState(NvrPlaybackState.Paused);
+            }
+
+            _lastError = null;
+
+            return Task.FromResult(speedResult);
+        }
+
+        /// <summary>
+        /// Dahua 재생 세션의 실제 영상재생시간을 조회한다.
+        /// </summary>
+        public Task<NvrResult<DateTime>> GetPlaybackTimeAsync(
+            INvrPlaybackSession session,
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return Task.FromResult(
+                    NvrResult<DateTime>.Fail(
+                        NvrResultStatus.Cancelled,
+                        "재생시간 조회 요청이 취소되었습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode = "CANCELLED",
+                            ErrorMessage = "재생시간 조회 요청이 취소되었습니다.",
+                            Operation = "GetPlaybackTime"
+                        }));
+            }
+
+            DahuaPlaybackSession dahuaSession =
+                session as DahuaPlaybackSession;
+
+            if (dahuaSession == null)
+            {
+                return Task.FromResult(
+                    NvrResult<DateTime>.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 세션이 아닙니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode = "INVALID_DAHUA_SESSION",
+                            ErrorMessage = "Dahua 재생 세션이 아닙니다.",
+                            Operation = "GetPlaybackTime"
+                        }));
+            }
+
+            NvrResult<DateTime> result =
+                DahuaSdkClient.GetPlaybackOsdTime(dahuaSession);
+
+            if (!result.Success)
+            {
+                _lastError = result.Error;
+                return Task.FromResult(result);
+            }
+
+            _lastError = null;
+            return Task.FromResult(result);
         }
     }
 }

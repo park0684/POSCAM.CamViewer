@@ -1,11 +1,12 @@
 ﻿using CamViewer.Interfaces;
 using CamViewer.Models;
+using CamViewerClient.Enums;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
-using System.Windows.Forms;
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
 
 
 
@@ -42,6 +43,38 @@ namespace CamViewer.Views
 
         private readonly System.Windows.Forms.Timer _playbackTimer;
 
+        private DateTime? _timelineStartTime;
+        private DateTime? _timelineEndTime;
+        private DateTime? _timelinePlaybackTime;
+
+        /// <summary>
+        /// 좌측 영상 실제 렌더링 대상 패널.
+        /// </summary>
+        private Panel _leftRenderTarget;
+
+        /// <summary>
+        /// 우측 영상 실제 렌더링 대상 패널.
+        /// </summary>
+        private Panel _rightRenderTarget;
+
+        /// <summary>
+        /// 현재 영상 표시 방식.
+        /// 기본값은 원본 비율 유지이다.
+        /// </summary>
+        private VideoRenderMode _videoRenderMode = VideoRenderMode.KeepAspectRatio;
+
+        /// <summary>
+        /// 좌측 영상 원본 비율.
+        /// 값이 없으면 원본 비율을 알 수 없는 상태로 본다.
+        /// </summary>
+        private double? _leftVideoAspectRatio;
+
+        /// <summary>
+        /// 우측 영상 원본 비율.
+        /// 값이 없으면 원본 비율을 알 수 없는 상태로 본다.
+        /// </summary>
+        private double? _rightVideoAspectRatio;
+
         [DllImport("user32.dll")]
         private static extern bool ReleaseCapture();
 
@@ -58,7 +91,7 @@ namespace CamViewer.Views
         public PlayerView()
         {
             InitializeComponent();
-
+            InitializeVideoRenderTargets();
             _playbackTimer = new System.Windows.Forms.Timer();
             _playbackTimer.Interval = 1000;
             _playbackTimer.Tick += OnPlaybackTimerTick;
@@ -134,7 +167,7 @@ namespace CamViewer.Views
             get
             {
                 return Convert.ToInt32(
-                    nudSearchAdjustSeconds.Value);
+                    nudTiemAdjustSeconds.Value);
             }
         }
 
@@ -142,8 +175,7 @@ namespace CamViewer.Views
         {
             get
             {
-                return Convert.ToInt32(
-                    nudPlaydjustSeconds.Value);
+                return 30;
             }
         }
 
@@ -178,19 +210,31 @@ namespace CamViewer.Views
         }
 
         /// <summary>
-        /// 좌측 영상 출력 패널 Handle.
+        /// 좌측 영상 출력 대상 Handle.
+        /// SDK에는 Host 패널이 아니라 실제 RenderTarget 패널 Handle을 전달한다.
         /// </summary>
         public IntPtr LeftVideoHandle
         {
-            get { return pnlLeftVideo.Handle; }
+            get
+            {
+                return _leftRenderTarget == null
+                    ? pnlLeftVideo.Handle
+                    : _leftRenderTarget.Handle;
+            }
         }
 
         /// <summary>
-        /// 우측 영상 출력 패널 Handle.
+        /// 우측 영상 출력 대상 Handle.
+        /// SDK에는 Host 패널이 아니라 실제 RenderTarget 패널 Handle을 전달한다.
         /// </summary>
         public IntPtr RightVideoHandle
         {
-            get { return pnlRightVideo.Handle; }
+            get
+            {
+                return _rightRenderTarget == null
+                    ? pnlRightVideo.Handle
+                    : _rightRenderTarget.Handle;
+            }
         }
 
         /// <summary>
@@ -210,13 +254,12 @@ namespace CamViewer.Views
         {
             get
             {
-                if (cboPlaybackSpeed.SelectedItem == null)
-                {
-                    return PlaybackSpeed.Normal;
-                }
-                PlaybackSpeedItem item = cboPlaybackSpeed.SelectedItem as PlaybackSpeedItem;
+                PlaybackSpeedItem item =
+                    cboPlaybackSpeed.SelectedItem as PlaybackSpeedItem;
 
-                return item == null ? PlaybackSpeed.Normal: item.Speed ;
+                return item == null
+                    ? PlaybackSpeed.Normal
+                    : item.Speed;
             }
         }
 
@@ -225,16 +268,19 @@ namespace CamViewer.Views
         public event EventHandler LoadViewEvent;
         public event EventHandler CounterChangedEvent;
         public event EventHandler SearchEvent;
-        public event EventHandler FastReverseEvent;
         public event EventHandler SeekBackward10Event;
         public event EventHandler PlayPauseEvent;
         public event EventHandler SeekForward10Event;
-        public event EventHandler FastForwardEvent;
+        public event EventHandler RewindEvent;
+        public event EventHandler StopEvent;
         public event EventHandler SettingsEvent;
         public event EventHandler CloseEvent;
         public event EventHandler MinimizeEvent;
         public event EventHandler PlaybackTimerTickEvent;
         public event EventHandler PlaybackSpeedChangedEvent;
+        public event EventHandler SyncEvent;
+        public event EventHandler<TimelineSeekRequestedEventArgs> TimelineSeekRequestedEvent;
+
         /// <summary>
         /// 계산대번호 목록을 설정한다.
         /// </summary>
@@ -336,8 +382,8 @@ namespace CamViewer.Views
             switch (state)
             {
                 case PlaybackState.Playing:
-                case PlaybackState.FastForward:
-                case PlaybackState.FastReverse:
+                //case PlaybackState.FastForward:
+                //case PlaybackState.FastReverse:
                     btnPlayPause.Image = Properties.Resources.Pause;
                     break;
 
@@ -413,6 +459,97 @@ namespace CamViewer.Views
         }
 
         /// <summary>
+        /// 좌/우 영상 동기화 상태를 표시한다.
+        /// </summary>
+        public void SetPlaybackSyncStatus(string statusText)
+        {
+            lblPlaybackSyncStatus.Text =
+                string.IsNullOrWhiteSpace(statusText)
+                    ? ""
+                    : statusText;
+        }
+
+        /// <summary>
+        /// 10초 전/뒤 이동 버튼에서 사용할 이동 간격 초.
+        /// </summary>
+        public int TimeAdjustSeconds
+        {
+            get
+            {
+                int value = Convert.ToInt32(nudTiemAdjustSeconds.Value);
+
+                if (value < 1)
+                {
+                    return 1;
+                }
+
+                if (value > 60)
+                {
+                    return 60;
+                }
+
+                return value;
+            }
+        }
+
+        /// <summary>
+        /// 타임라인의 전체 조회 구간을 설정한다.
+        /// </summary>
+        public void SetTimelineRange(
+            DateTime? startTime,
+            DateTime? endTime)
+        {
+            _timelineStartTime = startTime;
+            _timelineEndTime = endTime;
+
+            pnlTimeLIne.Invalidate();
+        }
+
+        /// <summary>
+        /// 타임라인의 현재 재생 위치를 설정한다.
+        /// </summary>
+        public void SetTimelinePlaybackTime(DateTime? playbackTime)
+        {
+            _timelinePlaybackTime = playbackTime;
+
+            pnlTimeLIne.Invalidate();
+        }
+
+        /// <summary>
+        /// 좌측/우측 영상의 원본 크기를 설정한다.
+        /// width/height가 올바르지 않으면 해당 화면의 원본 비율을 알 수 없는 상태로 둔다.
+        /// </summary>
+        public void SetVideoSourceSize(
+            ScreenPosition screenPosition,
+            int width,
+            int height)
+        {
+            double? aspectRatio = null;
+
+            if (width > 0 && height > 0)
+            {
+                aspectRatio = (double)width / height;
+            }
+
+            if (screenPosition == ScreenPosition.Left)
+            {
+                _leftVideoAspectRatio = aspectRatio;
+            }
+            else if (screenPosition == ScreenPosition.Right)
+            {
+                _rightVideoAspectRatio = aspectRatio;
+            }
+
+            UpdateVideoRenderTargetLayout();
+        }
+
+
+
+        /*내부 메서드*/
+
+
+
+        /// <summary>
         /// 재생 시간 갱신 타이머 Tick을 Presenter에 전달한다.
         /// </summary>
         private void OnPlaybackTimerTick(object sender, EventArgs e)
@@ -479,7 +616,47 @@ namespace CamViewer.Views
             }
         }
 
-        /*helper*/
+        /// <summary>
+        /// 영상 렌더링 대상 패널의 크기와 위치를 현재 View 크기에 맞게 갱신한다.
+        /// Presenter에서 재생 요청을 만들기 전에 호출한다.
+        /// </summary>
+        public void UpdateVideoLayout()
+        {
+            UpdateVideoRenderTargetLayout();
+        }
+
+        /*내부 메서드*/
+
+        /// <summary>
+        /// NVR SDK가 실제로 영상을 렌더링할 전용 패널을 생성한다.
+        /// 
+        /// 기존 pnlLeftVideo / pnlRightVideo는 영상 영역의 Host로 사용하고,
+        /// SDK에는 내부 RenderTarget 패널의 Handle을 전달한다.
+        /// </summary>
+        private void InitializeVideoRenderTargets()
+        {
+            pnlLeftVideo.BackColor = Color.Black;
+            pnlRightVideo.BackColor = Color.Black;
+
+            _leftRenderTarget = CreateVideoRenderTargetPanel();
+            _rightRenderTarget = CreateVideoRenderTargetPanel();
+
+            pnlLeftVideo.Controls.Add(_leftRenderTarget);
+            pnlRightVideo.Controls.Add(_rightRenderTarget);
+
+            _leftRenderTarget.BringToFront();
+            _rightRenderTarget.BringToFront();
+
+            pnlLeftVideo.Resize += OnVideoHostResize;
+            pnlRightVideo.Resize += OnVideoHostResize;
+
+            // Handle을 미리 생성해 둔다.
+            _leftRenderTarget.CreateControl();
+            _rightRenderTarget.CreateControl();
+
+            UpdateVideoRenderTargetLayout();
+
+        }
 
         /// <summary>
         /// 화면 컨트롤의 기본값을 설정한다.
@@ -499,9 +676,9 @@ namespace CamViewer.Views
             InitializeBodyRows();
             InitializeTimeComboBoxes();
 
-            nudSearchAdjustSeconds.Minimum = 0;
-            nudSearchAdjustSeconds.Maximum = 300;
-            nudSearchAdjustSeconds.Value = 30;
+            nudTiemAdjustSeconds.Minimum = 0;
+            nudTiemAdjustSeconds.Maximum = 300;
+            nudTiemAdjustSeconds.Value = 30;
 
 
             //SetPlaybackDateTime(null);
@@ -510,7 +687,11 @@ namespace CamViewer.Views
             SetLeftVideoTitle("좌측 영상");
             SetRightVideoTitle("우측 영상");
 
+ 
+
             SetSearchDateTime(DateTime.Now);
+            SetPlaybackSpeedOptions();
+            InitializeRenderSelectComboBox();
         }
 
         /// <summary>
@@ -526,6 +707,7 @@ namespace CamViewer.Views
             InitializeMinuteSecondComboBox(cboEndMinute);
             InitializeMinuteSecondComboBox(cboEndSecond);
         }
+
 
         /// <summary>
         /// 시간 콤보박스를 00~23 기준으로 초기화한다.
@@ -579,7 +761,7 @@ namespace CamViewer.Views
             }
 
             tlpBody.Dock = DockStyle.Fill;
-            tlpBody.RowCount = 2;
+            tlpBody.RowCount = 1;
             tlpBody.RowStyles.Clear();
 
             tlpBody.RowStyles.Add(
@@ -587,6 +769,30 @@ namespace CamViewer.Views
 
             tlpBody.RowStyles.Add(
                 new RowStyle(SizeType.Absolute, controlRowHeight));
+        }
+
+        /// <summary>
+        /// 영상 표시 방식 콤보박스를 초기화한다.
+        /// </summary>
+        private void InitializeRenderSelectComboBox()
+        {
+            cmbRenderSelect.Items.Clear();
+
+            cmbRenderSelect.Items.Add(
+                new VideoRenderModeItem(
+                    "채우기",
+                    VideoRenderMode.Fill));
+
+            cmbRenderSelect.Items.Add(
+                new VideoRenderModeItem(
+                    "원본 비율",
+                    VideoRenderMode.KeepAspectRatio));
+
+            cmbRenderSelect.DropDownStyle =
+                ComboBoxStyle.DropDownList;
+
+            SelectVideoRenderMode(
+                VideoRenderMode.KeepAspectRatio);
         }
 
         /// <summary>
@@ -602,11 +808,11 @@ namespace CamViewer.Views
             cboCounterNo.SelectedIndexChanged += OnCounterChanged;
             btnSearch.Click += OnSearchButtonClick;
 
-            btnFastReverse.Click += OnFastReverseButtonClick;
+            btnRewind.Click += OnRewindButtonClick;
             btnSeekBackward10.Click += OnSeekBackward10ButtonClick;
             btnPlayPause.Click += OnPlayPauseButtonClick;
             btnSeekForward10.Click += OnSeekForward10ButtonClick;
-            btnFastForward.Click += OnFastForwardButtonClick;
+            btnStop.Click += OnStopButtonClick;
 
             btnSettings.Click += OnSettingsButtonClick;
             btnMinimize.Click += OnMinimizeButtonClick;
@@ -616,6 +822,182 @@ namespace CamViewer.Views
             pnlTitleBar.MouseDown += OnTitleBarMouseDown;
             lblTitle.MouseDown += OnTitleBarMouseDown;
             cboPlaybackSpeed.SelectedIndexChanged += OnPlaybackSpeedChanged;
+
+            btnSync.Click += OnSyncButtonClick;
+            pnlTimeLIne.Paint += OnTimelinePaint;
+            pnlTimeLIne.MouseDown += OnTimelineMouseDown;
+
+            cmbRenderSelect.SelectedIndexChanged += OnRenderSelectChanged;
+        }
+
+        /// <summary>
+        /// 실제 영상 렌더링 대상 패널을 생성한다.
+        /// </summary>
+        private static Panel CreateVideoRenderTargetPanel()
+        {
+            return new Panel
+            {
+                BackColor = Color.Black,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+                BorderStyle = BorderStyle.None
+            };
+        }
+
+        /// <summary>
+        /// 영상 Host 패널 크기가 변경되면 RenderTarget 위치와 크기를 다시 계산한다.
+        /// </summary>
+        private void OnVideoHostResize(object sender, EventArgs e)
+        {
+            UpdateVideoRenderTargetLayout();
+        }
+
+        /// <summary>
+        /// 영상 표시 방식 선택 변경을 처리한다.
+        /// </summary>
+        private void OnRenderSelectChanged(object sender, EventArgs e)
+        {
+            VideoRenderModeItem item =
+                cmbRenderSelect.SelectedItem as VideoRenderModeItem;
+
+            if (item == null)
+            {
+                return;
+            }
+
+            _videoRenderMode = item.RenderMode;
+
+            UpdateVideoRenderTargetLayout();
+        }
+
+        /// <summary>
+        /// 영상 표시 방식을 선택한다.
+        /// </summary>
+        private void SelectVideoRenderMode(
+            VideoRenderMode renderMode)
+        {
+            for (int index = 0; index < cmbRenderSelect.Items.Count; index++)
+            {
+                VideoRenderModeItem item =
+                    cmbRenderSelect.Items[index] as VideoRenderModeItem;
+
+                if (item != null && item.RenderMode == renderMode)
+                {
+                    cmbRenderSelect.SelectedIndex = index;
+                    return;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 하나의 영상 렌더링 패널을 Host 영역 안에 맞춘다.
+        /// </summary>
+        private void UpdateSingleRenderTargetLayout(
+            Panel hostPanel,
+            Panel renderTarget,
+            double? aspectRatio)
+        {
+            if (hostPanel == null || renderTarget == null)
+            {
+                return;
+            }
+
+            int hostWidth = hostPanel.ClientSize.Width;
+            int hostHeight = hostPanel.ClientSize.Height;
+
+            if (hostWidth <= 0 || hostHeight <= 0)
+            {
+                return;
+            }
+
+            // 채우기 또는 원본 비율을 모르는 경우:
+            // 임의로 16:9를 적용하지 않고 전체를 채운다.
+            if (_videoRenderMode == VideoRenderMode.Fill
+                || !aspectRatio.HasValue
+                || aspectRatio.Value <= 0)
+            {
+                renderTarget.Bounds = hostPanel.ClientRectangle;
+                renderTarget.Invalidate();
+                return;
+            }
+
+            double videoRatio = aspectRatio.Value;
+            double hostRatio = (double)hostWidth / hostHeight;
+
+            int targetWidth;
+            int targetHeight;
+
+            if (hostRatio > videoRatio)
+            {
+                targetHeight = hostHeight;
+                targetWidth = Convert.ToInt32(targetHeight * videoRatio);
+            }
+            else
+            {
+                targetWidth = hostWidth;
+                targetHeight = Convert.ToInt32(targetWidth / videoRatio);
+            }
+
+            if (targetWidth < 1)
+            {
+                targetWidth = 1;
+            }
+
+            if (targetHeight < 1)
+            {
+                targetHeight = 1;
+            }
+
+            int targetX = (hostWidth - targetWidth) / 2;
+            int targetY = (hostHeight - targetHeight) / 2;
+
+            renderTarget.Bounds =
+                new Rectangle(
+                    targetX,
+                    targetY,
+                    targetWidth,
+                    targetHeight);
+
+            renderTarget.Invalidate();
+        }
+
+        /// <summary>
+        /// 영상 표시 방식 ComboBox 항목이다.
+        /// </summary>
+        private sealed class VideoRenderModeItem
+        {
+            public VideoRenderModeItem(
+                string text,
+                VideoRenderMode renderMode)
+            {
+                Text = text;
+                RenderMode = renderMode;
+            }
+
+            public string Text { get; private set; }
+
+            public VideoRenderMode RenderMode { get; private set; }
+
+            public override string ToString()
+            {
+                return Text;
+            }
+        }
+
+        /// <summary>
+        /// 좌/우 영상 렌더링 패널을 Host 패널 크기에 맞게 재배치한다.
+        /// </summary>
+        private void UpdateVideoRenderTargetLayout()
+        {
+            UpdateSingleRenderTargetLayout(
+                pnlLeftVideo,
+                _leftRenderTarget,
+                _leftVideoAspectRatio);
+
+            UpdateSingleRenderTargetLayout(
+                pnlRightVideo,
+                _rightRenderTarget,
+                _rightVideoAspectRatio);
         }
 
         /// <summary>
@@ -653,7 +1035,9 @@ namespace CamViewer.Views
             }
 
             _normalBounds = Bounds;
+            UpdateVideoRenderTargetLayout();
         }
+
 
 
         /// <summary>
@@ -686,7 +1070,7 @@ namespace CamViewer.Views
                 Padding = Padding.Empty;
 
                 Bounds = workingArea;
-                btnResize.Text = "❐";
+                btnResize.Image = Properties.Resources.Minimum;
                 return;
             }
 
@@ -705,7 +1089,7 @@ namespace CamViewer.Views
             Padding = new Padding(ResizeBorderThickness);
 
             Bounds = _normalBounds;
-            btnResize.Text = "□";
+            btnResize.Image = Properties.Resources.Maximum;
         }
 
         /// <summary>
@@ -800,9 +1184,12 @@ namespace CamViewer.Views
             SearchEvent?.Invoke(this, EventArgs.Empty);
         }
 
-        private void OnFastReverseButtonClick(object sender, EventArgs e)
+        /// <summary>
+        /// 역재생 버튼 클릭을 Presenter에 전달한다.
+        /// </summary>
+        private void OnRewindButtonClick(object sender, EventArgs e)
         {
-            FastReverseEvent?.Invoke(this, EventArgs.Empty);
+            RewindEvent?.Invoke(this, EventArgs.Empty);
         }
 
         private void OnSeekBackward10ButtonClick(object sender, EventArgs e)
@@ -820,9 +1207,12 @@ namespace CamViewer.Views
             SeekForward10Event?.Invoke(this, EventArgs.Empty);
         }
 
-        private void OnFastForwardButtonClick(object sender, EventArgs e)
+        /// <summary>
+        /// 정지 버튼 클릭을 Presenter에 전달한다.
+        /// </summary>
+        private void OnStopButtonClick(object sender, EventArgs e)
         {
-            FastForwardEvent?.Invoke(this, EventArgs.Empty);
+            StopEvent?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
@@ -884,6 +1274,15 @@ namespace CamViewer.Views
                 HtCaption,
                 0);
         }
+
+        /// <summary>
+        /// 영상 동기화 버튼 클릭을 Presenter에 전달한다.
+        /// </summary>
+        private void OnSyncButtonClick(object sender, EventArgs e)
+        {
+            SyncEvent?.Invoke(this, EventArgs.Empty);
+        }
+
 
         /// <summary>
         /// 날짜 선택 컨트롤과 24시간 콤보박스 값을 DateTime으로 조합한다.
@@ -991,6 +1390,203 @@ namespace CamViewer.Views
             {
                 return Text;
             }
+        }
+
+        /// <summary>
+        /// 타임라인을 그린다.
+        /// </summary>
+        private void OnTimelinePaint(object sender, PaintEventArgs e)
+        {
+            Rectangle bounds = pnlTimeLIne.ClientRectangle;
+
+            e.Graphics.Clear(Color.FromArgb(28, 28, 28));
+
+            if (!_timelineStartTime.HasValue
+                || !_timelineEndTime.HasValue
+                || _timelineStartTime.Value >= _timelineEndTime.Value)
+            {
+                DrawTimelineText(
+                    e.Graphics,
+                    bounds,
+                    "조회 구간 없음");
+
+                return;
+            }
+
+            int marginLeft = 40;
+            int marginRight = 40;
+            int centerY = bounds.Height / 2;
+
+            int lineX = marginLeft;
+            int lineWidth = Math.Max(
+                1,
+                bounds.Width - marginLeft - marginRight);
+
+            using (Pen basePen = new Pen(Color.FromArgb(90, 90, 90), 6))
+            {
+                e.Graphics.DrawLine(
+                    basePen,
+                    lineX,
+                    centerY,
+                    lineX + lineWidth,
+                    centerY);
+            }
+
+            if (_timelinePlaybackTime.HasValue)
+            {
+                double ratio =
+                    GetTimelineRatio(_timelinePlaybackTime.Value);
+
+                int currentX =
+                    lineX + Convert.ToInt32(lineWidth * ratio);
+
+                using (Pen progressPen = new Pen(Color.FromArgb(109, 53, 209), 6))
+                {
+                    e.Graphics.DrawLine(
+                        progressPen,
+                        lineX,
+                        centerY,
+                        currentX,
+                        centerY);
+                }
+
+                using (Brush markerBrush = new SolidBrush(Color.White))
+                {
+                    e.Graphics.FillEllipse(
+                        markerBrush,
+                        currentX - 6,
+                        centerY - 6,
+                        12,
+                        12);
+                }
+            }
+
+            using (Brush textBrush = new SolidBrush(Color.White))
+            {
+                e.Graphics.DrawString(
+                    _timelineStartTime.Value.ToString("HH:mm:ss"),
+                    Font,
+                    textBrush,
+                    marginLeft,
+                    centerY + 15);
+
+                string endText =
+                    _timelineEndTime.Value.ToString("HH:mm:ss");
+
+                SizeF endSize =
+                    e.Graphics.MeasureString(
+                        endText,
+                        Font);
+
+                e.Graphics.DrawString(
+                    endText,
+                    Font,
+                    textBrush,
+                    bounds.Width - marginRight - endSize.Width,
+                    centerY + 15);
+            }
+        }
+
+        /// <summary>
+        /// 타임라인 안내 문구를 표시한다.
+        /// </summary>
+        private void DrawTimelineText(
+            Graphics graphics,
+            Rectangle bounds,
+            string text)
+        {
+            using (Brush brush = new SolidBrush(Color.FromArgb(180, 180, 180)))
+            {
+                SizeF size =
+                    graphics.MeasureString(
+                        text,
+                        Font);
+
+                graphics.DrawString(
+                    text,
+                    Font,
+                    brush,
+                    (bounds.Width - size.Width) / 2,
+                    (bounds.Height - size.Height) / 2);
+            }
+        }
+
+        /// <summary>
+        /// 타임라인 클릭 위치를 영상재생시간으로 변환해 Presenter에 전달한다.
+        /// </summary>
+        private void OnTimelineMouseDown(object sender, MouseEventArgs e)
+        {
+            if (!_timelineStartTime.HasValue
+                || !_timelineEndTime.HasValue
+                || _timelineStartTime.Value >= _timelineEndTime.Value)
+            {
+                return;
+            }
+
+            int marginLeft = 40;
+            int marginRight = 40;
+
+            int lineX = marginLeft;
+            int lineWidth = Math.Max(
+                1,
+                pnlTimeLIne.Width - marginLeft - marginRight);
+
+            int clickedX = e.X;
+
+            if (clickedX < lineX)
+            {
+                clickedX = lineX;
+            }
+
+            if (clickedX > lineX + lineWidth)
+            {
+                clickedX = lineX + lineWidth;
+            }
+
+            double ratio =
+                (double)(clickedX - lineX) / lineWidth;
+
+            TimeSpan totalRange =
+                _timelineEndTime.Value - _timelineStartTime.Value;
+
+            DateTime targetTime =
+                _timelineStartTime.Value.AddSeconds(
+                    totalRange.TotalSeconds * ratio);
+
+            TimelineSeekRequestedEvent?.Invoke(
+                this,
+                new TimelineSeekRequestedEventArgs(targetTime));
+        }
+
+        /// <summary>
+        /// 타임라인 구간 내 현재 위치 비율을 계산한다.
+        /// </summary>
+        private double GetTimelineRatio(DateTime playbackTime)
+        {
+            if (!_timelineStartTime.HasValue
+                || !_timelineEndTime.HasValue
+                || _timelineStartTime.Value >= _timelineEndTime.Value)
+            {
+                return 0;
+            }
+
+            if (playbackTime <= _timelineStartTime.Value)
+            {
+                return 0;
+            }
+
+            if (playbackTime >= _timelineEndTime.Value)
+            {
+                return 1;
+            }
+
+            TimeSpan total =
+                _timelineEndTime.Value - _timelineStartTime.Value;
+
+            TimeSpan current =
+                playbackTime - _timelineStartTime.Value;
+
+            return current.TotalSeconds / total.TotalSeconds;
         }
     }
 
