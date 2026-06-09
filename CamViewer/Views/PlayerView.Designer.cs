@@ -94,17 +94,15 @@
             this.tlpBody.Name = "tlpBody";
             this.tlpBody.RowCount = 1;
             this.tlpBody.RowStyles.Add(new System.Windows.Forms.RowStyle());
-            this.tlpBody.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 838F));
+            this.tlpBody.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 341F));
             this.tlpBody.Size = new System.Drawing.Size(1280, 338);
             this.tlpBody.TabIndex = 0;
             // 
             // pnlRightVideo
             // 
-            this.pnlRightVideo.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
-            | System.Windows.Forms.AnchorStyles.Left) 
-            | System.Windows.Forms.AnchorStyles.Right)));
             this.pnlRightVideo.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(60)))), ((int)(((byte)(60)))), ((int)(((byte)(60)))));
             this.pnlRightVideo.Controls.Add(this.lblRightVideoEmpty);
+            this.pnlRightVideo.Dock = System.Windows.Forms.DockStyle.Fill;
             this.pnlRightVideo.Location = new System.Drawing.Point(643, 3);
             this.pnlRightVideo.Name = "pnlRightVideo";
             this.pnlRightVideo.Size = new System.Drawing.Size(634, 335);
@@ -125,11 +123,9 @@
             // 
             // pnlLeftVideo
             // 
-            this.pnlLeftVideo.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
-            | System.Windows.Forms.AnchorStyles.Left) 
-            | System.Windows.Forms.AnchorStyles.Right)));
             this.pnlLeftVideo.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(60)))), ((int)(((byte)(60)))), ((int)(((byte)(60)))));
             this.pnlLeftVideo.Controls.Add(this.lblLeftVideoEmpty);
+            this.pnlLeftVideo.Dock = System.Windows.Forms.DockStyle.Fill;
             this.pnlLeftVideo.Location = new System.Drawing.Point(3, 3);
             this.pnlLeftVideo.Name = "pnlLeftVideo";
             this.pnlLeftVideo.Size = new System.Drawing.Size(634, 335);

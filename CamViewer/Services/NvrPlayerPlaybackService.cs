@@ -42,6 +42,12 @@ namespace CamViewer.Services
         /// 현재 재생 상태.
         /// </summary>
         public PlaybackState CurrentState { get; private set; }
+        /// <summary>
+        /// 일시정지 직전의 재생 방향 상태.
+        /// Playing 또는 Rewinding을 보관한다.
+        /// </summary>
+        private PlaybackState _pausedFromState;
+
 
         /// <summary>
         /// NvrPlayerPlaybackService를 초기화한다.
@@ -61,6 +67,7 @@ namespace CamViewer.Services
             CurrentState = PlaybackState.Stopped;
             _currentSpeed = PlaybackSpeed.Normal;
             _sessionTimeOffsets = new Dictionary<int, int>();
+            _pausedFromState = PlaybackState.Playing;
         }
 
         /// <summary>
@@ -175,6 +182,8 @@ namespace CamViewer.Services
                         await PlayChannelAsync(
                             request,
                             channel,
+                            request.PlayStartTime,
+                            request.PlayEndTime,
                             cancellationToken);
 
                     if (!playChannelResult.Success)
@@ -198,9 +207,7 @@ namespace CamViewer.Services
                     PlaybackSpeed requestedSpeed = _currentSpeed;
 
                     PlayerPlaybackResult speedResult =
-                        await SetPlaybackSpeedAsync(
-                            requestedSpeed,
-                            cancellationToken);
+                        await ApplyCurrentSpeedToSessionsAsync(cancellationToken);
 
                     if (!speedResult.Success)
                     {
@@ -263,41 +270,99 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 현재 영상재생시간을 추정한다.
+        /// Provider 실제 재생시간을 조회하지 못할 때 사용할 추정 영상재생시간을 계산한다.
         /// 
-        /// NVR SDK에서 현재 재생 위치를 직접 제공하지 않는 단계에서는
-        /// 마지막 기준 재생시간 + 실제 경과시간 x 재생속도로 계산한다.
+        /// 재생 중이면 시간이 증가하고,
+        /// 역재생 중이면 시간이 감소한다.
         /// </summary>
         private DateTime GetEstimatedPlaybackTime()
         {
-            if (!_currentPlaybackTime.HasValue)
+            if (_currentRequest == null)
             {
-                return _currentRequest == null
-                    ? DateTime.Now
-                    : _currentRequest.PlayStartTime;
+                return DateTime.MinValue;
             }
 
-            if (CurrentState != PlaybackState.Playing)
-            {
-                return _currentPlaybackTime.Value;
-            }
+            DateTime baseTime =
+                _currentPlaybackTime.HasValue
+                    ? _currentPlaybackTime.Value
+                    : _currentRequest.PlayStartTime;
 
             if (!_playbackClockStartedAtUtc.HasValue)
             {
-                return _currentPlaybackTime.Value;
+                return ClampPlaybackTime(baseTime);
             }
 
-            TimeSpan elapsed =
-                DateTime.UtcNow - _playbackClockStartedAtUtc.Value;
+            double elapsedSeconds =
+                (DateTime.UtcNow - _playbackClockStartedAtUtc.Value)
+                .TotalSeconds;
 
             double speedMultiplier =
-                GetPlaybackSpeedMultiplier(_currentSpeed);
+                GetSpeedMultiplier(_currentSpeed);
 
-            double playbackElapsedSeconds =
-                elapsed.TotalSeconds * speedMultiplier;
+            DateTime estimatedTime;
 
-            return _currentPlaybackTime.Value.AddSeconds(
-                playbackElapsedSeconds);
+            if (CurrentState == PlaybackState.Rewinding)
+            {
+                estimatedTime =
+                    baseTime.AddSeconds(
+                        -elapsedSeconds * speedMultiplier);
+            }
+            else
+            {
+                estimatedTime =
+                    baseTime.AddSeconds(
+                        elapsedSeconds * speedMultiplier);
+            }
+
+            return ClampPlaybackTime(estimatedTime);
+        }
+
+        /// <summary>
+        /// 재생시간이 현재 조회 구간을 벗어나지 않도록 보정한다.
+        /// </summary>
+        private DateTime ClampPlaybackTime(DateTime playbackTime)
+        {
+            if (_currentRequest == null)
+            {
+                return playbackTime;
+            }
+
+            if (playbackTime < _currentRequest.PlayStartTime)
+            {
+                return _currentRequest.PlayStartTime;
+            }
+
+            if (playbackTime > _currentRequest.PlayEndTime)
+            {
+                return _currentRequest.PlayEndTime;
+            }
+
+            return playbackTime;
+        }
+
+        /// <summary>
+        /// 재생속도 enum 값을 실제 시간 계산 배율로 변환한다.
+        /// </summary>
+        private static double GetSpeedMultiplier(PlaybackSpeed speed)
+        {
+            switch (speed)
+            {
+                case PlaybackSpeed.Half:
+                    return 0.5;
+
+                case PlaybackSpeed.Double:
+                    return 2.0;
+
+                case PlaybackSpeed.Quad:
+                    return 4.0;
+
+                case PlaybackSpeed.Octuple:
+                    return 8.0;
+
+                case PlaybackSpeed.Normal:
+                default:
+                    return 1.0;
+            }
         }
 
         /// <summary>
@@ -353,6 +418,14 @@ namespace CamViewer.Services
 
             _currentPlaybackTime = GetEstimatedPlaybackTime();
             _playbackClockStartedAtUtc = null;
+            if (CurrentState == PlaybackState.Rewinding)
+            {
+                _pausedFromState = PlaybackState.Rewinding;
+            }
+            else
+            {
+                _pausedFromState = PlaybackState.Playing;
+            }
             CurrentState = PlaybackState.Paused;
 
             return PlayerPlaybackResult.Ok("일시정지했습니다.");
@@ -394,6 +467,11 @@ namespace CamViewer.Services
             }
 
             _playbackClockStartedAtUtc = DateTime.UtcNow;
+            if (_pausedFromState == PlaybackState.Rewinding)
+            {
+                CurrentState = PlaybackState.Rewinding;
+                return PlayerPlaybackResult.Ok("역재생을 재개했습니다.");
+            }
             CurrentState = PlaybackState.Playing;
 
             return PlayerPlaybackResult.Ok("재생을 재개했습니다.");
@@ -415,8 +493,14 @@ namespace CamViewer.Services
                     "PLAYBACK_REQUEST_EMPTY");
             }
 
+            DateTime? syncedTime =
+                await SyncPlaybackTimeAsync(
+                    cancellationToken);
+
             DateTime currentTime =
-                GetEstimatedPlaybackTime();
+                syncedTime.HasValue
+                    ? syncedTime.Value
+                    : GetEstimatedPlaybackTime();
 
             DateTime targetTime =
                 currentTime.AddSeconds(seconds);
@@ -449,28 +533,7 @@ namespace CamViewer.Services
         //            "FAST_FORWARD_NOT_SUPPORTED"));
         //}
 
-        /// <summary>
-        /// 역재생을 요청한다.
-        /// 
-        /// </summary>
-        public Task<PlayerPlaybackResult> RewindAsync(
-            CancellationToken cancellationToken)
-        {
-            EnsureNotDisposed();
-
-            if (_sessions.Count == 0)
-            {
-                return Task.FromResult(
-                    PlayerPlaybackResult.Fail(
-                        "역재생할 재생 세션이 없습니다.",
-                        "PLAYBACK_NOT_STARTED"));
-            }
-
-            return Task.FromResult(
-                PlayerPlaybackResult.Fail(
-                    "역재생 기능은 아직 지원되지 않습니다.",
-                    "REWIND_NOT_SUPPORTED"));
-        }
+       
 
         /// <summary>
         /// 재생을 중지하고 모든 세션/Provider 리소스를 정리한다.
@@ -809,12 +872,397 @@ namespace CamViewer.Services
                 result.Data.Height);
         }
 
+
         /// <summary>
-        /// 단일 좌/우 채널 재생을 시작한다.
+        /// 현재 재생 위치를 기준으로 역재생을 시작한다.
+        /// </summary>
+        public async Task<PlayerPlaybackResult> RewindAsync(
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            if (_currentRequest == null)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 요청 정보가 없습니다.",
+                    "PLAYBACK_REQUEST_EMPTY");
+            }
+
+            if (_sessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "역재생할 재생 세션이 없습니다. 먼저 영상을 재생해 주세요.",
+                    "PLAYBACK_SESSION_EMPTY");
+            }
+
+            DateTime? syncedTime =
+                await SyncPlaybackTimeAsync(
+                    cancellationToken);
+
+            DateTime reverseStartTime =
+                syncedTime.HasValue
+                    ? syncedTime.Value
+                    : GetEstimatedPlaybackTime();
+
+            if (reverseStartTime <= _currentRequest.PlayStartTime)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "조회 시작시간보다 이전으로 역재생할 수 없습니다.",
+                    "REWIND_BEFORE_START");
+            }
+
+            PlayerPlaybackResult stopResult =
+                await StopCurrentPlaybackSessionsOnlyAsync(
+                    cancellationToken);
+
+            if (!stopResult.Success)
+            {
+                return stopResult;
+            }
+
+            foreach (PlayerChannelTarget channel in _currentRequest.Channels)
+            {
+                INvrProvider provider =
+                    await GetOrCreateLoggedInProviderAsync(
+                        channel.NvrConfig,
+                        cancellationToken);
+
+                if (provider == null)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "NVR Provider를 생성하지 못했습니다.",
+                        "NVR_PROVIDER_CREATE_FAILED");
+                }
+
+                ProviderCapabilities capabilities =
+                    provider.GetCapabilities();
+
+                if (capabilities == null || !capabilities.CanReversePlayback)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "현재 NVR Provider는 역재생을 지원하지 않습니다.",
+                        "REVERSE_PLAYBACK_NOT_SUPPORTED");
+                }
+
+                INvrReversePlaybackProvider reverseProvider =
+                    provider as INvrReversePlaybackProvider;
+
+                if (reverseProvider == null)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "현재 NVR Provider는 역재생 인터페이스를 구현하지 않았습니다.",
+                        "REVERSE_PROVIDER_NOT_IMPLEMENTED");
+                }
+
+                NvrPlaybackRequest nvrRequest = ToNvrPlaybackRequest(_currentRequest,channel,_currentRequest.PlayStartTime, _currentRequest.PlayEndTime);
+
+                int offsetSeconds =
+                    channel.TimeOffsetSeconds;
+
+                DateTime providerReverseStartTime =
+                    reverseStartTime.AddSeconds(offsetSeconds);
+
+                NvrResult<INvrPlaybackSession> reverseResult =
+                    await reverseProvider.PlayReverseByTimeAsync(
+                        nvrRequest,
+                        providerReverseStartTime,
+                        cancellationToken);
+
+                if (!reverseResult.Success || reverseResult.Data == null)
+                {
+                    return ToPlayerResult(reverseResult);
+                }
+
+                int sessionKey =
+                    BuildSessionKey(
+                        channel.NvrNo,
+                        channel.ChannelNo,
+                        (int)channel.ScreenPosition);
+
+                _sessions[sessionKey] =
+                    reverseResult.Data;
+
+                _sessionTimeOffsets[sessionKey] =
+                    offsetSeconds;
+            }
+
+            _currentPlaybackTime =
+                reverseStartTime;
+
+            _playbackClockStartedAtUtc =
+                DateTime.UtcNow;
+
+            CurrentState =
+                PlaybackState.Rewinding;
+
+            if (_currentSpeed != PlaybackSpeed.Normal)
+            {
+                PlayerPlaybackResult speedResult =
+                    await ApplyCurrentSpeedToSessionsAsync(
+                        cancellationToken);
+
+                if (!speedResult.Success)
+                {
+                    return speedResult;
+                }
+            }
+
+            return PlayerPlaybackResult.Ok(
+                "역재생을 시작했습니다.");
+        }
+
+        /// <summary>
+        /// 현재 영상재생시간을 기준으로 정방향 재생으로 전환한다.
+        /// 
+        /// 사용 시점:
+        /// - 역재생 중 재생 버튼 클릭
+        /// 
+        /// 처리 순서:
+        /// 1. 현재 Provider 재생시간 또는 추정 재생시간 조회
+        /// 2. 기존 역재생 세션만 정리
+        /// 3. 기존 Provider/Login은 유지
+        /// 4. 현재 시간부터 조회 종료시간까지 정방향 재생 세션 재생성
+        /// 5. 기존 선택 배속을 새 세션에 다시 적용
+        /// </summary>
+        public async Task<PlayerPlaybackResult> PlayForwardFromCurrentTimeAsync(
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "정방향 전환 요청이 취소되었습니다.",
+                    "FORWARD_PLAYBACK_CANCELLED");
+            }
+
+            if (_currentRequest == null)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 요청 정보가 없습니다.",
+                    "PLAYBACK_REQUEST_EMPTY");
+            }
+
+            if (_sessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "정방향으로 전환할 재생 세션이 없습니다.",
+                    "PLAYBACK_SESSION_EMPTY");
+            }
+
+            DateTime? syncedTime =
+                await SyncPlaybackTimeAsync(
+                    cancellationToken);
+
+            DateTime forwardStartTime =
+                syncedTime.HasValue
+                    ? syncedTime.Value
+                    : GetEstimatedPlaybackTime();
+
+            forwardStartTime =
+                ClampPlaybackTime(
+                    forwardStartTime);
+
+            if (forwardStartTime >= _currentRequest.PlayEndTime)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "조회 종료시간 이후로 정방향 재생을 시작할 수 없습니다.",
+                    "FORWARD_AFTER_END");
+            }
+
+            PlaybackSpeed selectedSpeed =
+                _currentSpeed;
+
+            PlayerPlaybackRequest request =
+                _currentRequest;
+
+            PlayerPlaybackResult stopResult =
+                await StopCurrentPlaybackSessionsOnlyAsync(
+                    cancellationToken);
+
+            if (!stopResult.Success)
+            {
+                return stopResult;
+            }
+
+            _currentSpeed =
+                selectedSpeed;
+
+            foreach (PlayerChannelTarget channel in request.Channels)
+            {
+                PlayerPlaybackResult playResult =
+                    await PlayChannelAsync(
+                        request,
+                        channel,
+                        forwardStartTime,
+                        request.PlayEndTime,
+                        cancellationToken);
+
+                if (!playResult.Success)
+                {
+                    await StopCurrentPlaybackSessionsOnlyAsync(
+                        CancellationToken.None);
+
+                    return playResult;
+                }
+            }
+
+            _currentPlaybackTime =
+                forwardStartTime;
+
+            _playbackClockStartedAtUtc =
+                DateTime.UtcNow;
+
+            CurrentState =
+                PlaybackState.Playing;
+
+            if (_currentSpeed != PlaybackSpeed.Normal)
+            {
+                PlayerPlaybackResult speedResult =
+                    await ApplyCurrentSpeedToSessionsAsync(
+                        cancellationToken);
+
+                if (!speedResult.Success)
+                {
+                    _currentSpeed =
+                        PlaybackSpeed.Normal;
+
+                    _currentPlaybackTime =
+                        GetEstimatedPlaybackTime();
+
+                    _playbackClockStartedAtUtc =
+                        DateTime.UtcNow;
+
+                    return PlayerPlaybackResult.Ok(
+                        "정방향 재생으로 전환했지만 재생속도 적용에는 실패하여 1배속으로 재생합니다. "
+                        + speedResult.Message);
+                }
+            }
+
+            PlayerPlaybackResult syncResult =
+                await ResyncPlaybackSessionsAsync(
+                    cancellationToken);
+
+            if (!syncResult.Success)
+            {
+                return syncResult;
+            }
+
+            return PlayerPlaybackResult.Ok(
+                "정방향 재생으로 전환했습니다. "
+                + forwardStartTime.ToString("yyyy-MM-dd HH:mm:ss"));
+        }
+
+        /// <summary>
+        /// 현재 재생 세션만 정리한다.
+        /// Provider와 로그인 상태, 현재 재생 요청 정보는 유지한다.
+        /// 
+        /// 사용 시점:
+        /// - 정방향 재생에서 역재생으로 전환
+        /// - 역재생에서 정방향 재생으로 전환
+        /// </summary>
+        private async Task<PlayerPlaybackResult> StopCurrentPlaybackSessionsOnlyAsync(
+            CancellationToken cancellationToken)
+        {
+            string warningMessage =
+                string.Empty;
+
+            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions.ToList())
+            {
+                try
+                {
+                    INvrProvider provider =
+                        GetProviderByNvrNo(
+                            item.Value.NvrNo);
+
+                    if (provider != null)
+                    {
+                        await provider.StopAsync(
+                            item.Value,
+                            cancellationToken);
+                    }
+
+                    item.Value.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    warningMessage =
+                        ex.Message;
+                }
+            }
+
+            _sessions.Clear();
+            _sessionTimeOffsets.Clear();
+
+            if (!string.IsNullOrWhiteSpace(warningMessage))
+            {
+                return PlayerPlaybackResult.Ok(
+                    "기존 재생 세션은 정리되었지만 일부 경고가 발생했습니다. "
+                    + warningMessage);
+            }
+
+            return PlayerPlaybackResult.Ok(
+                "기존 재생 세션을 정리했습니다.");
+        }
+
+        /// <summary>
+        /// 현재 선택된 재생속도를 모든 재생 세션에 적용한다.
+        /// </summary>
+        private async Task<PlayerPlaybackResult> ApplyCurrentSpeedToSessionsAsync(
+            CancellationToken cancellationToken)
+        {
+            if (_currentSpeed == PlaybackSpeed.Normal)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "1배속 상태입니다.");
+            }
+
+            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
+            {
+                INvrProvider provider =
+                    GetProviderByNvrNo(
+                        item.Value.NvrNo);
+
+                if (provider == null)
+                {
+                    continue;
+                }
+
+                ProviderCapabilities capabilities =
+                    provider.GetCapabilities();
+
+                if (capabilities == null || !capabilities.CanChangeSpeed)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "현재 NVR Provider는 재생속도 변경을 지원하지 않습니다.",
+                        "PLAYBACK_SPEED_NOT_SUPPORTED");
+                }
+
+                NvrResult speedResult =
+                    await provider.SetPlaybackSpeedAsync(
+                        item.Value,
+                        ToNvrPlaybackSpeed(_currentSpeed),
+                        cancellationToken);
+
+                if (!speedResult.Success)
+                {
+                    return ToPlayerResult(
+                        speedResult);
+                }
+            }
+
+            return PlayerPlaybackResult.Ok(
+                GetPlaybackSpeedText(_currentSpeed)
+                + "을 적용했습니다.");
+        }
+        /// <summary>
+        /// 단일 좌/우 채널 재생을 지정된 시간 구간으로 시작한다.
         /// </summary>
         private async Task<PlayerPlaybackResult> PlayChannelAsync(
             PlayerPlaybackRequest request,
             PlayerChannelTarget channel,
+            DateTime playStartTime,
+            DateTime playEndTime,
             CancellationToken cancellationToken)
         {
             if (channel == null || channel.NvrConfig == null)
@@ -838,8 +1286,7 @@ namespace CamViewer.Services
 
             NvrPlaybackRequest nvrRequest =
                 ToNvrPlaybackRequest(
-                    request,
-                    channel);
+                    request, channel, playStartTime, playEndTime);
 
             NvrResult<INvrPlaybackSession> playResult =
                 await provider.PlayByTimeAsync(
@@ -861,10 +1308,14 @@ namespace CamViewer.Services
                     channel.ChannelNo,
                     (int)channel.ScreenPosition);
 
-            _sessions[sessionKey] = playResult.Data;
-            _sessionTimeOffsets[sessionKey] = channel.TimeOffsetSeconds;
+            _sessions[sessionKey] =
+                playResult.Data;
 
-            return PlayerPlaybackResult.Ok("채널 재생을 시작했습니다.");
+            _sessionTimeOffsets[sessionKey] =
+                channel.TimeOffsetSeconds;
+
+            return PlayerPlaybackResult.Ok(
+                "채널 재생을 시작했습니다.");
         }
 
         /// <summary>
@@ -975,8 +1426,10 @@ namespace CamViewer.Services
         /// Player 재생 요청을 NVR Core 재생 요청으로 변환한다.
         /// </summary>
         private static NvrPlaybackRequest ToNvrPlaybackRequest(
-            PlayerPlaybackRequest request,
-            PlayerChannelTarget channel)
+                PlayerPlaybackRequest request,
+                PlayerChannelTarget channel,
+                DateTime playStartTime,
+                DateTime playEndTime)
         {
             return new NvrPlaybackRequest
             {
@@ -985,8 +1438,8 @@ namespace CamViewer.Services
                 ChannelNo = channel.ChannelNo,
                 ScreenPosition = (int)channel.ScreenPosition,
                 SearchDateTime = request.SearchDateTime,
-                StartTime = request.PlayStartTime,
-                EndTime = request.PlayEndTime,
+                StartTime = playStartTime,
+                EndTime = playEndTime,
                 RenderTargetHandle = channel.OutputHandle,
                 AutoPlay = true
             };
@@ -1139,6 +1592,13 @@ namespace CamViewer.Services
                 _playbackClockStartedAtUtc = null;
                 CurrentState = stateBeforeChange;
             }
+            if (stateBeforeChange == PlaybackState.Rewinding)
+            {
+                return PlayerPlaybackResult.Ok(
+                    GetPlaybackSpeedText(speed)
+                    + "으로 재생속도를 변경했습니다. "
+                    + "역재생 중에는 방향 유지를 위해 자동 싱크 보정을 생략했습니다.");
+            }
 
             PlayerPlaybackResult syncResult =
                 await ResyncPlaybackSessionsAsync(cancellationToken);
@@ -1146,6 +1606,33 @@ namespace CamViewer.Services
             if (!syncResult.Success)
             {
                 return syncResult;
+            }
+
+            // 동기화 과정에서 일부 세션이 재시작되었을 수 있으므로,
+            // 현재 선택 속도가 1배속이 아니면 전체 세션에 다시 한번 적용한다.
+            if (_currentSpeed != PlaybackSpeed.Normal)
+            {
+                foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
+                {
+                    INvrProvider provider =
+                        GetProviderByNvrNo(item.Value.NvrNo);
+
+                    if (provider == null)
+                    {
+                        continue;
+                    }
+
+                    NvrResult speedResult =
+                        await provider.SetPlaybackSpeedAsync(
+                            item.Value,
+                            ToNvrPlaybackSpeed(_currentSpeed),
+                            cancellationToken);
+
+                    if (!speedResult.Success)
+                    {
+                        return ToPlayerResult(speedResult);
+                    }
+                }
             }
 
             return PlayerPlaybackResult.Ok(
@@ -1348,30 +1835,6 @@ namespace CamViewer.Services
             }
         }
 
-        /// <summary>
-        /// 재생속도 enum 값을 실제 시간 배율로 변환한다.
-        /// </summary>
-        private static double GetPlaybackSpeedMultiplier(
-            PlaybackSpeed speed)
-        {
-            switch (speed)
-            {
-                case PlaybackSpeed.Half:
-                    return 0.5;
-
-                case PlaybackSpeed.Double:
-                    return 2.0;
-
-                case PlaybackSpeed.Quad:
-                    return 4.0;
-
-                case PlaybackSpeed.Octuple:
-                    return 8.0;
-
-                default:
-                    return 1.0;
-            }
-        }
 
         /// <summary>
         /// 세션별 시간 보정 초를 반환한다.

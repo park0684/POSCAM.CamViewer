@@ -10,6 +10,8 @@
         Paused = 2,
         Stopped = 3,
         Completed = 4,
-        Faulted = 5
+        Faulted = 5,
+        Rewinding = 6
+
     }
 }

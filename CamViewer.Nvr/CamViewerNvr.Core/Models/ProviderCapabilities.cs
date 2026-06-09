@@ -44,5 +44,10 @@ namespace CamViewer.Nvr.Core.Models
         /// </summary>
         public bool CanGetVideoSourceInfo { get; set; }
 
+        /// <summary>
+        /// 역재생 지원 여부.
+        /// </summary>
+        public bool CanReversePlayback { get; set; }
+
     }
 }

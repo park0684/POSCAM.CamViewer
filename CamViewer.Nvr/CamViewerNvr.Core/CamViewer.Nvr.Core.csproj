@@ -54,6 +54,7 @@
     <Compile Include="Abstractions\INvrProvider.cs" />
     <Compile Include="Abstractions\INvrProviderCatalog.cs" />
     <Compile Include="Abstractions\INvrProviderFactory.cs" />
+    <Compile Include="Abstractions\INvrReversePlaybackProvider.cs" />
     <Compile Include="Abstractions\INvrVideoSourceInfoProvider.cs" />
     <Compile Include="Attributes\NvrProviderExportAttribute.cs" />
     <Compile Include="Enums\NvrConnectionType.cs" />

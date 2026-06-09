@@ -3,6 +3,8 @@ using CamViewerClient.Enums;
 using CamViewerClient.Models.Config;
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace CamViewer.Interfaces
 {

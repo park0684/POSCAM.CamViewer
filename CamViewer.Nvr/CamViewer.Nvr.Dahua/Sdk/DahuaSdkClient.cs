@@ -1,8 +1,9 @@
-﻿using System;
-using CamViewer.Nvr.Core.Enums;
+﻿using CamViewer.Nvr.Core.Enums;
 using CamViewer.Nvr.Core.Models;
 using CamViewer.Nvr.Core.Results;
 using CamViewer.Nvr.Dahua.Native;
+using NetSDKCS;
+using System;
 
 namespace CamViewer.Nvr.Dahua.Sdk
 {
@@ -360,16 +361,6 @@ namespace CamViewer.Nvr.Dahua.Sdk
 
         /// <summary>
         /// Dahua 재생 세션의 재생속도를 변경한다.
-        ///
-        /// Dahua SDK 데모 기준:
-        /// - Normal: 일반속도 복귀
-        /// - Fast: 호출할 때마다 2배씩 증가
-        /// - Slow: 호출할 때마다 1/2배씩 감소
-        ///
-        /// 처리 방식:
-        /// 1. 먼저 Normal로 초기화한다.
-        /// 2. 원하는 속도에 따라 Fast 또는 Slow를 반복 호출한다.
-        /// 3. 세션 상태는 변경하지 않고 속도값만 기록한다.
         /// </summary>
         public static NvrResult SetPlaybackSpeed(
             DahuaPlaybackSession playbackSession,
@@ -386,9 +377,9 @@ namespace CamViewer.Nvr.Dahua.Sdk
             NvrResult normalResult =
                 ApplyPlaybackControl(
                     playbackSession,
-                    DahuaNative.DahuaPlaybackControlType.Normal,
+                    PlayBackType.Normal,
                     "DAHUA_PLAYBACK_SPEED_NORMAL_FAILED",
-                    "CLIENT_PlayBackControl Normal 호출에 실패했습니다.");
+                    "Dahua 재생속도를 1배속으로 초기화하지 못했습니다.");
 
             if (!normalResult.Success)
             {
@@ -426,9 +417,9 @@ namespace CamViewer.Nvr.Dahua.Sdk
                 NvrResult fastResult =
                     ApplyPlaybackControl(
                         playbackSession,
-                        DahuaNative.DahuaPlaybackControlType.Fast,
+                        PlayBackType.Fast,
                         "DAHUA_PLAYBACK_SPEED_FAST_FAILED",
-                        "CLIENT_PlayBackControl Fast 호출에 실패했습니다.");
+                        "Dahua 빠른 재생 제어에 실패했습니다.");
 
                 if (!fastResult.Success)
                 {
@@ -441,9 +432,9 @@ namespace CamViewer.Nvr.Dahua.Sdk
                 NvrResult slowResult =
                     ApplyPlaybackControl(
                         playbackSession,
-                        DahuaNative.DahuaPlaybackControlType.Slow,
+                        PlayBackType.Slow,
                         "DAHUA_PLAYBACK_SPEED_SLOW_FAILED",
-                        "CLIENT_PlayBackControl Slow 호출에 실패했습니다.");
+                        "Dahua 느린 재생 제어에 실패했습니다.");
 
                 if (!slowResult.Success)
                 {
@@ -451,13 +442,164 @@ namespace CamViewer.Nvr.Dahua.Sdk
                 }
             }
 
-            // 여기서는 재생/일시정지 상태를 변경하지 않는다.
-            // 상태 복원은 DahuaNvrProvider.SetPlaybackSpeedAsync에서 처리한다.
             playbackSession.SetPlaybackSpeed(speed);
 
             return NvrResult.Ok(
                 "Dahua 재생속도를 변경했습니다. "
                 + GetNvrPlaybackSpeedText(speed));
+        }
+
+        /// <summary>
+        /// Dahua SDKCS 래퍼의 재생 제어 명령을 실행한다.
+        /// </summary>
+        private static NvrResult ApplyPlaybackControl(
+            DahuaPlaybackSession playbackSession,
+            PlayBackType controlType,
+            string errorCode,
+            string errorMessage)
+        {
+            bool result =
+                NETClient.PlayBackControl(
+                    playbackSession.PlaybackHandle,
+                    controlType);
+
+            if (result)
+            {
+                return NvrResult.Ok();
+            }
+
+            return NvrResult.Fail(
+                NvrResultStatus.Failed,
+                "Dahua 재생 제어에 실패했습니다.",
+                new NvrErrorInfo
+                {
+                    ErrorCode = errorCode,
+                    ErrorMessage = errorMessage,
+                    NativeErrorCode = NETClient.GetLastError(),
+                    Operation = "NETClient.PlayBackControl"
+                });
+        }
+
+        
+        /// <summary>
+        /// 지정 시간 구간의 Dahua 녹화 영상을 역방향으로 재생한다.
+        /// 
+        /// Dahua SDKCS의 NET_IN_PLAY_BACK_BY_TIME_INFO.nPlayDirection 값을 사용한다.
+        /// 일반 재생은 0, 역방향 재생은 1로 처리한다.
+        /// </summary>
+        public static NvrResult<DahuaPlaybackSession> PlayReverseByTime(
+            DahuaLoginSession loginSession,
+            NvrPlaybackRequest request,
+            DateTime reverseStartTime)
+        {
+            NvrResult validationResult =
+                ValidatePlaybackRequest(
+                    loginSession,
+                    request);
+
+            if (!validationResult.Success)
+            {
+                return NvrResult<DahuaPlaybackSession>.Fail(
+                    validationResult.Status,
+                    validationResult.Message,
+                    validationResult.Error);
+            }
+
+            if (reverseStartTime <= request.StartTime)
+            {
+                return NvrResult<DahuaPlaybackSession>.Fail(
+                    NvrResultStatus.Failed,
+                    "역재생 시작 시각은 조회 시작 시각보다 이후여야 합니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "INVALID_REVERSE_START_TIME",
+                        ErrorMessage = "역재생 시작 시각이 조회 시작 시각보다 빠르거나 같습니다.",
+                        Operation = "PlayReverseByTime"
+                    });
+            }
+
+            if (reverseStartTime > request.EndTime)
+            {
+                reverseStartTime = request.EndTime;
+            }
+
+            int dahuaChannelId =
+                ToDahuaChannelId(request.ChannelNo);
+
+            NET_IN_PLAY_BACK_BY_TIME_INFO input =
+                new NET_IN_PLAY_BACK_BY_TIME_INFO();
+
+            NET_OUT_PLAY_BACK_BY_TIME_INFO output =
+                new NET_OUT_PLAY_BACK_BY_TIME_INFO();
+
+            input.stStartTime =
+                NET_TIME.FromDateTime(request.StartTime);
+
+            // 역재생은 현재 시각 또는 선택 시각까지의 구간을 열고,
+            // nPlayDirection = 1로 역방향 재생을 요청한다.
+            input.stStopTime =
+                NET_TIME.FromDateTime(reverseStartTime);
+
+            input.hWnd =
+                request.RenderTargetHandle;
+
+            input.cbDownLoadPos =
+                null;
+
+            input.dwPosUser =
+                IntPtr.Zero;
+
+            input.fDownLoadDataCallBack =
+                null;
+
+            input.dwDataUser =
+                IntPtr.Zero;
+
+            input.nPlayDirection =
+                1;
+
+            input.nWaittime =
+                5000;
+
+            IntPtr playbackHandle =
+                NETClient.PlayBackByTime(
+                    loginSession.LoginHandle,
+                    dahuaChannelId,
+                    input,
+                    ref output);
+
+            if (playbackHandle == IntPtr.Zero)
+            {
+                return NvrResult<DahuaPlaybackSession>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua NVR 역재생 요청에 실패했습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "DAHUA_REVERSE_PLAYBACK_FAILED",
+                        ErrorMessage = NETClient.GetLastError(),
+                        Operation = "NETClient.PlayBackByTime"
+                    });
+            }
+
+            var session =
+                new DahuaPlaybackSession(
+                    playbackHandle,
+                    request.CounterNo,
+                    request.NvrNo,
+                    request.ChannelNo,
+                    request.ScreenPosition,
+                    request.SearchDateTime,
+                    request.StartTime,
+                    reverseStartTime,
+                    request.RenderTargetHandle,
+                    request.AutoPlay);
+
+            session.SetState(NvrPlaybackState.Rewinding);
+            session.SetCurrentPlaybackTime(reverseStartTime);
+
+            return NvrResult<DahuaPlaybackSession>.Ok(
+                session,
+                "Dahua NVR 역재생을 시작했습니다.");
         }
 
         /// <summary>
@@ -586,41 +728,6 @@ namespace CamViewer.Nvr.Dahua.Sdk
             }
         }
 
-        /// <summary>
-        /// Dahua 재생 제어 명령을 실행한다.
-        /// </summary>
-        private static NvrResult ApplyPlaybackControl(
-            DahuaPlaybackSession playbackSession,
-            DahuaNative.DahuaPlaybackControlType controlType,
-            string errorCode,
-            string errorMessage)
-        {
-            bool result =
-                DahuaNative.CLIENT_PlayBackControl(
-                    playbackSession.PlaybackHandle,
-                    controlType,
-                    0,
-                    IntPtr.Zero);
-
-            if (result)
-            {
-                return NvrResult.Ok();
-            }
-
-            uint nativeErrorCode =
-                DahuaNative.CLIENT_GetLastError();
-
-            return NvrResult.Fail(
-                NvrResultStatus.Failed,
-                "Dahua 재생 제어에 실패했습니다.",
-                new NvrErrorInfo
-                {
-                    ErrorCode = errorCode,
-                    ErrorMessage = errorMessage,
-                    NativeErrorCode = nativeErrorCode.ToString(),
-                    Operation = "CLIENT_PlayBackControl"
-                });
-        }
 
         /// <summary>
         /// Dahua NVR 채널의 영상 원본 정보를 조회한다.

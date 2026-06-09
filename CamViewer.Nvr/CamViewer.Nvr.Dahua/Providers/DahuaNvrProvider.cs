@@ -4,6 +4,7 @@ using CamViewer.Nvr.Core.Enums;
 using CamViewer.Nvr.Core.Models;
 using CamViewer.Nvr.Core.Results;
 using CamViewer.Nvr.Dahua.Sdk;
+using NetSDKCS;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,7 +22,7 @@ namespace CamViewer.Nvr.Dahua.Providers
         "Dahua NetSDK",
         "Dahua",
         NvrConnectionType.Sdk)]
-    public sealed class DahuaNvrProvider : INvrProvider,INvrPlaybackPositionProvider,INvrVideoSourceInfoProvider
+    public sealed class DahuaNvrProvider : INvrProvider,INvrPlaybackPositionProvider,INvrVideoSourceInfoProvider, INvrReversePlaybackProvider
     {
         private bool _disposed;
         private bool _runtimeAcquired;
@@ -87,7 +88,7 @@ namespace CamViewer.Nvr.Dahua.Providers
                 CanTestConnection = true,
                 CanQueryRecordExists = false,
                 CanGetPlaybackPosition = true,
-
+                CanReversePlayback = true,
                 CanChangeSpeed = true,
                 CanGetVideoSourceInfo = true
             };
@@ -347,6 +348,72 @@ namespace CamViewer.Nvr.Dahua.Providers
 
             return Task.FromResult(resumeResult);
         }
+
+        /// <summary>
+        /// Dahua NVR 녹화 영상을 역방향으로 재생한다.
+        /// </summary>
+        public Task<NvrResult<INvrPlaybackSession>> PlayReverseByTimeAsync(
+            NvrPlaybackRequest request,
+            DateTime reverseStartTime,
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return Task.FromResult(
+                    NvrResult<INvrPlaybackSession>.Fail(
+                        NvrResultStatus.Cancelled,
+                        "역재생 요청이 취소되었습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode = "CANCELLED",
+                            ErrorMessage = "역재생 요청이 취소되었습니다.",
+                            Operation = "PlayReverseByTime"
+                        }));
+            }
+
+            if (!IsInitialized)
+            {
+                return Task.FromResult(
+                    NvrResult<INvrPlaybackSession>.Fail(
+                        NvrResultStatus.SdkError,
+                        "Dahua Provider가 초기화되지 않았습니다."));
+            }
+
+            if (!IsLoggedIn)
+            {
+                return Task.FromResult(
+                    NvrResult<INvrPlaybackSession>.Fail(
+                        NvrResultStatus.LoginFailed,
+                        "Dahua NVR에 로그인되어 있지 않습니다."));
+            }
+
+            NvrResult<DahuaPlaybackSession> result =
+                DahuaSdkClient.PlayReverseByTime(
+                    _loginSession,
+                    request,
+                    reverseStartTime);
+
+            if (!result.Success || result.Data == null)
+            {
+                _lastError = result.Error;
+
+                return Task.FromResult(
+                    NvrResult<INvrPlaybackSession>.Fail(
+                        result.Status,
+                        result.Message,
+                        result.Error));
+            }
+
+            _lastError = null;
+
+            return Task.FromResult(
+                NvrResult<INvrPlaybackSession>.Ok(
+                    result.Data,
+                    result.Message));
+        }
+
 
         /// <summary>
         /// 지정된 Dahua 재생 세션을 특정 시각으로 이동한다.

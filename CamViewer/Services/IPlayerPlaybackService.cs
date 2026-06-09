@@ -123,5 +123,12 @@ namespace CamViewer.Services
         Task<PlayerVideoSourceInfoResult> GetVideoSourceInfoAsync(
             PlayerChannelTarget channel,
             CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 현재 영상재생시간을 기준으로 정방향 재생으로 전환한다.
+        /// 역재생 중 재생 버튼을 눌렀을 때 사용한다.
+        /// </summary>
+        Task<PlayerPlaybackResult> PlayForwardFromCurrentTimeAsync(
+            CancellationToken cancellationToken);
     }
 }

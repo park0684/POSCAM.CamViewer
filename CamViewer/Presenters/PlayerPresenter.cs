@@ -37,6 +37,12 @@ namespace CamViewer.Presenters
         private bool _isPlaybackCommandRunning;
 
         /// <summary>
+        /// 화면 버튼 표시를 위한 마지막 재생 방향 상태.
+        /// Playing 또는 Rewinding을 보관한다.
+        /// </summary>
+        private PlaybackState _lastPlaybackDirection;
+
+        /// <summary>
         /// PlayerPresenter를 초기화한다.
         /// </summary>
         /// <param name="view">영상 재생 View.</param>
@@ -69,7 +75,7 @@ namespace CamViewer.Presenters
             _openSettingsFunc = openSettingsFunc;
             _reloadConfigFunc = reloadConfigFunc;
             _playbackState = PlaybackState.Stopped;
-
+            _lastPlaybackDirection = PlaybackState.Playing;
             _view.LoadViewEvent += OnLoadView;
             _view.CounterChangedEvent += OnCounterChanged;
             _view.SearchEvent += OnSearch;
@@ -139,6 +145,7 @@ namespace CamViewer.Presenters
 
             _view.SetStatus("캠뷰어 실행 준비 완료");
         }
+
 
         /// <summary>
         /// 계산대 선택값이 변경되면 좌/우 채널 정보를 갱신한다.
@@ -233,26 +240,52 @@ namespace CamViewer.Presenters
 
             try
             {
-                PlayerPlaybackResult result =
-                    await _playbackService.RewindAsync(CancellationToken.None);
+                PlayerPlaybackResult result;
+
+                if (_playbackService.CurrentState == PlaybackState.Rewinding)
+                {
+                    result =
+                        await _playbackService.PauseAsync(
+                            CancellationToken.None);
+                }
+                else if (_playbackService.CurrentState == PlaybackState.Paused
+                    && _lastPlaybackDirection == PlaybackState.Rewinding)
+                {
+                    result =
+                        await _playbackService.ResumeAsync(
+                            CancellationToken.None);
+                }
+                else
+                {
+                    result =
+                        await _playbackService.RewindAsync(
+                            CancellationToken.None);
+                }
 
                 HandlePlaybackCommandResult(result);
 
                 if (!result.Success)
                 {
+                    _view.ShowMessage(result.Message);
                     return;
                 }
 
-                _view.SetPlaybackTime(
-                    _playbackService.CurrentPlaybackTime);
+                DateTime? playbackTime =
+                    await _playbackService.SyncPlaybackTimeAsync(
+                        CancellationToken.None);
 
-                _view.StartPlaybackTimer();
+                _view.SetPlaybackTime(playbackTime);
+                _view.SetTimelinePlaybackTime(playbackTime);
+
+                UpdatePlaybackTimerState();
+                UpdatePlaybackStateDisplay();
             }
             finally
             {
                 EndPlaybackCommand();
             }
         }
+
 
         /// <summary>
         /// 10초 전 이동 요청을 처리한다.
@@ -310,20 +343,36 @@ namespace CamViewer.Presenters
             {
                 PlayerPlaybackResult result;
 
-                if (_playbackService.CurrentState == PlaybackState.Playing
-                    || _playbackService.CurrentState == PlaybackState.Rewinding)
+                if (_playbackService.CurrentState == PlaybackState.Playing)
                 {
-                    result = await _playbackService.PauseAsync(
-                        CancellationToken.None);
+                    result =
+                        await _playbackService.PauseAsync(
+                            CancellationToken.None);
                 }
-                else if (_playbackService.CurrentState == PlaybackState.Paused)
+                else if (_playbackService.CurrentState == PlaybackState.Paused
+                    && _lastPlaybackDirection == PlaybackState.Playing)
                 {
-                    result = await _playbackService.ResumeAsync(
-                        CancellationToken.None);
+                    result =
+                        await _playbackService.ResumeAsync(
+                            CancellationToken.None);
+                }
+                else if (_playbackService.CurrentState == PlaybackState.Rewinding)
+                {
+                    result =
+                        await _playbackService.PlayForwardFromCurrentTimeAsync(
+                            CancellationToken.None);
+                }
+                else if (_playbackService.CurrentState == PlaybackState.Paused
+                    && _lastPlaybackDirection == PlaybackState.Rewinding)
+                {
+                    result =
+                        await _playbackService.PlayForwardFromCurrentTimeAsync(
+                            CancellationToken.None);
                 }
                 else
                 {
-                    result = await PlayFromCurrentSearchRangeAsync();
+                    result =
+                        await PlayFromCurrentSearchRangeAsync();
                 }
 
                 HandlePlaybackCommandResult(result);
@@ -333,18 +382,14 @@ namespace CamViewer.Presenters
                     return;
                 }
 
-                _view.SetPlaybackTime(
-                    _playbackService.CurrentPlaybackTime);
+                DateTime? playbackTime =
+                    _playbackService.CurrentPlaybackTime;
 
-                if (_playbackService.CurrentState == PlaybackState.Paused)
-                {
-                    _view.StopPlaybackTimer();
-                }
-                else if (_playbackService.CurrentState == PlaybackState.Playing
-                    || _playbackService.CurrentState == PlaybackState.Rewinding)
-                {
-                    _view.StartPlaybackTimer();
-                }
+                _view.SetPlaybackTime(playbackTime);
+                _view.SetTimelinePlaybackTime(playbackTime);
+
+                UpdatePlaybackTimerState();
+                UpdatePlaybackStateDisplay();
             }
             finally
             {
@@ -1247,6 +1292,45 @@ namespace CamViewer.Presenters
         private void EndPlaybackCommand()
         {
             _isPlaybackCommandRunning = false;
+        }
+
+        /// <summary>
+        /// 서비스의 현재 재생 상태를 Presenter 내부 방향 상태와 View 버튼 표시에 반영한다.
+        /// </summary>
+        private void UpdatePlaybackStateDisplay()
+        {
+            PlaybackState state =
+                _playbackService.CurrentState;
+
+            if (state == PlaybackState.Playing)
+            {
+                _lastPlaybackDirection = PlaybackState.Playing;
+            }
+            else if (state == PlaybackState.Rewinding)
+            {
+                _lastPlaybackDirection = PlaybackState.Rewinding;
+            }
+
+            _view.SetPlaybackState(state);
+        }
+
+        /// <summary>
+        /// 현재 재생 상태에 따라 영상재생시간 갱신 타이머를 시작하거나 중지한다.
+        /// </summary>
+        private void UpdatePlaybackTimerState()
+        {
+            PlaybackState state =
+                _playbackService.CurrentState;
+
+            if (state == PlaybackState.Playing
+                || state == PlaybackState.Rewinding)
+            {
+                _view.StartPlaybackTimer();
+            }
+            else
+            {
+                _view.StopPlaybackTimer();
+            }
         }
     }
 }

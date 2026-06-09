@@ -43,7 +43,7 @@ namespace CamViewer.Views
         private const int HtCaption = 0x2;
 
         private readonly System.Windows.Forms.Timer _playbackTimer;
-
+        private PlaybackState _lastPlaybackDirection = PlaybackState.Playing; // 재생방향 저장. 일시정지 상태에서 재생 재개 시 이전 방향으로 재생하기 위함.
         private DateTime? _timelineStartTime;
         private DateTime? _timelineEndTime;
         private DateTime? _timelinePlaybackTime;
@@ -393,18 +393,48 @@ namespace CamViewer.Views
         /// </summary>
         public void SetPlaybackState(PlaybackState state)
         {
-            switch (state)
+            //정방향 재생중 상태
+            if (state == PlaybackState.Playing)
             {
-                case PlaybackState.Playing:
-                //case PlaybackState.FastForward:
-                //case PlaybackState.FastReverse:
-                    btnPlayPause.Image = Properties.Resources.Pause;
-                    break;
+                _lastPlaybackDirection = PlaybackState.Playing;
 
-                default:
-                    btnPlayPause.Image = Properties.Resources.Paly;
-                    break;
+                btnPlayPause.Image = Properties.Resources.Pause;
+                btnRewind.Image = Properties.Resources.Rewind;
+                return;
             }
+            //역방향 재생중 상태
+            if (state == PlaybackState.Rewinding)
+            {
+                _lastPlaybackDirection = PlaybackState.Rewinding;
+
+                btnPlayPause.Image = Properties.Resources.Paly;
+                btnRewind.Image = Properties.Resources.Pause;
+                return;
+            }
+            //일시정지 상태
+            if (state == PlaybackState.Paused)
+            {
+                //역방향 재생중 일시정지
+                if (_lastPlaybackDirection == PlaybackState.Rewinding)
+                {
+                    btnPlayPause.Image = Properties.Resources.Paly;
+                    btnRewind.Image = Properties.Resources.Rewind;
+                }
+                //정방향 재생중 일시정지
+                else
+                {
+                    btnPlayPause.Image = Properties.Resources.Paly;
+                    btnRewind.Image = Properties.Resources.Rewind;
+                }
+
+                return;
+            }
+
+            //정지 상태일 경우 기본 상태로  
+            _lastPlaybackDirection = PlaybackState.Playing;
+
+            btnPlayPause.Image = Properties.Resources.Paly;
+            btnRewind.Image = Properties.Resources.Rewind;
         }
 
         /// <summary>
