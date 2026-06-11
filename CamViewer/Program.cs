@@ -27,9 +27,9 @@ namespace CamViewer
 
             var clientFacade = new CamViewerClientFacade();
             var environmentProvider = new ClientEnvironmentProvider();
-
+            ILandingStartupService landingStartup = new LandingStartupService(clientFacade);
             var providerCatalog = new NvrProviderCatalog();
-
+            
             LoadNvrProviders(providerCatalog);
 
             var providerFactory =
@@ -47,6 +47,7 @@ namespace CamViewer
             var landingPresenter = new LandingPresenter(
                 landingView,
                 clientFacade,
+                landingStartup,
                 environmentProvider,
                 CreateLoginView,
                 settingsFlowService.OpenSettings,

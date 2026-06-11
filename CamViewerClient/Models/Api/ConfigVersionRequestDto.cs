@@ -1,10 +1,17 @@
 ﻿namespace CamViewerClient.Models.Api
 {
     /// <summary>
-    /// 서버 설정 버전 확인 요청 DTO이다.
+    /// AuthServer의 캠뷰어 설정 버전 확인 요청 DTO이다.
     ///
-    /// AuthServer의 ConfigVersionRequest와 속성명이 다르면
-    /// 이 DTO를 서버 DTO에 맞게 조정한다.
+    /// AuthServer ConfigVersionRequest 기준:
+    /// - Token
+    /// - Hwid
+    /// - LocalConfigVersion
+    /// - ProgramVersion
+    ///
+    /// 주의:
+    /// - StoreCode, DeviceCode는 요청하지 않는다.
+    /// - 서버는 토큰 payload에서 매장과 장비 정보를 확인한다.
     /// </summary>
     public sealed class ConfigVersionRequestDto
     {
@@ -14,21 +21,30 @@
         public string Token { get; set; }
 
         /// <summary>
-        /// 로컬 설정 버전.
-        /// 서버가 최신 여부를 판단할 때 사용한다.
+        /// 현재 캠뷰어 장비의 HWID.
         /// </summary>
-        public long LocalConfigVersion { get; set; }
+        public string Hwid { get; set; }
 
         /// <summary>
-        /// 매장 코드.
-        /// 토큰 기반 검증이 기본이지만, 서버 DTO가 요구하면 사용한다.
+        /// 현재 로컬 설정 버전.
+        /// 로컬 설정이 없으면 빈 문자열로 전달한다.
         /// </summary>
-        public int StoreCode { get; set; }
+        public string LocalConfigVersion { get; set; }
 
         /// <summary>
-        /// 캠뷰어 장비 코드.
-        /// 서버 DTO가 요구하면 사용한다.
+        /// 캠뷰어 프로그램 버전.
         /// </summary>
-        public int DeviceCode { get; set; }
+        public string ProgramVersion { get; set; }
+
+        /// <summary>
+        /// ConfigVersionRequestDto를 초기화한다.
+        /// </summary>
+        public ConfigVersionRequestDto()
+        {
+            Token = string.Empty;
+            Hwid = string.Empty;
+            LocalConfigVersion = string.Empty;
+            ProgramVersion = string.Empty;
+        }
     }
 }

@@ -3,10 +3,13 @@ using CamViewer.Nvr.Core.Abstractions;
 using CamViewer.Presenters;
 using CamViewer.Views;
 using CamViewerClient;
-using CamViewerClient.Models.Config;
+using CamViewerClient.Enums;
 using CamViewerClient.Models.Auth;
+using CamViewerClient.Models.Config;
 using CamViewerClient.Results;
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace CamViewer.Services
@@ -18,9 +21,7 @@ namespace CamViewer.Services
     /// - 로컬 설정 불러오기
     /// - 설정 화면 실행
     /// - 설정 저장 시 viewer_config.dat 저장
-    /// - 설정 저장 성공 여부 반환
-    ///
-    /// 서버 업로드 여부 확인 및 api/config/sync 호출은 다음 단계에서 추가한다.
+    /// - 사용자 확인 후 AuthServer api/config/sync로 서버 업로드
     /// </summary>
     public sealed class SettingsFlowService
     {
@@ -28,6 +29,7 @@ namespace CamViewer.Services
         private readonly INvrProviderCatalog _providerCatalog;
         private readonly INvrProviderFactory _providerFactory;
         private readonly IClientEnvironmentProvider _environmentProvider;
+
         private bool _saved;
 
         /// <summary>
@@ -66,7 +68,8 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 설정 화면을 실행하고 저장 성공 여부를 반환한다.
+        /// 설정 화면을 모달로 실행한다.
+        /// 설정 저장에 성공하면 true를 반환한다.
         /// </summary>
         /// <returns>설정 저장에 성공했으면 true.</returns>
         public bool OpenSettings()
@@ -76,16 +79,20 @@ namespace CamViewer.Services
             ViewerConfig viewerConfig =
                 LoadOrCreateConfig();
 
-            var settingsView = new SettingsView();
-            var settingsViewFactory = new SettingsViewFactory();
+            var settingsView =
+                new SettingsView();
 
-            var presenter = new SettingsPresenter(
-                settingsView,
-                settingsViewFactory,
-                _providerCatalog,
-                _providerFactory,
-                viewerConfig,
-                SaveConfigAsync);
+            var settingsViewFactory =
+                new SettingsViewFactory();
+
+            var presenter =
+                new SettingsPresenter(
+                    settingsView,
+                    settingsViewFactory,
+                    _providerCatalog,
+                    _providerFactory,
+                    viewerConfig,
+                    SaveConfigAsync);
 
             presenter.Show();
 
@@ -125,18 +132,17 @@ namespace CamViewer.Services
 
         /// <summary>
         /// 설정 화면에서 저장 요청한 ViewerConfig를 로컬 파일에 저장하고,
-        /// 사용자가 동의하면 인증서버에도 동기화한다.
+        /// 사용자가 원하면 AuthServer에 업로드한다.
         /// </summary>
-        private async System.Threading.Tasks.Task<bool> SaveConfigAsync(
+        /// <param name="savedConfig">설정 화면에서 저장 요청한 설정.</param>
+        /// <returns>설정 화면을 닫아도 되는 저장 성공 여부.</returns>
+        private async Task<bool> SaveConfigAsync(
             ViewerConfig savedConfig)
         {
-            ClientResult localSaveResult =
-                _clientFacade.SaveLocalConfig(savedConfig);
-
-            if (!localSaveResult.Success)
+            if (savedConfig == null)
             {
                 MessageBox.Show(
-                    localSaveResult.Message,
+                    "저장할 캠뷰어 설정정보가 없습니다.",
                     "POSCAM 캠뷰어 설정 저장 실패",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
@@ -144,164 +150,131 @@ namespace CamViewer.Services
                 return false;
             }
 
-            bool uploadToServer =
-                MessageBox.Show(
-                    "캠뷰어 설정이 로컬에 저장되었습니다."
-                    + Environment.NewLine
-                    + "이 설정을 인증서버에도 등록하시겠습니까?",
-                    "POSCAM 캠뷰어 설정",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question) == DialogResult.Yes;
+            /*
+             * 먼저 로컬 설정 파일에 저장한다.
+             * 서버 업로드 실패가 발생해도 최소한 로컬 설정은 보존되어야 한다.
+             */
+            savedConfig.SyncStatus =
+                ViewerConfigSyncStatus.LocalModified;
 
-            if (!uploadToServer)
-            {
-                _saved = true;
+            ClientResult saveResult =
+                _clientFacade.SaveLocalConfig(
+                    savedConfig);
 
-                MessageBox.Show(
-                    "캠뷰어 설정이 로컬에 저장되었습니다.",
-                    "POSCAM 캠뷰어 설정",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-
-                return true;
-            }
-
-            bool synced =
-                await SyncConfigToServerAsync(savedConfig);
-
-            _saved = true;
-
-            return synced;
-        }
-
-
-        /// <summary>
-        /// 설정 화면에서 저장 요청한 ViewerConfig를 로컬 파일에 저장하고,
-        /// 사용자가 동의하면 인증서버에도 동기화한다.
-        /// </summary>
-        private async void SaveConfig(ViewerConfig savedConfig)
-        {
-            ClientResult localSaveResult =
-                _clientFacade.SaveLocalConfig(savedConfig);
-
-            if (!localSaveResult.Success)
+            if (!saveResult.Success)
             {
                 MessageBox.Show(
-                    localSaveResult.Message,
+                    saveResult.Message,
                     "POSCAM 캠뷰어 설정 저장 실패",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
 
-                return;
+                return false;
             }
 
-            bool uploadToServer =
+            bool uploadConfirm =
                 MessageBox.Show(
                     "캠뷰어 설정이 로컬에 저장되었습니다."
                     + Environment.NewLine
-                    + "이 설정을 인증서버에도 등록하시겠습니까?",
+                    + "서버에도 설정을 업로드하시겠습니까?",
                     "POSCAM 캠뷰어 설정",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question) == DialogResult.Yes;
 
-            if (!uploadToServer)
+            if (!uploadConfirm)
             {
-                _saved = true;
-
                 MessageBox.Show(
                     "캠뷰어 설정이 로컬에 저장되었습니다.",
                     "POSCAM 캠뷰어 설정",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
 
-                return;
+                _saved = true;
+                return true;
             }
 
-            await SyncConfigToServerAsync(savedConfig);
-        }
-
-        /// <summary>
-        /// 로컬 설정을 인증서버에 동기화한다.
-        ///
-        /// 서버 동기화 요청에는 토큰, HWID, 수정자, 프로그램 버전이 필요하다.
-        /// 현재 수정자는 캠뷰어 장비명으로 전달한다.
-        /// 서버 동기화에 실패해도 로컬 저장은 완료된 상태이므로 true를 반환한다.
-        /// </summary>
-        private async System.Threading.Tasks.Task<bool> SyncConfigToServerAsync(
-            ViewerConfig savedConfig)
-        {
             ClientResult<ViewerAuthToken> tokenResult =
                 _clientFacade.LoadLocalToken();
 
-            if (!tokenResult.Success || tokenResult.Data == null)
+            if (!tokenResult.Success
+                || tokenResult.Data == null
+                || string.IsNullOrWhiteSpace(tokenResult.Data.Token))
             {
                 MessageBox.Show(
-                    "로컬 설정은 저장되었지만 인증 토큰을 불러오지 못해 서버 등록은 진행하지 못했습니다."
+                    "로컬 설정은 저장되었지만 서버 업로드는 진행할 수 없습니다."
+                    + Environment.NewLine
+                    + "캠뷰어 인증 정보가 없습니다."
                     + Environment.NewLine
                     + tokenResult.Message,
                     "POSCAM 캠뷰어 설정",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
 
+                _saved = true;
                 return true;
             }
 
             string hwid =
                 _environmentProvider.GetHwid();
 
-            string deviceName =
-                _environmentProvider.GetDeviceName();
-
             string programVersion =
                 _environmentProvider.GetProgramVersion();
+
+            string modifiedBy =
+                Environment.UserName;
 
             ClientResult<ViewerConfig> syncResult =
                 await _clientFacade.SyncServerConfigAsync(
                     tokenResult.Data.Token,
                     hwid,
-                    deviceName,
+                    modifiedBy,
                     programVersion,
                     savedConfig,
-                    System.Threading.CancellationToken.None);
+                    CancellationToken.None);
 
-            if (!syncResult.Success)
+            if (!syncResult.Success || syncResult.Data == null)
             {
                 MessageBox.Show(
-                    "로컬 설정은 저장되었지만 서버 등록에 실패했습니다."
+                    "로컬 설정은 저장되었지만 서버 업로드에 실패했습니다."
                     + Environment.NewLine
                     + syncResult.Message,
                     "POSCAM 캠뷰어 설정",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
 
+                _saved = true;
                 return true;
             }
 
-            ViewerConfig syncedConfig =
-                syncResult.Data ?? savedConfig;
+            /*
+             * 서버 업로드 성공 시 AuthServer가 반환한 ConfigVersion을
+             * 로컬 설정에도 다시 저장한다.
+             */
+            ClientResult saveSyncedResult =
+                _clientFacade.SaveLocalConfig(
+                    syncResult.Data);
 
-            ClientResult resaveResult =
-                _clientFacade.SaveLocalConfig(syncedConfig);
-
-            if (!resaveResult.Success)
+            if (!saveSyncedResult.Success)
             {
                 MessageBox.Show(
-                    "서버 등록은 완료되었지만 서버 버전이 반영된 설정을 로컬에 다시 저장하지 못했습니다."
+                    "서버 업로드는 성공했지만 동기화된 설정을 로컬에 다시 저장하지 못했습니다."
                     + Environment.NewLine
-                    + resaveResult.Message,
+                    + saveSyncedResult.Message,
                     "POSCAM 캠뷰어 설정",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
 
+                _saved = true;
                 return true;
             }
 
             MessageBox.Show(
-                "캠뷰어 설정이 로컬과 인증서버에 저장되었습니다.",
+                "캠뷰어 설정이 로컬과 서버에 저장되었습니다.",
                 "POSCAM 캠뷰어 설정",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
 
+            _saved = true;
             return true;
         }
     }

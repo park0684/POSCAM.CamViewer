@@ -1,15 +1,15 @@
-﻿using System.Threading;
-using System.Threading.Tasks;
-using CamViewerClient.Api;
+﻿using CamViewerClient.Api;
+using CamViewerClient.Auth;
 using CamViewerClient.Config;
+using CamViewerClient.Mappers;
 using CamViewerClient.Models.Api;
+using CamViewerClient.Models.Auth;
 using CamViewerClient.Models.Config;
 using CamViewerClient.Results;
-using CamViewerClient.Auth;
-using CamViewerClient.Models.Auth;
 using System;
 using System.Collections.Generic;
-using CamViewerClient.Mappers;
+using System.Threading;
+using System.Threading.Tasks;
 
 
 namespace CamViewerClient
@@ -111,21 +111,36 @@ namespace CamViewerClient
 
         /// <summary>
         /// AuthServer 기준 서버 설정 버전을 확인한다.
+        ///
+        /// AuthServer ConfigVersionRequest 기준:
+        /// - Token
+        /// - Hwid
+        /// - LocalConfigVersion
+        /// - ProgramVersion
+        ///
+        /// 주의:
+        /// - StoreCode, DeviceCode는 요청 Body로 보내지 않는다.
+        /// - AuthServer는 Token payload에서 StoreCode, DeviceCode를 추출한다.
         /// </summary>
+        /// <param name="token">캠뷰어 인증 토큰.</param>
+        /// <param name="hwid">현재 PC의 HWID.</param>
+        /// <param name="localConfig">현재 로컬 설정. 없으면 null 가능.</param>
+        /// <param name="programVersion">캠뷰어 프로그램 버전.</param>
+        /// <param name="cancellationToken">비동기 취소 토큰.</param>
+        /// <returns>서버 설정 버전 확인 결과.</returns>
         public Task<ClientResult<ConfigVersionResponseDto>> GetServerConfigVersionAsync(
             string token,
+            string hwid,
             ViewerConfig localConfig,
-            int deviceCode,
+            string programVersion,
             CancellationToken cancellationToken)
         {
             var request = new ConfigVersionRequestDto
             {
-                Token = token,
-                StoreCode = localConfig == null ? 0 : localConfig.StoreCode,
-                DeviceCode = deviceCode,
-                LocalConfigVersion = localConfig == null
-                    ? 0
-                    : localConfig.ConfigVersion
+                Token = token ?? string.Empty,
+                Hwid = hwid ?? string.Empty,
+                LocalConfigVersion = GetLocalConfigVersionText(localConfig),
+                ProgramVersion = programVersion ?? string.Empty
             };
 
             return _configApiClient.GetVersionAsync(
@@ -135,18 +150,36 @@ namespace CamViewerClient
 
         /// <summary>
         /// AuthServer에서 최신 설정을 다운로드하고 로컬 ViewerConfig로 변환한다.
+        ///
+        /// AuthServer ConfigLatestRequest 기준:
+        /// - Token
+        /// - Hwid
+        /// - LocalConfigVersion
+        /// - ProgramVersion
+        ///
+        /// 주의:
+        /// - StoreCode, DeviceCode는 요청 Body로 보내지 않는다.
+        /// - AuthServer는 Token payload에서 StoreCode, DeviceCode를 추출한다.
         /// </summary>
+        /// <param name="token">캠뷰어 인증 토큰.</param>
+        /// <param name="hwid">현재 PC의 HWID.</param>
+        /// <param name="localConfigVersion">현재 로컬 설정 버전. 로컬 설정이 없으면 빈 문자열.</param>
+        /// <param name="programVersion">캠뷰어 프로그램 버전.</param>
+        /// <param name="cancellationToken">비동기 취소 토큰.</param>
+        /// <returns>서버에서 다운로드한 로컬 ViewerConfig.</returns>
         public async Task<ClientResult<ViewerConfig>> DownloadServerConfigAsync(
             string token,
-            int storeCode,
-            int deviceCode,
+            string hwid,
+            string localConfigVersion,
+            string programVersion,
             CancellationToken cancellationToken)
         {
             var request = new ConfigLatestRequestDto
             {
-                Token = token,
-                StoreCode = storeCode,
-                DeviceCode = deviceCode
+                Token = token ?? string.Empty,
+                Hwid = hwid ?? string.Empty,
+                LocalConfigVersion = localConfigVersion ?? string.Empty,
+                ProgramVersion = programVersion ?? string.Empty
             };
 
             ClientResult<ViewerConfigServerDto> latestResult =
@@ -236,13 +269,18 @@ namespace CamViewerClient
 
         /// <summary>
         /// 로컬 설정이 없거나 불러올 수 없을 때 사용할 기본 설정을 생성한다.
+        /// 
+        /// 주의:
+        /// - StoreCode는 서버 설정 다운로드 후 실제 값으로 갱신된다.
+        /// - ConfigVersion은 AuthServer 기준 문자열 버전을 사용한다.
         /// </summary>
+        /// <returns>기본 캠뷰어 설정.</returns>
         public ViewerConfig CreateDefaultConfig()
         {
             return new ViewerConfig
             {
-                StoreCode = 1,
-                ConfigVersion = 0,
+                StoreCode = 0,
+                ConfigVersion = string.Empty,
                 NextNvrNo = 1
             };
         }
@@ -569,5 +607,24 @@ namespace CamViewerClient
             };
         }
 
+        /// <summary>
+        /// 로컬 설정 버전을 AuthServer 요청 DTO에 전달할 문자열로 변환한다.
+        ///
+        /// AuthServer는 ConfigVersion을 문자열로 받는다.
+        /// 현재 CamViewer 로컬 설정은 long 타입을 사용하므로,
+        /// 0 이하이거나 로컬 설정이 없으면 빈 문자열로 전달한다.
+        /// </summary>
+        /// <param name="localConfig">현재 로컬 설정.</param>
+        /// <returns>AuthServer에 전달할 로컬 설정 버전 문자열.</returns>
+        private static string GetLocalConfigVersionText(
+            ViewerConfig localConfig)
+        {
+            if (localConfig == null)
+            {
+                return string.Empty;
+            }
+
+            return localConfig.ConfigVersion ?? string.Empty;
+        }
     }
 }

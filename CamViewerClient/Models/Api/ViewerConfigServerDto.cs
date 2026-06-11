@@ -1,13 +1,20 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 namespace CamViewerClient.Models.Api
 {
     /// <summary>
-    /// 인증서버와 주고받는 캠뷰어 설정 전체 DTO이다.
+    /// AuthServer의 캠뷰어 최신 설정 조회 응답 DTO이다.
     ///
-    /// 이 DTO는 서버 업로드/다운로드용이며,
-    /// 로컬 viewer_config.dat 암호화 파일 자체를 서버로 전송하지 않는다.
+    /// AuthServer ViewerConfigResponse 기준:
+    /// - StoreCode
+    /// - ConfigVersion
+    /// - NvrConfig
+    /// - Channels
+    ///
+    /// 주의:
+    /// - 현재 AuthServer는 매장당 단일 NVR 설정 기준이다.
+    /// - CamViewer 로컬 설정은 NvrList / CounterMapList 구조이므로
+    ///   ViewerConfigApiMapper에서 로컬 구조로 변환한다.
     /// </summary>
     public sealed class ViewerConfigServerDto
     {
@@ -18,38 +25,28 @@ namespace CamViewerClient.Models.Api
 
         /// <summary>
         /// 서버 설정 버전.
-        /// 서버에서 설정이 변경될 때 증가하는 값이다.
+        /// AuthServer는 문자열 버전을 사용한다.
         /// </summary>
-        public long ConfigVersion { get; set; }
+        public string ConfigVersion { get; set; }
 
         /// <summary>
-        /// 서버 기준 설정 수정 UTC 일시.
+        /// NVR 접속 설정.
         /// </summary>
-        public DateTime? ServerUpdatedAtUtc { get; set; }
+        public NvrConfigDto NvrConfig { get; set; }
 
         /// <summary>
-        /// NVR 설정 목록.
+        /// POS 번호와 NVR 채널 매핑 목록.
         /// </summary>
-        public IList<NvrConfigServerDto> NvrList { get; set; }
+        public List<ChannelConfigDto> Channels { get; set; }
 
         /// <summary>
-        /// 계산대 채널 매핑 목록.
-        /// </summary>
-        public IList<CounterMapServerDto> CounterMapList { get; set; }
-
-        /// <summary>
-        /// 재생 시간 계산 옵션.
-        /// </summary>
-        public PlaybackOptionServerDto PlaybackOption { get; set; }
-
-        /// <summary>
-        /// 서버 설정 DTO를 초기화한다.
+        /// ViewerConfigServerDto를 초기화한다.
         /// </summary>
         public ViewerConfigServerDto()
         {
-            NvrList = new List<NvrConfigServerDto>();
-            CounterMapList = new List<CounterMapServerDto>();
-            PlaybackOption = new PlaybackOptionServerDto();
+            ConfigVersion = string.Empty;
+            NvrConfig = new NvrConfigDto();
+            Channels = new List<ChannelConfigDto>();
         }
     }
 }

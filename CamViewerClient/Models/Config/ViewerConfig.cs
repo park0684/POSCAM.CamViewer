@@ -15,18 +15,20 @@ namespace CamViewerClient.Models.Config
         /// </summary>
         public ViewerConfig()
         {
+            ConfigVersion = string.Empty;
             NvrList = new List<NvrConfig>();
             CounterMapList = new List<CounterMap>();
             PlaybackOption = new PlaybackOption();
             SyncStatus = ViewerConfigSyncStatus.Synced;
             NextNvrNo = 1;
+            VideoRenderMode = VideoRenderMode.KeepAspectRatio;
         }
 
         /// <summary>
         /// 서버 설정의 버전.
-        /// 서버 설정이 변경될 때 증가하는 값을 사용한다.
+        /// AuthServer는 문자열 버전을 사용한다.
         /// </summary>
-        public long ConfigVersion { get; set; }
+        public string ConfigVersion { get; set; }
 
         /// <summary>
         /// 설정이 적용되는 매장 코드.
@@ -56,7 +58,7 @@ namespace CamViewerClient.Models.Config
         public IList<NvrConfig> NvrList { get; private set; }
 
         /// <summary>
-        /// 계산대별 NVR 채널 및 스크린위치 매핑 목록.
+        /// 계산대별 NVR 채널 및 스크린 위치 매핑 목록.
         /// </summary>
         public IList<CounterMap> CounterMapList { get; private set; }
 
@@ -66,17 +68,14 @@ namespace CamViewerClient.Models.Config
         public PlaybackOption PlaybackOption { get; set; }
 
         /// <summary>
-        /// 신규 NVR 등록 시 사용할 다음 NVR번호.
-        /// 삭제된 NVR번호를 다시 사용하지 않기 위해 설정에 함께 저장한다.
+        /// 신규 NVR 등록 시 사용할 다음 NVR 번호.
+        /// 삭제된 NVR 번호를 다시 사용하지 않기 위해 설정에 함께 저장한다.
         /// </summary>
         public int NextNvrNo { get; set; }
 
         /// <summary>
         /// 영상 표시 방식.
         /// </summary>
-        public VideoRenderMode VideoRenderMode { get; set; } =
-            VideoRenderMode.KeepAspectRatio;
-
-
+        public VideoRenderMode VideoRenderMode { get; set; }
     }
 }

@@ -61,7 +61,7 @@
         {
             return new ApiClientOptions
             {
-                BaseAddress = "https://localhost:7028"/*"https://accli.poscam.co.kr/"*/,
+                BaseAddress = "https://accli.poscam.co.kr/",
                 ConfigVersionEndpoint = "api/config/version",
                 ConfigLatestEndpoint = "api/config/latest",
                 ConfigSyncEndpoint = "api/config/sync",

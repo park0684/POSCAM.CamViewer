@@ -123,22 +123,29 @@ namespace CamViewer.Views
         /// <param name="lastDownloadedAtUtc">마지막 다운로드 UTC 일시.</param>
         /// <param name="lastUploadedAtUtc">마지막 업로드 UTC 일시.</param>
         public void SetConfigStatus(
-            long configVersion,
+            string configVersion,
             ViewerConfigSyncStatus syncStatus,
             DateTime? lastDownloadedAtUtc,
             DateTime? lastUploadedAtUtc)
         {
-            string downloadedText = lastDownloadedAtUtc.HasValue
-                ? lastDownloadedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
-                : "-";
+            string versionText =
+                string.IsNullOrWhiteSpace(configVersion)
+                    ? "-"
+                    : configVersion;
 
-            string uploadedText = lastUploadedAtUtc.HasValue
-                ? lastUploadedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
-                : "-";
+            string downloadedText =
+                lastDownloadedAtUtc.HasValue
+                    ? lastDownloadedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+                    : "-";
+
+            string uploadedText =
+                lastUploadedAtUtc.HasValue
+                    ? lastUploadedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+                    : "-";
 
             lblConfigStatus.Text = string.Format(
-                "설정 버전: {0}   동기화 상태: {1}   다운로드: {2}   업로드: {3}",
-                configVersion,
+                "설정 버전: {0} 동기화 상태: {1} 다운로드: {2} 업로드: {3}",
+                versionText,
                 syncStatus,
                 downloadedText,
                 uploadedText);

@@ -1,11 +1,12 @@
-﻿using System;
-using System.Threading;
-using System.Threading.Tasks;
-using CamViewer.Interfaces;
+﻿using CamViewer.Interfaces;
 using CamViewer.Services;
 using CamViewerClient;
 using CamViewerClient.Models.Auth;
 using CamViewerClient.Results;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace CamViewer.Presenters
 {
@@ -166,6 +167,17 @@ namespace CamViewer.Presenters
                         deviceName,
                         programVersion,
                         CancellationToken.None);
+                if (loginResult.Success && loginResult.Data != null)
+                {
+                    MessageBox.Show(
+                        "로그인 성공 토큰 확인"
+                        + Environment.NewLine
+                        + "StoreCode: " + loginResult.Data.StoreCode
+                        + Environment.NewLine
+                        + "DeviceCode: " + loginResult.Data.DeviceCode
+                        + Environment.NewLine
+                        + "Token Exists: " + !string.IsNullOrWhiteSpace(loginResult.Data.Token));
+                }
 
                 if (!loginResult.Success)
                 {

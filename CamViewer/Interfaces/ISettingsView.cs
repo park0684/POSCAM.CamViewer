@@ -90,7 +90,7 @@ namespace CamViewer.Interfaces
         /// <param name="lastDownloadedAtUtc">마지막 다운로드 UTC 일시.</param>
         /// <param name="lastUploadedAtUtc">마지막 업로드 UTC 일시.</param>
         void SetConfigStatus(
-            long configVersion,
+            string configVersion,
             ViewerConfigSyncStatus syncStatus,
             DateTime? lastDownloadedAtUtc,
             DateTime? lastUploadedAtUtc);

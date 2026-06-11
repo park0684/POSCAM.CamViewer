@@ -88,6 +88,8 @@
     <Compile Include="Models\PlayerPlaybackRequest.cs" />
     <Compile Include="Models\PlayerPlaybackResult.cs" />
     <Compile Include="Models\PlayerVideoSourceInfoResult.cs" />
+    <Compile Include="Models\StartupFlowResult.cs" />
+    <Compile Include="Models\StartupNextAction.cs" />
     <Compile Include="Models\TimelineSeekRequestedEventArgs.cs" />
     <Compile Include="Models\ViewModels\CounterMapKey.cs" />
     <Compile Include="Models\ViewModels\CounterMapListItem.cs" />
@@ -95,6 +97,7 @@
     <Compile Include="Models\ViewModels\NvrOptionItem.cs" />
     <Compile Include="Models\ViewModels\VendorOptionItem.cs" />
     <Compile Include="Presenters\CounterEditPresenter.cs" />
+    <Compile Include="Services\ILandingStartupService.cs" />
     <Compile Include="Presenters\LandingPresenter.cs" />
     <Compile Include="Presenters\LoginPresenter.cs" />
     <Compile Include="Presenters\NvrEditPresenter.cs" />
@@ -107,6 +110,7 @@
     <Compile Include="Services\ClientEnvironmentProvider.cs" />
     <Compile Include="Services\IClientEnvironmentProvider.cs" />
     <Compile Include="Services\IPlayerPlaybackService.cs" />
+    <Compile Include="Services\LandingStartupService.cs" />
     <Compile Include="Services\NvrPlayerPlaybackService.cs" />
     <Compile Include="Services\SettingsFlowService.cs" />
     <Compile Include="Views\CounterEditView.cs">

@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+﻿using System;
 using CamViewerClient.Enums;
 using CamViewerClient.Models.Api;
 using CamViewerClient.Models.Config;
@@ -6,16 +6,35 @@ using CamViewerClient.Models.Config;
 namespace CamViewerClient.Mappers
 {
     /// <summary>
-    /// 로컬 ViewerConfig 모델과 서버 API DTO를 변환한다.
+    /// AuthServer 설정 응답 DTO와 로컬 ViewerConfig 모델을 변환한다.
     ///
-    /// 로컬 저장 파일은 DPAPI로 암호화하지만,
-    /// 서버 API 전송은 DTO로 변환하여 HTTPS 요청 본문으로 전송한다.
+    /// AuthServer 최신 설정 응답은 단일 NVR 설정 + 채널 목록 구조이고,
+    /// CamViewer 로컬 설정은 NvrList + CounterMapList 구조이다.
     /// </summary>
     public static class ViewerConfigApiMapper
     {
+        private const int DefaultNvrNo = 1;
+
+        /*
+         * 현재 AuthServer 응답에는 제조사, 연결 방식, ProviderKey가 포함되어 있지 않다.
+         * 현재 CamViewer 테스트 기준은 Dahua SDK이므로 기본값으로 보정한다.
+         *
+         * 향후 제조사를 서버에서 관리하려면 AuthServer의 NvrConfigDto에
+         * Vendor, ConnectionType, ProviderKey를 추가하는 것이 맞다.
+         */
+        private const string DefaultVendor = "Dahua";
+        private const string DefaultConnectionType = "SDK";
+        private const string DefaultProviderKey = "DAHUA_SDK";
+
         /// <summary>
-        /// 로컬 ViewerConfig를 서버 DTO로 변환한다.
+        /// 로컬 ViewerConfig를 서버 응답 DTO 형태로 변환한다.
+        ///
+        /// 현재 최신 설정 다운로드 흐름에서는 사용하지 않지만,
+        /// 기존 코드 호환을 위해 유지한다.
+        /// 서버 업로드는 ViewerConfigSyncMapper를 사용하는 것이 기준이다.
         /// </summary>
+        /// <param name="source">로컬 캠뷰어 설정.</param>
+        /// <returns>서버 설정 DTO.</returns>
         public static ViewerConfigServerDto ToServerDto(
             ViewerConfig source)
         {
@@ -27,33 +46,38 @@ namespace CamViewerClient.Mappers
             var target = new ViewerConfigServerDto
             {
                 StoreCode = source.StoreCode,
-                ConfigVersion = source.ConfigVersion,
-                PlaybackOption = ToServerDto(source.PlaybackOption)
+                ConfigVersion = source.ConfigVersion ?? string.Empty,
+                NvrConfig = new NvrConfigDto(),
+                Channels = new System.Collections.Generic.List<ChannelConfigDto>()
             };
 
-            if (source.NvrList != null)
-            {
-                foreach (NvrConfig nvr in source.NvrList)
-                {
-                    NvrConfigServerDto dto = ToServerDto(nvr);
+            NvrConfig firstNvr =
+                GetFirstNvr(source);
 
-                    if (dto != null)
-                    {
-                        target.NvrList.Add(dto);
-                    }
-                }
+            if (firstNvr != null)
+            {
+                target.NvrConfig =
+                    ToApiNvrConfig(
+                        firstNvr,
+                        target.ConfigVersion);
             }
 
             if (source.CounterMapList != null)
             {
-                foreach (CounterMap counterMap in source.CounterMapList)
+                foreach (CounterMap map in source.CounterMapList)
                 {
-                    CounterMapServerDto dto = ToServerDto(counterMap);
-
-                    if (dto != null)
+                    if (map == null)
                     {
-                        target.CounterMapList.Add(dto);
+                        continue;
                     }
+
+                    target.Channels.Add(
+                        new ChannelConfigDto
+                        {
+                            PosNo = map.CounterNo,
+                            ChannelNo = map.ChannelNo,
+                            Screen = (int)map.ScreenPosition
+                        });
                 }
             }
 
@@ -61,8 +85,10 @@ namespace CamViewerClient.Mappers
         }
 
         /// <summary>
-        /// 서버 DTO를 로컬 ViewerConfig로 변환한다.
+        /// AuthServer 최신 설정 응답 DTO를 로컬 ViewerConfig로 변환한다.
         /// </summary>
+        /// <param name="source">AuthServer 최신 설정 응답 DTO.</param>
+        /// <returns>로컬 캠뷰어 설정.</returns>
         public static ViewerConfig ToLocalConfig(
             ViewerConfigServerDto source)
         {
@@ -74,183 +100,161 @@ namespace CamViewerClient.Mappers
             var target = new ViewerConfig
             {
                 StoreCode = source.StoreCode,
-                ConfigVersion = source.ConfigVersion,
-                PlaybackOption = ToLocalConfig(source.PlaybackOption)
+                ConfigVersion = source.ConfigVersion ?? string.Empty,
+                SyncStatus = ViewerConfigSyncStatus.Synced,
+                LastDownloadedAtUtc = DateTime.UtcNow,
+                PlaybackOption = new PlaybackOption(),
+                VideoRenderMode = VideoRenderMode.KeepAspectRatio
             };
 
-            if (source.NvrList != null)
-            {
-                foreach (NvrConfigServerDto nvr in source.NvrList)
-                {
-                    NvrConfig local = ToLocalConfig(nvr);
+            NvrConfig localNvr =
+                ToLocalNvrConfig(
+                    source.NvrConfig);
 
-                    if (local != null)
+            if (localNvr != null)
+            {
+                target.NvrList.Add(
+                    localNvr);
+            }
+
+            if (source.Channels != null)
+            {
+                foreach (ChannelConfigDto channel in source.Channels)
+                {
+                    if (channel == null)
                     {
-                        target.NvrList.Add(local);
+                        continue;
                     }
+
+                    target.CounterMapList.Add(
+                        new CounterMap
+                        {
+                            CounterNo = channel.PosNo,
+                            NvrNo = DefaultNvrNo,
+                            ChannelNo = channel.ChannelNo,
+                            ScreenPosition = ToScreenPosition(channel.Screen)
+                        });
                 }
             }
 
-            if (source.CounterMapList != null)
-            {
-                foreach (CounterMapServerDto counterMap in source.CounterMapList)
-                {
-                    CounterMap local = ToLocalConfig(counterMap);
+            NormalizeNextNvrNo(
+                target);
 
-                    if (local != null)
-                    {
-                        target.CounterMapList.Add(local);
-                    }
+            return target;
+        }
+
+        /// <summary>
+        /// AuthServer NVR DTO를 로컬 NvrConfig로 변환한다.
+        /// </summary>
+        /// <param name="source">AuthServer NVR 설정 DTO.</param>
+        /// <returns>로컬 NVR 설정.</returns>
+        private static NvrConfig ToLocalNvrConfig(
+            NvrConfigDto source)
+        {
+            if (source == null)
+            {
+                return null;
+            }
+
+            return new NvrConfig
+            {
+                NvrNo = DefaultNvrNo,
+                Vendor = DefaultVendor,
+                ConnectionType = DefaultConnectionType,
+                ProviderKey = DefaultProviderKey,
+                Host = source.NvrIp ?? string.Empty,
+                Port = source.NvrPort,
+                ChannelCount = source.NvrChannels.GetValueOrDefault(),
+                UserId = source.NvrId ?? string.Empty,
+                Password = source.NvrPassword ?? string.Empty
+            };
+        }
+
+        /// <summary>
+        /// 로컬 NvrConfig를 AuthServer NVR DTO로 변환한다.
+        /// </summary>
+        /// <param name="source">로컬 NVR 설정.</param>
+        /// <param name="configVersion">설정 버전.</param>
+        /// <returns>AuthServer NVR DTO.</returns>
+        private static NvrConfigDto ToApiNvrConfig(
+            NvrConfig source,
+            string configVersion)
+        {
+            if (source == null)
+            {
+                return new NvrConfigDto();
+            }
+
+            return new NvrConfigDto
+            {
+                NvrId = source.UserId ?? string.Empty,
+                NvrPassword = source.Password ?? string.Empty,
+                NvrIp = source.Host ?? string.Empty,
+                NvrPort = source.Port,
+                NvrChannels = source.ChannelCount,
+                NvrVersion = configVersion ?? string.Empty
+            };
+        }
+
+        /// <summary>
+        /// 서버 screen 값을 로컬 ScreenPosition enum으로 변환한다.
+        /// </summary>
+        /// <param name="screen">서버 화면 위치 값.</param>
+        /// <returns>로컬 화면 위치 enum.</returns>
+        private static ScreenPosition ToScreenPosition(
+            int screen)
+        {
+            if (screen == 1)
+            {
+                return (ScreenPosition)1;
+            }
+
+            return (ScreenPosition)0;
+        }
+
+        /// <summary>
+        /// 로컬 설정에서 첫 번째 NVR 설정을 가져온다.
+        /// </summary>
+        /// <param name="config">로컬 캠뷰어 설정.</param>
+        /// <returns>첫 번째 NVR 설정.</returns>
+        private static NvrConfig GetFirstNvr(
+            ViewerConfig config)
+        {
+            if (config == null || config.NvrList == null)
+            {
+                return null;
+            }
+
+            NvrConfig selected = null;
+
+            foreach (NvrConfig nvr in config.NvrList)
+            {
+                if (nvr == null)
+                {
+                    continue;
+                }
+
+                if (selected == null || nvr.NvrNo < selected.NvrNo)
+                {
+                    selected = nvr;
                 }
             }
 
-            NormalizeNextNvrNo(target);
-
-            return target;
+            return selected;
         }
 
-        private static NvrConfigServerDto ToServerDto(
-            NvrConfig source)
+        /// <summary>
+        /// 다음 NVR 번호를 현재 로컬 NVR 목록 기준으로 보정한다.
+        /// </summary>
+        /// <param name="config">로컬 캠뷰어 설정.</param>
+        private static void NormalizeNextNvrNo(
+            ViewerConfig config)
         {
-            if (source == null)
-            {
-                return null;
-            }
-
-            var target = new NvrConfigServerDto
-            {
-                NvrNo = source.NvrNo,
-                Vendor = source.Vendor,
-                ConnectionType = source.ConnectionType,
-                ProviderKey = source.ProviderKey,
-                Host = source.Host,
-                Port = source.Port,
-                ChannelCount = source.ChannelCount,
-                UserId = source.UserId,
-                Password = source.Password
-            };
-
-            CopyDictionary(
-                source.ProviderSettings,
-                target.ProviderSettings);
-
-            return target;
-        }
-
-        private static NvrConfig ToLocalConfig(
-            NvrConfigServerDto source)
-        {
-            if (source == null)
-            {
-                return null;
-            }
-
-            var target = new NvrConfig
-            {
-                NvrNo = source.NvrNo,
-                Vendor = source.Vendor,
-                ConnectionType = source.ConnectionType,
-                ProviderKey = source.ProviderKey,
-                Host = source.Host,
-                Port = source.Port,
-                ChannelCount = source.ChannelCount,
-                UserId = source.UserId,
-                Password = source.Password
-            };
-
-            CopyDictionary(
-                source.ProviderSettings,
-                target.ProviderSettings);
-
-            return target;
-        }
-
-        private static CounterMapServerDto ToServerDto(
-            CounterMap source)
-        {
-            if (source == null)
-            {
-                return null;
-            }
-
-            return new CounterMapServerDto
-            {
-                CounterNo = source.CounterNo,
-                NvrNo = source.NvrNo,
-                ChannelNo = source.ChannelNo,
-                ScreenPosition = (int)source.ScreenPosition
-            };
-        }
-
-        private static CounterMap ToLocalConfig(
-            CounterMapServerDto source)
-        {
-            if (source == null)
-            {
-                return null;
-            }
-
-            return new CounterMap
-            {
-                CounterNo = source.CounterNo,
-                NvrNo = source.NvrNo,
-                ChannelNo = source.ChannelNo,
-                ScreenPosition = (ScreenPosition)source.ScreenPosition
-            };
-        }
-
-        private static PlaybackOptionServerDto ToServerDto(
-            PlaybackOption source)
-        {
-            if (source == null)
-            {
-                return new PlaybackOptionServerDto
-                {
-                    BeforeSeconds = 30,
-                    AfterCompleteSeconds = 3
-                };
-            }
-
-            return new PlaybackOptionServerDto
-            {
-                BeforeSeconds = source.BeforeSeconds,
-                AfterCompleteSeconds = source.AfterCompleteSeconds
-            };
-        }
-
-        private static PlaybackOption ToLocalConfig(
-            PlaybackOptionServerDto source)
-        {
-            if (source == null)
-            {
-                return new PlaybackOption();
-            }
-
-            return new PlaybackOption
-            {
-                BeforeSeconds = source.BeforeSeconds,
-                AfterCompleteSeconds = source.AfterCompleteSeconds
-            };
-        }
-
-        private static void CopyDictionary(
-            IDictionary<string, string> source,
-            IDictionary<string, string> target)
-        {
-            if (source == null || target == null)
+            if (config == null)
             {
                 return;
             }
 
-            foreach (KeyValuePair<string, string> item in source)
-            {
-                target[item.Key] = item.Value;
-            }
-        }
-
-        private static void NormalizeNextNvrNo(
-            ViewerConfig config)
-        {
             int maxNvrNo = 0;
 
             if (config.NvrList != null)
