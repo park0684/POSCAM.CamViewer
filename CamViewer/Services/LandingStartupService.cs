@@ -71,6 +71,9 @@ namespace CamViewer.Services
         ///
         /// StoreCode, DeviceCode는 요청 Body로 보내지 않는다.
         /// 서버는 Token payload에서 StoreCode, DeviceCode를 추출한다.
+        ///
+        /// PlaybackOption은 서버 관리 대상이 아닌 로컬 전용 설정이므로,
+        /// 서버 설정 다운로드 시 기존 로컬 값을 유지한다.
         /// </summary>
         public async Task<StartupFlowResult> DownloadServerConfigAsync(
             ViewerAuthToken token,
@@ -78,7 +81,8 @@ namespace CamViewer.Services
             string programVersion,
             CancellationToken cancellationToken)
         {
-            if (token == null || string.IsNullOrWhiteSpace(token.Token))
+            if (token == null
+                || string.IsNullOrWhiteSpace(token.Token))
             {
                 return StartupFlowResult.RequireLogin(
                     "캠뷰어 인증 정보가 없습니다. 다시 로그인해 주세요.");
@@ -101,14 +105,20 @@ namespace CamViewer.Services
                     programVersion,
                     cancellationToken);
 
-            if (!downloadResult.Success || downloadResult.Data == null)
+            /*
+             * 서버 인증 또는 설정 다운로드에 실패한 경우에는
+             * 기존 로컬 설정을 수정하지 않는다.
+             */
+            if (!downloadResult.Success
+                || downloadResult.Data == null)
             {
                 if (_clientFacade.HasLocalConfig())
                 {
                     ClientResult<ViewerConfig> localLoadResult =
                         _clientFacade.LoadLocalConfig();
 
-                    if (localLoadResult.Success && localLoadResult.Data != null)
+                    if (localLoadResult.Success
+                        && localLoadResult.Data != null)
                     {
                         return StartupFlowResult.ContinueToPlayer(
                             "서버 설정 다운로드에 실패했습니다. 로컬 설정으로 실행합니다."
@@ -130,9 +140,30 @@ namespace CamViewer.Services
                     + downloadResult.ErrorCode);
             }
 
+            /*
+             * 이 시점에는 서버 인증과 설정 다운로드가 성공했다.
+             *
+             * 로컬 설정을 덮어쓰기 직전에 기존 PC의 재생 옵션을 읽는다.
+             * 기존 로컬 설정이 없다면 PlaybackOption 기본값인
+             * BeforeSeconds=30, AfterCompleteSeconds=3을 사용한다.
+             */
+            PlaybackOption localPlaybackOption =
+                LoadLocalPlaybackOptionOrDefault();
+
+            ViewerConfig downloadedConfig =
+                downloadResult.Data;
+
+            /*
+             * 서버 응답에는 PlaybackOption이 없으므로,
+             * 서버 설정 변환 과정에서 생성된 기본값 대신
+             * 기존 PC에 저장된 로컬 재생 옵션을 다시 적용한다.
+             */
+            downloadedConfig.PlaybackOption =
+                localPlaybackOption;
+
             ClientResult saveResult =
                 _clientFacade.SaveLocalConfig(
-                    downloadResult.Data);
+                    downloadedConfig);
 
             if (!saveResult.Success)
             {
@@ -446,6 +477,57 @@ namespace CamViewer.Services
             return config.ConfigVersion ?? string.Empty;
         }
 
+
+
+        /// <summary>
+        /// 현재 로컬 설정에 저장된 재생 옵션을 반환한다.
+        ///
+        /// 로컬 설정이 없거나 재생 옵션이 올바르지 않은 경우
+        /// PlaybackOption의 기본값인 이전 30초, 이후 3초를 반환한다.
+        /// </summary>
+        private PlaybackOption LoadLocalPlaybackOptionOrDefault()
+        {
+            var defaultOption =
+                new PlaybackOption();
+
+            ClientResult<ViewerConfig> loadResult =
+                _clientFacade.LoadLocalConfig();
+
+            if (!loadResult.Success
+                || loadResult.Data == null
+                || loadResult.Data.PlaybackOption == null)
+            {
+                return defaultOption;
+            }
+
+            int beforeSeconds =
+                loadResult.Data.PlaybackOption.BeforeSeconds;
+
+            int afterCompleteSeconds =
+                loadResult.Data.PlaybackOption.AfterCompleteSeconds;
+
+            // 이전 조회 시간 검증
+            if (beforeSeconds < 0
+                || beforeSeconds > 300)
+            {
+                beforeSeconds =
+                    defaultOption.BeforeSeconds;
+            }
+
+            // 거래완료 이후 보정 시간 검증
+            if (afterCompleteSeconds < 0
+                || afterCompleteSeconds > 10)
+            {
+                afterCompleteSeconds =
+                    defaultOption.AfterCompleteSeconds;
+            }
+
+            return new PlaybackOption
+            {
+                BeforeSeconds = beforeSeconds,
+                AfterCompleteSeconds = afterCompleteSeconds
+            };
+        }
 
     }
 }

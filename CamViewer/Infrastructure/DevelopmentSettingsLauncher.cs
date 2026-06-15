@@ -1,15 +1,15 @@
-﻿using System;
-using System.IO;
-using System.Linq;
-using System.Windows.Forms;
-using CamViewer.Factories;
+﻿using CamViewer.Factories;
+using CamViewer.Nvr.Core.Providers;
+using CamViewer.Nvr.Core.Results;
 using CamViewer.Presenters;
 using CamViewer.Views;
 using CamViewerClient;
 using CamViewerClient.Models.Config;
 using CamViewerClient.Results;
-using CamViewer.Nvr.Core.Providers;
-using CamViewer.Nvr.Core.Results;
+using System;
+using System.IO;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace CamViewer.Infrastructure
 {
@@ -22,8 +22,8 @@ namespace CamViewer.Infrastructure
     /// - 설정 화면 실행
     /// - 설정 저장 시 viewer_config.dat에 암호화 저장
     ///
-    /// 랜딩페이지, 로그인, 인증 흐름이 구현되면
-    /// 이 클래스의 역할은 실제 부트스트랩 서비스로 이동한다.
+    /// 실제 CamViewer 실행 흐름은 Program.cs에서 처리하며,
+    /// 이 클래스는 설정 화면을 단독으로 테스트할 때 사용한다.
     /// </summary>
     public static class DevelopmentSettingsLauncher
     {
@@ -32,69 +32,93 @@ namespace CamViewer.Infrastructure
         /// </summary>
         public static void Run()
         {
-            var providerCatalog = new NvrProviderCatalog();
+            var providerCatalog =
+                new NvrProviderCatalog();
 
-            LoadProviders(providerCatalog);
+            LoadProviders(
+                providerCatalog);
 
             var providerFactory =
-                new NvrProviderFactory(providerCatalog);
+                new NvrProviderFactory(
+                    providerCatalog);
 
             var clientFacade =
                 new CamViewerClientFacade();
 
             ViewerConfig viewerConfig =
-                LoadOrCreateConfig(clientFacade);
+                LoadOrCreateConfig(
+                    clientFacade);
 
-            var settingsView = new SettingsView();
-            var settingsViewFactory = new SettingsViewFactory();
+            var settingsView =
+                new SettingsView();
 
-            var settingsPresenter = new SettingsPresenter(
-                settingsView,
-                settingsViewFactory,
-                providerCatalog,
-                providerFactory,
-                viewerConfig,
-                savedConfig =>
-                {
-                    ClientResult saveResult =
-                        clientFacade.SaveLocalConfig(savedConfig);
+            var settingsViewFactory =
+                new SettingsViewFactory();
 
-                    if (!saveResult.Success)
+            var settingsPresenter =
+                new SettingsPresenter(
+                    settingsView,
+                    settingsViewFactory,
+                    providerCatalog,
+                    providerFactory,
+                    viewerConfig,
+
+                    // SettingsPresenter는
+                    // Func<ViewerConfig, Task<bool>> 형식의
+                    // 저장 콜백을 요구한다.
+                    savedConfig =>
                     {
+                        ClientResult saveResult =
+                            clientFacade.SaveLocalConfig(
+                                savedConfig);
+
+                        if (!saveResult.Success)
+                        {
+                            MessageBox.Show(
+                                saveResult.Message,
+                                "캠뷰어 설정 저장 실패",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+
+                            // 저장 실패 시 설정창을 닫지 않는다.
+                            return Task.FromResult(false);
+                        }
+
+                        viewerConfig =
+                            savedConfig;
+
                         MessageBox.Show(
-                            saveResult.Message,
-                            "캠뷰어 설정 저장 실패",
+                            "캠뷰어 설정이 저장되었습니다."
+                            + Environment.NewLine
+                            + clientFacade.GetLocalConfigFilePath(),
+                            "캠뷰어 설정",
                             MessageBoxButtons.OK,
-                            MessageBoxIcon.Warning);
+                            MessageBoxIcon.Information);
 
-                        return;
-                    }
-
-                    viewerConfig = savedConfig;
-
-                    MessageBox.Show(
-                        "캠뷰어 설정이 저장되었습니다."
-                        + Environment.NewLine
-                        + clientFacade.GetLocalConfigFilePath(),
-                        "캠뷰어 설정",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
-                });
+                        // 저장 성공 시 SettingsPresenter가 설정창을 닫는다.
+                        return Task.FromResult(true);
+                    });
 
             settingsPresenter.Show();
         }
 
         /// <summary>
-        /// 실행 폴더의 providers 하위 DLL을 검색하여 Provider Catalog에 등록한다.
+        /// 실행 폴더의 providers 하위 DLL을 검색하여
+        /// Provider Catalog에 등록한다.
         /// </summary>
+        /// <param name="providerCatalog">
+        /// Provider를 등록할 Catalog.
+        /// </param>
         private static void LoadProviders(
             NvrProviderCatalog providerCatalog)
         {
-            string providerPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                "providers");
+            string providerPath =
+                Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "providers");
 
-            var providerLoader = new ProviderAssemblyLoader();
+            var providerLoader =
+                new ProviderAssemblyLoader();
 
             var providerBootstrapper =
                 new NvrProviderBootstrapper(
@@ -102,7 +126,8 @@ namespace CamViewer.Infrastructure
                     providerCatalog);
 
             ProviderLoadReport loadReport =
-                providerBootstrapper.LoadAndRegister(providerPath);
+                providerBootstrapper.LoadAndRegister(
+                    providerPath);
 
             if (loadReport.LoadedCount > 0
                 && loadReport.Errors.Count == 0)
@@ -126,6 +151,12 @@ namespace CamViewer.Infrastructure
         /// 로컬 설정 파일이 있으면 불러오고,
         /// 없거나 불러오기에 실패하면 신규 설정을 생성한다.
         /// </summary>
+        /// <param name="clientFacade">
+        /// 로컬 설정을 관리할 CamViewerClient Facade.
+        /// </param>
+        /// <returns>
+        /// 로컬 설정 또는 신규 기본 설정.
+        /// </returns>
         private static ViewerConfig LoadOrCreateConfig(
             CamViewerClientFacade clientFacade)
         {
@@ -137,7 +168,8 @@ namespace CamViewer.Infrastructure
             ClientResult<ViewerConfig> loadResult =
                 clientFacade.LoadLocalConfig();
 
-            if (loadResult.Success && loadResult.Data != null)
+            if (loadResult.Success
+                && loadResult.Data != null)
             {
                 return loadResult.Data;
             }
@@ -158,6 +190,15 @@ namespace CamViewer.Infrastructure
         /// <summary>
         /// Provider 로드 결과를 사용자 확인용 메시지로 변환한다.
         /// </summary>
+        /// <param name="providerPath">
+        /// Provider DLL 검색 경로.
+        /// </param>
+        /// <param name="loadReport">
+        /// Provider DLL 로드 결과.
+        /// </param>
+        /// <returns>
+        /// 사용자에게 표시할 Provider 로드 결과 메시지.
+        /// </returns>
         private static string BuildProviderLoadMessage(
             string providerPath,
             ProviderLoadReport loadReport)
@@ -177,44 +218,57 @@ namespace CamViewer.Infrastructure
                 + "로드 오류 수: "
                 + loadReport.Errors.Count;
 
-            if (Directory.Exists(providerPath))
+            if (Directory.Exists(
+                providerPath))
             {
-                string[] providerFiles = Directory.GetFiles(
-                    providerPath,
-                    "POSCAM.Nvr.*.dll",
-                    SearchOption.AllDirectories);
+                string[] providerFiles =
+                    Directory.GetFiles(
+                        providerPath,
+                        "POSCAM.Nvr.*.dll",
+                        SearchOption.AllDirectories);
 
-                message += Environment.NewLine
+                message +=
+                    Environment.NewLine
                     + Environment.NewLine
                     + "검색된 DLL 수: "
                     + providerFiles.Length;
 
                 foreach (string file in providerFiles)
                 {
-                    message += Environment.NewLine + "- " + file;
+                    message +=
+                        Environment.NewLine
+                        + "- "
+                        + file;
                 }
             }
             else
             {
-                message += Environment.NewLine
+                message +=
+                    Environment.NewLine
                     + Environment.NewLine
                     + "providers 폴더가 없습니다.";
             }
 
             if (loadReport.Errors.Count > 0)
             {
-                message += Environment.NewLine
+                message +=
+                    Environment.NewLine
                     + Environment.NewLine
                     + "로드 오류:";
 
-                foreach (ProviderLoadError error in loadReport.Errors)
+                foreach (ProviderLoadError error
+                    in loadReport.Errors)
                 {
-                    message += Environment.NewLine
-                        + "- " + error.Message
+                    message +=
+                        Environment.NewLine
+                        + "- "
+                        + error.Message
                         + Environment.NewLine
-                        + "  파일: " + error.AssemblyPath
+                        + "  파일: "
+                        + error.AssemblyPath
                         + Environment.NewLine
-                        + "  형식: " + error.TypeName;
+                        + "  형식: "
+                        + error.TypeName;
                 }
             }
 

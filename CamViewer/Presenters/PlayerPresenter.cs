@@ -30,6 +30,7 @@ namespace CamViewer.Presenters
         private DateTime? _currentPlaybackDateTime;
         private bool _isPlaybackTimerTickRunning;
 
+
         /// <summary>
         /// 재생 관련 명령이 실행 중인지 여부.
         /// 중복 클릭으로 인한 Provider 상태 꼬임을 방지한다.
@@ -43,16 +44,23 @@ namespace CamViewer.Presenters
         private PlaybackState _lastPlaybackDirection;
 
         /// <summary>
+        /// 프로그램 최초 실행 또는 외부 프로그램으로부터 전달된
+        /// 영상 조회 요청을 Player가 준비될 때까지 보관하는 저장소.
+        /// </summary>
+        private readonly IApplicationLaunchRequestStore _launchRequestStore;
+
+        /// <summary>
         /// PlayerPresenter를 초기화한다.
         /// </summary>
         /// <param name="view">영상 재생 View.</param>
         /// <param name="viewerConfig">로컬 또는 서버에서 불러온 캠뷰어 설정.</param>
         public PlayerPresenter(
-    IPlayerView view,
-    ViewerConfig viewerConfig,
-    IPlayerPlaybackService playbackService,
-    Func<bool> openSettingsFunc,
-    Func<ViewerConfig> reloadConfigFunc)
+                IPlayerView view,
+                ViewerConfig viewerConfig,
+                IPlayerPlaybackService playbackService,
+                Func<bool> openSettingsFunc,
+                Func<ViewerConfig> reloadConfigFunc,
+                IApplicationLaunchRequestStore launchRequestStore)
         {
             if (view == null)
             {
@@ -68,14 +76,22 @@ namespace CamViewer.Presenters
             {
                 throw new ArgumentNullException("playbackService");
             }
+            if (launchRequestStore == null)
+            {
+                throw new ArgumentNullException(
+                    "launchRequestStore");
+            }
 
             _view = view;
             _viewerConfig = viewerConfig;
             _playbackService = playbackService;
             _openSettingsFunc = openSettingsFunc;
             _reloadConfigFunc = reloadConfigFunc;
+            _launchRequestStore = launchRequestStore;
+
             _playbackState = PlaybackState.Stopped;
             _lastPlaybackDirection = PlaybackState.Playing;
+
             _view.LoadViewEvent += OnLoadView;
             _view.CounterChangedEvent += OnCounterChanged;
             _view.SearchEvent += OnSearch;
@@ -92,8 +108,9 @@ namespace CamViewer.Presenters
             _view.PlaybackTimerTickEvent += OnPlaybackTimerTick;
             _view.PlaybackSpeedChangedEvent += OnPlaybackSpeedChanged;
 
-            view.SyncEvent += OnSync;
+            _view.SyncEvent += OnSync;
             _view.TimelineSeekRequestedEvent += OnTimelineSeekRequested;
+
         }
 
         /// <summary>
@@ -105,45 +122,46 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
-        /// PlayerView가 표시될 때 초기 화면 상태를 구성한다.
+        /// PlayerView가 표시될 때 초기 화면을 구성하고
+        /// 최초 실행 요청에 따라 자동으로 영상을 조회한다.
+        /// 
+        /// 처리 기준:
+        /// - 직접 실행이면 Player 준비 시점의 현재 시간을 기준으로 사용한다.
+        /// - 외부 실행이면 전달받은 기준 시간을 사용한다.
+        /// - 조회 시작은 기준 시간 이전 보정 초를 적용한다.
+        /// - 조회 종료는 기준 시간 이후 보정 초를 적용한다.
         /// </summary>
-        private void OnLoadView(object sender, EventArgs e)
+        private async void OnLoadView(
+            object sender,
+            EventArgs e)
         {
-            //List<int> counterNumbers = GetCounterNumbers();
-
-            //_view.SetCounterNumbers(counterNumbers);
-            //_view.SetSearchDateTime(DateTime.Now);
-            ////_view.SetPlaybackDateTime(null);
-            //_view.SetPlaybackState(_playbackState);
-
-            //if (counterNumbers.Count == 0)
-            //{
-            //    _view.SetLeftVideoTitle("좌측 영상 설정 없음");
-            //    _view.SetRightVideoTitle("우측 영상 설정 없음");
-            //    _view.SetStatus("등록된 계산대 설정이 없습니다.");
-            //    return;
-            //}
-
-            //_view.SelectCounterNo(counterNumbers[0]);
-            //UpdateSelectedCounterInfo();
-
-            //_view.SetStatus("캠뷰어 실행 준비 완료");
-
-            DateTime baseTime = DateTime.Now;
-
-            _view.SetSearchRange(
-                baseTime.AddSeconds(-30),
-                baseTime.AddSeconds(3));
-
             _view.SetPlaybackTime(null);
             _view.SetPlaybackState(_playbackState);
 
             _view.SetPlaybackSpeedOptions();
-            _view.SelectPlaybackSpeed(PlaybackSpeed.Normal);
+            _view.SelectPlaybackSpeed(
+                PlaybackSpeed.Normal);
 
+            // 설정에 등록된 계산대와 화면 정보를 먼저 반영한다.
             ReloadViewByConfig();
 
-            _view.SetStatus("캠뷰어 실행 준비 완료");
+            ApplicationLaunchRequest launchRequest;
+
+            // Program에서 보관한 실행 요청이 있으면 가져온다.
+            // 요청을 가져오는 순간 저장소에서는 제거되어
+            // 같은 요청이 중복 실행되지 않는다.
+            if (!_launchRequestStore.TryTakePendingRequest(
+                out launchRequest))
+            {
+                // 저장된 요청이 없는 예외 상황에서는
+                // 일반 직접 실행 요청으로 처리한다.
+                launchRequest =
+                    ApplicationLaunchRequest.CreateDirectLaunch();
+            }
+
+            await ApplyLaunchRequestAsync(
+                launchRequest,
+                false);
         }
 
 
@@ -1071,6 +1089,40 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
+        /// 영상 조회 기준 시각 이전부터 재생할 시간(초)을 반환한다.
+        /// 
+        /// 설정값 처리 기준:
+        /// - PlaybackOption이 없으면 기본값 30초
+        /// - 음수이면 기본값 30초
+        /// - 300초를 초과하면 최대 300초
+        /// - 그 외에는 설정된 BeforeSeconds 사용
+        /// </summary>
+        /// <returns>기준 시각 이전 재생 시간(초).</returns>
+        private int GetBeforePlaybackSeconds()
+        {
+            if (_viewerConfig == null
+                || _viewerConfig.PlaybackOption == null)
+            {
+                return 30;
+            }
+
+            int beforeSeconds =
+                _viewerConfig.PlaybackOption.BeforeSeconds;
+
+            if (beforeSeconds < 0)
+            {
+                return 30;
+            }
+
+            if (beforeSeconds > 300)
+            {
+                return 300;
+            }
+
+            return beforeSeconds;
+        }
+
+        /// <summary>
         /// 생성된 재생 요청 정보를 확인하기 위한 임시 메시지를 만든다.
         /// </summary>
         private string BuildPlaybackRequestDebugMessage(
@@ -1235,6 +1287,262 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
+        /// 직접 실행 또는 외부 프로그램에서 전달된 영상 조회 요청을 적용한다.
+        ///
+        /// 직접 실행:
+        /// 1. Player가 준비된 현재 시각을 기준 시각으로 사용
+        /// 2. 설정된 이전/이후 시간을 반영하여 조회 범위 생성
+        /// 3. 조회 조건만 화면에 표시
+        /// 4. 자동 재생하지 않음
+        ///
+        /// 외부 실행:
+        /// 1. 외부에서 전달된 결제 완료 시각을 기준 시각으로 사용
+        /// 2. 설정된 이전/이후 시간을 반영하여 조회 범위 생성
+        /// 3. 기존 영상이 재생 중이면 중지
+        /// 4. 새로운 조회 범위를 적용하고 즉시 재생
+        /// </summary>
+        /// <param name="request">적용할 실행 요청.</param>
+        /// <param name="showReplacementMessage">
+        /// 실행 중 새로운 외부 요청을 받은 경우 안내 메시지를 표시할지 여부.
+        /// 최초 실행 시에는 false를 사용한다.
+        /// </param>
+        public async Task ApplyLaunchRequestAsync(
+            ApplicationLaunchRequest request,
+            bool showReplacementMessage)
+        {
+            if (request == null)
+            {
+                request =
+                    ApplicationLaunchRequest.CreateDirectLaunch();
+            }
+
+            /*
+             * 조회 가능한 계산대 목록을 확인한다.
+             *
+             * 직접 실행과 외부 실행 모두 조회시간을 화면에 표시하려면
+             * 선택할 계산대가 하나 이상 필요하다.
+             */
+            List<int> counterNumbers =
+                GetCounterNumbers();
+
+            if (counterNumbers.Count == 0)
+            {
+                _view.SetStatus(
+                    "등록된 계산대 설정이 없어 영상 조회 조건을 설정할 수 없습니다.");
+
+                return;
+            }
+
+            /*
+             * 실행 요청에 따라 기준 시각을 결정한다.
+             *
+             * 외부 실행:
+             * 외부 프로그램에서 전달된 결제 완료 시각을 사용한다.
+             *
+             * 직접 실행:
+             * Program 시작 시각이 아니라 Player 화면이 실제 준비된
+             * 현재 시각을 사용한다.
+             */
+            DateTime referenceTime;
+
+            if (request.IsExternalPlaybackRequest)
+            {
+                /*
+                 * 외부 실행 요청에는 반드시 결제 완료 시각이 있어야 한다.
+                 *
+                 * 외부 요청인데 ReferenceTime이 없는 경우 현재 시각으로
+                 * 대체하면 잘못된 영상을 재생할 수 있으므로 오류 처리한다.
+                 */
+                if (!request.ReferenceTime.HasValue)
+                {
+                    _view.ShowMessage(
+                        "외부 영상 조회 요청에 기준 시각이 없습니다.");
+
+                    return;
+                }
+
+                referenceTime =
+                    request.ReferenceTime.Value;
+            }
+            else
+            {
+                referenceTime =
+                    DateTime.Now;
+            }
+
+            /*
+             * 별도의 계산대번호가 전달되지 않은 경우
+             * 설정된 첫 번째 계산대를 기본으로 선택한다.
+             */
+            int selectedCounterNo =
+                counterNumbers[0];
+
+            if (request.CounterNo.HasValue)
+            {
+                if (!counterNumbers.Contains(
+                    request.CounterNo.Value))
+                {
+                    _view.ShowMessage(
+                        "요청된 계산대번호가 설정에 존재하지 않습니다."
+                        + Environment.NewLine
+                        + "계산대번호: "
+                        + request.CounterNo.Value);
+
+                    return;
+                }
+
+                selectedCounterNo =
+                    request.CounterNo.Value;
+            }
+
+            /*
+             * 로컬 설정에 저장된 영상검색 조정시간을 가져온다.
+             *
+             * BeforeSeconds:
+             * 결제 완료 시각 이전부터 조회할 시간
+             *
+             * AfterCompleteSeconds:
+             * 결제 완료 시각 이후 추가로 조회할 시간
+             */
+            int beforeSeconds =
+                GetBeforePlaybackSeconds();
+
+            int afterSeconds =
+                GetAfterCompleteSeconds();
+
+            /*
+             * 실제 영상 조회 구간을 계산한다.
+             *
+             * 시작 시각 = 기준 시각 - 이전 조회시간
+             * 종료 시각 = 기준 시각 + 완료 후 보정시간
+             */
+            DateTime startTime =
+                referenceTime.AddSeconds(
+                    -beforeSeconds);
+
+            DateTime endTime =
+                referenceTime.AddSeconds(
+                    afterSeconds);
+
+            /*
+             * 직접 실행은 조회 조건만 화면에 적용한다.
+             *
+             * 현재 시각을 기준으로 계산대와 조회시간을 표시하지만,
+             * 사용자가 재생 버튼을 누르기 전에는 영상을 조회하지 않는다.
+             */
+            if (!request.IsExternalPlaybackRequest)
+            {
+                _view.SelectCounterNo(
+                    selectedCounterNo);
+
+                UpdateSelectedCounterInfo();
+
+                _view.SetSearchRange(
+                    startTime,
+                    endTime);
+
+                _view.SetStatus(
+                    "현재 시각 기준으로 영상 조회 시간이 설정되었습니다."
+                    + " 기준 시각: "
+                    + referenceTime.ToString(
+                        "yyyy-MM-dd HH:mm:ss"));
+
+                return;
+            }
+
+            /*
+             * 여기부터는 외부 프로그램에서 전달된 영상 조회 요청에만 해당한다.
+             *
+             * 실제 재생 명령을 실행할 수 있는 상태인지 확인한다.
+             */
+            if (!TryBeginPlaybackCommand())
+            {
+                return;
+            }
+
+            try
+            {
+                /*
+                 * 프로그램이 이미 실행 중인 상태에서 새로운 외부 요청을
+                 * 전달받은 경우에만 교체 재생 메시지를 표시한다.
+                 */
+                if (showReplacementMessage)
+                {
+                    _view.ShowMessage(
+                        "새로운 요청 영상을 재생하겠습니다.");
+                }
+
+                /*
+                 * 기존 영상이 재생 중이면 새로운 조회 요청을 적용하기 전에
+                 * 기존 재생을 먼저 중지한다.
+                 */
+                if (_playbackService.CurrentState
+                    != PlaybackState.Stopped)
+                {
+                    _view.StopPlaybackTimer();
+
+                    PlayerPlaybackResult stopResult =
+                        await _playbackService.StopAsync(
+                            CancellationToken.None);
+
+                    if (!stopResult.Success)
+                    {
+                        _view.ShowMessage(
+                            stopResult.Message);
+
+                        return;
+                    }
+                }
+
+                /*
+                 * 외부 요청에서 결정된 계산대와 조회 구간을 화면에 적용한다.
+                 */
+                _view.SelectCounterNo(
+                    selectedCounterNo);
+
+                UpdateSelectedCounterInfo();
+
+                _view.SetSearchRange(
+                    startTime,
+                    endTime);
+
+                _view.SetStatus(
+                    "외부 요청 영상을 조회합니다."
+                    + " 기준 시각: "
+                    + referenceTime.ToString(
+                        "yyyy-MM-dd HH:mm:ss"));
+
+                /*
+                 * 외부 요청은 조회 범위를 적용한 뒤 즉시 영상을 재생한다.
+                 */
+                PlayerPlaybackResult playResult =
+                    await PlayFromCurrentSearchRangeAsync();
+
+                HandlePlaybackCommandResult(
+                    playResult);
+
+                if (!playResult.Success)
+                {
+                    return;
+                }
+
+                UpdatePlaybackTimerState();
+                UpdatePlaybackStateDisplay();
+            }
+            catch (Exception ex)
+            {
+                _view.ShowMessage(
+                    "실행 요청 영상을 재생하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
+            }
+            finally
+            {
+                EndPlaybackCommand();
+            }
+        }
+
+        /// <summary>
         /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치와 좌/우 동기화 상태를 화면에 반영한다.
         /// </summary>
         //private async void OnPlaybackTimerTick(object sender, EventArgs e)
@@ -1270,10 +1578,7 @@ namespace CamViewer.Presenters
         //    }
         //}
 
-        /// <summary>
-        /// 재생 명령을 실행할 수 있는지 확인한다.
-        /// 이미 다른 재생 명령이 처리 중이면 false를 반환한다.
-        /// </summary>
+
         private bool TryBeginPlaybackCommand()
         {
             if (_isPlaybackCommandRunning)

@@ -26,6 +26,13 @@ namespace CamViewer.Interfaces
         CounterMapKey SelectedCounterMapKey { get; }
 
         /// <summary>
+        /// 영상검색 기준 시각 이전에 조회할 시간(초).
+        /// 설정 저장 시 화면 값을 읽고,
+        /// 설정 화면 로드 시 기존 설정값을 표시한다.
+        /// </summary>
+        int? AdjustSecond { get; set; }
+
+        /// <summary>
         /// 화면이 최초 표시될 때 발생한다.
         /// </summary>
         event EventHandler LoadViewEvent;
@@ -100,6 +107,8 @@ namespace CamViewer.Interfaces
         /// </summary>
         /// <param name="message">표시할 메시지.</param>
         void ShowMessage(string message);
+
+
 
         /// <summary>
         /// 사용자에게 예/아니오 확인 메시지를 표시한다.

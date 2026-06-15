@@ -72,7 +72,7 @@
     <Compile Include="Factories\SettingsViewFactory.cs" />
     <Compile Include="Helpers\SettingsViewModelMapper.cs" />
     <Compile Include="Helpers\ViewerConfigCloneHelper.cs" />
-    <None Include="Infrastructure\DevelopmentSettingsLauncher.cs" />
+    <Compile Include="Infrastructure\DevelopmentSettingsLauncher.cs" />
     <Compile Include="Infrastructure\ProviderLoadSmokeTest.cs" />
     <Compile Include="Interfaces\ICounterEditView.cs" />
     <Compile Include="Interfaces\ILandingView.cs" />
@@ -80,6 +80,8 @@
     <Compile Include="Interfaces\INvrEditView.cs" />
     <Compile Include="Interfaces\IPlayerView.cs" />
     <Compile Include="Interfaces\ISettingsView.cs" />
+    <Compile Include="Models\ApplicationLaunchRequest.cs" />
+    <Compile Include="Models\ApplicationLaunchRequestType.cs" />
     <Compile Include="Models\PlaybackChannelTimeStatus.cs" />
     <Compile Include="Models\PlaybackCommand.cs" />
     <Compile Include="Models\PlaybackState.cs" />
@@ -97,6 +99,10 @@
     <Compile Include="Models\ViewModels\NvrOptionItem.cs" />
     <Compile Include="Models\ViewModels\VendorOptionItem.cs" />
     <Compile Include="Presenters\CounterEditPresenter.cs" />
+    <Compile Include="Services\ApplicationLaunchArgumentParser.cs" />
+    <Compile Include="Services\ApplicationLaunchRequestStore.cs" />
+    <Compile Include="Services\IApplicationLaunchArgumentParser.cs" />
+    <Compile Include="Services\IApplicationLaunchRequestStore.cs" />
     <Compile Include="Services\ILandingStartupService.cs" />
     <Compile Include="Presenters\LandingPresenter.cs" />
     <Compile Include="Presenters\LoginPresenter.cs" />

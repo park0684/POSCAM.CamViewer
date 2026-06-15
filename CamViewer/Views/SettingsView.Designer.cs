@@ -40,11 +40,17 @@
             this.btnClose = new System.Windows.Forms.Button();
             this.btnSave = new System.Windows.Forms.Button();
             this.lblConfigStatus = new System.Windows.Forms.Label();
+            this.grpOtherOption = new System.Windows.Forms.GroupBox();
+            this.label2 = new System.Windows.Forms.Label();
+            this.label3 = new System.Windows.Forms.Label();
+            this.txtAdjust = new System.Windows.Forms.TextBox();
+            this.label4 = new System.Windows.Forms.Label();
             this.grpNvr.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.dgvNvr)).BeginInit();
             this.grpCounterMap.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.dgvCounterMap)).BeginInit();
             this.pnlBottom.SuspendLayout();
+            this.grpOtherOption.SuspendLayout();
             this.SuspendLayout();
             // 
             // grpNvr
@@ -159,7 +165,7 @@
             this.pnlBottom.Controls.Add(this.btnSave);
             this.pnlBottom.Controls.Add(this.lblConfigStatus);
             this.pnlBottom.Dock = System.Windows.Forms.DockStyle.Bottom;
-            this.pnlBottom.Location = new System.Drawing.Point(0, 549);
+            this.pnlBottom.Location = new System.Drawing.Point(0, 714);
             this.pnlBottom.Name = "pnlBottom";
             this.pnlBottom.Size = new System.Drawing.Size(984, 64);
             this.pnlBottom.TabIndex = 2;
@@ -198,12 +204,63 @@
             this.lblConfigStatus.TabIndex = 4;
             this.lblConfigStatus.Text = "설정 버전: -   동기화 상태: -";
             // 
+            // grpOtherOption
+            // 
+            this.grpOtherOption.Controls.Add(this.label4);
+            this.grpOtherOption.Controls.Add(this.txtAdjust);
+            this.grpOtherOption.Controls.Add(this.label3);
+            this.grpOtherOption.Controls.Add(this.label2);
+            this.grpOtherOption.Location = new System.Drawing.Point(9, 551);
+            this.grpOtherOption.Name = "grpOtherOption";
+            this.grpOtherOption.Size = new System.Drawing.Size(963, 130);
+            this.grpOtherOption.TabIndex = 3;
+            this.grpOtherOption.TabStop = false;
+            // 
+            // label2
+            // 
+            this.label2.AutoSize = true;
+            this.label2.Font = new System.Drawing.Font("맑은 고딕", 14F);
+            this.label2.Location = new System.Drawing.Point(6, 30);
+            this.label2.Name = "label2";
+            this.label2.Size = new System.Drawing.Size(95, 25);
+            this.label2.TabIndex = 3;
+            this.label2.Text = "기타 설정";
+            // 
+            // label3
+            // 
+            this.label3.AutoSize = true;
+            this.label3.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.label3.Location = new System.Drawing.Point(7, 81);
+            this.label3.Name = "label3";
+            this.label3.Size = new System.Drawing.Size(125, 19);
+            this.label3.TabIndex = 4;
+            this.label3.Text = "검색시간 : 결제 전";
+            // 
+            // txtAdjust
+            // 
+            this.txtAdjust.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.txtAdjust.Location = new System.Drawing.Point(138, 78);
+            this.txtAdjust.Name = "txtAdjust";
+            this.txtAdjust.Size = new System.Drawing.Size(100, 25);
+            this.txtAdjust.TabIndex = 5;
+            // 
+            // label4
+            // 
+            this.label4.AutoSize = true;
+            this.label4.Font = new System.Drawing.Font("맑은 고딕", 10F);
+            this.label4.Location = new System.Drawing.Point(244, 81);
+            this.label4.Name = "label4";
+            this.label4.Size = new System.Drawing.Size(23, 19);
+            this.label4.TabIndex = 6;
+            this.label4.Text = "초";
+            // 
             // SettingsView
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.BackColor = System.Drawing.Color.White;
-            this.ClientSize = new System.Drawing.Size(984, 613);
+            this.ClientSize = new System.Drawing.Size(984, 778);
+            this.Controls.Add(this.grpOtherOption);
             this.Controls.Add(this.pnlBottom);
             this.Controls.Add(this.grpCounterMap);
             this.Controls.Add(this.grpNvr);
@@ -223,6 +280,8 @@
             ((System.ComponentModel.ISupportInitialize)(this.dgvCounterMap)).EndInit();
             this.pnlBottom.ResumeLayout(false);
             this.pnlBottom.PerformLayout();
+            this.grpOtherOption.ResumeLayout(false);
+            this.grpOtherOption.PerformLayout();
             this.ResumeLayout(false);
 
         }
@@ -241,5 +300,10 @@
         private System.Windows.Forms.Button btnClose;
         private System.Windows.Forms.Button btnSave;
         private System.Windows.Forms.Label lblConfigStatus;
+        private System.Windows.Forms.Label label2;
+        private System.Windows.Forms.GroupBox grpOtherOption;
+        private System.Windows.Forms.Label label4;
+        private System.Windows.Forms.TextBox txtAdjust;
+        private System.Windows.Forms.Label label3;
     }
 }
