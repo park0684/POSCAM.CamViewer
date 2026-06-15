@@ -113,9 +113,26 @@ namespace CamViewer.Presenters
         /// </summary>
         private void OnLoadView(object sender, EventArgs e)
         {
+            EnsurePlaybackOption();
+
+            _view.AdjustSecond =
+                _workingConfig.PlaybackOption.BeforeSeconds;
+
             RefreshView();
         }
 
+        /// <summary>
+        /// 현재 작업 설정에 PlaybackOption이 존재하도록 보정한다.
+        /// 이전 설정 파일에 값이 없는 경우 기본 설정을 생성한다.
+        /// </summary>
+        private void EnsurePlaybackOption()
+        {
+            if (_workingConfig.PlaybackOption == null)
+            {
+                _workingConfig.PlaybackOption =
+                    new PlaybackOption();
+            }
+        }
         /// <summary>
         /// 신규 NVR 등록 팝업을 표시한다.
         /// </summary>
@@ -319,16 +336,57 @@ namespace CamViewer.Presenters
         /// 설정 전체를 검증하고 저장 요청을 상위 흐름에 전달한다.
         /// 저장이 성공한 경우에만 설정 화면을 닫는다.
         /// </summary>
-        private async void OnSave(object sender, EventArgs e)
+        private async void OnSave(
+            object sender,
+            EventArgs e)
         {
+            // 설정 화면에 입력된 영상검색 이전 조정 시간을 읽는다.
+            int? adjustSecond =
+                _view.AdjustSecond;
+
+            // 숫자가 아니거나 값이 비어 있는 경우 저장하지 않는다.
+            if (!adjustSecond.HasValue)
+            {
+                _view.ShowMessage(
+                    "영상검색 조정 시간을 숫자로 입력해 주세요.");
+
+                return;
+            }
+
+            // 설정 가능한 범위를 검증한다.
+            if (adjustSecond.Value < 0
+                || adjustSecond.Value > 300)
+            {
+                _view.ShowMessage(
+                    "영상검색 조정 시간은 0초 이상 300초 이하로 입력해 주세요.");
+
+                return;
+            }
+
+            // 이전 설정 파일에 PlaybackOption이 없을 수 있으므로
+            // 저장 전에 기본 객체를 생성한다.
+            if (_workingConfig.PlaybackOption == null)
+            {
+                _workingConfig.PlaybackOption =
+                    new PlaybackOption();
+            }
+
+            // txtAdjust의 값을 실제 설정 모델에 반영한다.
+            _workingConfig.PlaybackOption.BeforeSeconds =
+                adjustSecond.Value;
+
+            // 화면 입력값까지 설정에 반영한 뒤 전체 설정을 검증한다.
             ConfigValidationResult validationResult =
-                _validator.Validate(_workingConfig);
+                _validator.Validate(
+                    _workingConfig);
 
             if (!validationResult.IsValid)
             {
-                string message = string.Join(
-                    Environment.NewLine,
-                    validationResult.Errors.Select(x => "- " + x.Message));
+                string message =
+                    string.Join(
+                        Environment.NewLine,
+                        validationResult.Errors.Select(
+                            x => "- " + x.Message));
 
                 _view.ShowMessage(message);
                 return;
@@ -337,8 +395,10 @@ namespace CamViewer.Presenters
             _workingConfig.SyncStatus =
                 ViewerConfigSyncStatus.LocalModified;
 
-            bool saved = await _onSaveRequested(
-                ViewerConfigCloneHelper.Clone(_workingConfig));
+            bool saved =
+                await _onSaveRequested(
+                    ViewerConfigCloneHelper.Clone(
+                        _workingConfig));
 
             if (!saved)
             {

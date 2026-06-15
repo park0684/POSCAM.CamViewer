@@ -73,6 +73,33 @@ namespace CamViewer.Views
             }
         }
 
+        /// <summary>
+        /// 영상검색 기준 시각 이전에 조회할 시간(초).
+        /// </summary>
+        public int? AdjustSecond
+        {
+            get
+            {
+                int seconds;
+
+                if (!int.TryParse(
+                    txtAdjust.Text.Trim(),
+                    out seconds))
+                {
+                    return null;
+                }
+
+                return seconds;
+            }
+            set
+            {
+                txtAdjust.Text =
+                    value.HasValue
+                        ? value.Value.ToString()
+                        : string.Empty;
+            }
+        }
+
         public event EventHandler LoadViewEvent;
         public event EventHandler AddNvrEvent;
         public event EventHandler EditNvrEvent;

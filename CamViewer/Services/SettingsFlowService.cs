@@ -100,13 +100,14 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 로컬 설정 파일이 있으면 불러오고, 없으면 기본 설정을 생성한다.
+        /// 로컬 설정 파일이 있으면 불러오고,
+        /// 없으면 현재 인증 토큰의 매장코드를 반영한 기본 설정을 생성한다.
         /// </summary>
         private ViewerConfig LoadOrCreateConfig()
         {
             if (!_clientFacade.HasLocalConfig())
             {
-                return _clientFacade.CreateDefaultConfig();
+                return CreateDefaultConfigFromToken();
             }
 
             ClientResult<ViewerConfig> loadResult =
@@ -114,6 +115,9 @@ namespace CamViewer.Services
 
             if (loadResult.Success && loadResult.Data != null)
             {
+                EnsureStoreCodeFromToken(
+                    loadResult.Data);
+
                 return loadResult.Data;
             }
 
@@ -127,7 +131,7 @@ namespace CamViewer.Services
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
 
-            return _clientFacade.CreateDefaultConfig();
+            return CreateDefaultConfigFromToken();
         }
 
         /// <summary>
@@ -276,6 +280,59 @@ namespace CamViewer.Services
 
             _saved = true;
             return true;
+        }
+
+        /// <summary>
+        /// 현재 인증 토큰의 매장코드를 반영한 기본 설정을 생성한다.
+        /// 
+        /// 첫 로그인 후 로컬 설정 파일이 없는 경우,
+        /// 사용자가 매장코드를 직접 입력하지 않으므로
+        /// 로그인 토큰의 StoreCode를 ViewerConfig에 반영한다.
+        /// </summary>
+        private ViewerConfig CreateDefaultConfigFromToken()
+        {
+            ViewerConfig config =
+                _clientFacade.CreateDefaultConfig();
+
+            EnsureStoreCodeFromToken(
+                config);
+
+            return config;
+        }
+
+        /// <summary>
+        /// ViewerConfig의 StoreCode가 비어 있으면
+        /// 로컬 인증 토큰의 StoreCode로 보정한다.
+        /// </summary>
+        /// <param name="config">보정할 캠뷰어 설정.</param>
+        private void EnsureStoreCodeFromToken(
+            ViewerConfig config)
+        {
+            if (config == null)
+            {
+                return;
+            }
+
+            if (config.StoreCode > 0)
+            {
+                return;
+            }
+
+            ClientResult<ViewerAuthToken> tokenResult =
+                _clientFacade.LoadLocalToken();
+
+            if (!tokenResult.Success || tokenResult.Data == null)
+            {
+                return;
+            }
+
+            if (tokenResult.Data.StoreCode <= 0)
+            {
+                return;
+            }
+
+            config.StoreCode =
+                tokenResult.Data.StoreCode;
         }
     }
 }
