@@ -62,6 +62,8 @@
     <Compile Include="Enums\ScreenPosition.cs" />
     <Compile Include="Enums\ViewerConfigSyncStatus.cs" />
     <Compile Include="Mappers\ViewerConfigApiMapper.cs" />
+    <Compile Include="Mappers\ViewerConfigLocalSettingsMerger.cs" />
+    <Compile Include="Mappers\ViewerConfigServerSettingsComparer.cs" />
     <Compile Include="Mappers\ViewerConfigSyncMapper.cs" />
     <Compile Include="Models\Api\ApiResponseDto.cs" />
     <Compile Include="Models\Api\AuthTokenDto.cs" />

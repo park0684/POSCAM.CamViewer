@@ -392,8 +392,8 @@ namespace CamViewer.Presenters
                 return;
             }
 
-            _workingConfig.SyncStatus =
-                ViewerConfigSyncStatus.LocalModified;
+            //_workingConfig.SyncStatus =
+            //    ViewerConfigSyncStatus.LocalModified;
 
             bool saved =
                 await _onSaveRequested(
