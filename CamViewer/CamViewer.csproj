@@ -72,6 +72,7 @@
     <Compile Include="Factories\SettingsViewFactory.cs" />
     <Compile Include="Helpers\SettingsViewModelMapper.cs" />
     <Compile Include="Helpers\ViewerConfigCloneHelper.cs" />
+    <Compile Include="Infrastructure\ApplicationSingleInstance.cs" />
     <Compile Include="Infrastructure\DevelopmentSettingsLauncher.cs" />
     <Compile Include="Infrastructure\ProviderLoadSmokeTest.cs" />
     <Compile Include="Interfaces\ICounterEditView.cs" />
@@ -100,6 +101,9 @@
     <Compile Include="Models\ViewModels\VendorOptionItem.cs" />
     <Compile Include="Presenters\CounterEditPresenter.cs" />
     <Compile Include="Services\ApplicationLaunchArgumentParser.cs" />
+    <Compile Include="Services\ApplicationLaunchPipeClient.cs" />
+    <Compile Include="Services\ApplicationLaunchPipeServer.cs" />
+    <Compile Include="Services\ApplicationLaunchRequestPipeProtocol.cs" />
     <Compile Include="Services\ApplicationLaunchRequestStore.cs" />
     <Compile Include="Services\IApplicationLaunchArgumentParser.cs" />
     <Compile Include="Services\IApplicationLaunchRequestStore.cs" />
