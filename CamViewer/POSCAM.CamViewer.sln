@@ -13,10 +13,6 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewer.Nvr.Dahua", "..\C
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamViewer.Nvr.ApiProviders", "..\CamViewer.Nvr\CamViewer.Nvr.ApiProviders\CamViewer.Nvr.ApiProviders.csproj", "{F787A706-B3EE-4E14-BFB6-08038DB92B75}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "poscam.AuthServer", "..\..\poscam\AuthServer\poscam.AuthServer.csproj", "{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "poscam.AdminWeb", "..\..\poscam\AdminWeb\poscam.AdminWeb.csproj", "{2A003077-AD59-14EE-B3FA-E75B93A643FB}"
-EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "External", "External", "{C8D5274F-AC00-46C7-1F8D-E88E81087A52}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetSDKCS", "..\..\CamViewer_External\Dahua\NetSDKCS\NetSDKCS.csproj", "{60CFBA25-F7CE-4140-A7E3-5355A25198E5}"
@@ -69,20 +65,6 @@ Global
 		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Release|Any CPU.Build.0 = Release|Any CPU
 		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Release|x64.ActiveCfg = Release|x64
 		{F787A706-B3EE-4E14-BFB6-08038DB92B75}.Release|x64.Build.0 = Release|x64
-		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Release|Any CPU.Build.0 = Release|Any CPU
-		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Release|x64.ActiveCfg = Release|x64
-		{6B3A69D9-D0CF-3B31-4FCE-259B8E0F2C5E}.Release|x64.Build.0 = Release|x64
-		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|Any CPU.Build.0 = Release|Any CPU
-		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|x64.ActiveCfg = Release|Any CPU
-		{2A003077-AD59-14EE-B3FA-E75B93A643FB}.Release|x64.Build.0 = Release|Any CPU
 		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Debug|Any CPU.ActiveCfg = Debug|x64
 		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Debug|Any CPU.Build.0 = Debug|x64
 		{60CFBA25-F7CE-4140-A7E3-5355A25198E5}.Debug|x64.ActiveCfg = Debug|x64
