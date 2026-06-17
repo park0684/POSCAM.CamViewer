@@ -30,7 +30,19 @@ namespace CamViewer.Presenters
         private DateTime? _currentPlaybackDateTime;
         private bool _isPlaybackTimerTickRunning;
 
+        /// <summary>
+        /// 현재 재생 명령에서 사용하는 취소 토큰 원본.
+        ///
+        /// 외부 영상 요청, 설정 진입 또는 프로그램 종료 시
+        /// 현재 실행 중인 NVR 작업을 취소하기 위해 사용한다.
+        /// </summary>
+        private CancellationTokenSource _playbackCommandCancellationTokenSource;
 
+        /// <summary>
+        /// Pipe 수신 스레드와 UI 스레드에서
+        /// 취소 토큰 원본에 동시에 접근하는 것을 보호한다.
+        /// </summary>
+        private readonly object _playbackCommandCancellationSyncRoot = new object();
         /// <summary>
         /// 재생 관련 명령이 실행 중인지 여부.
         /// 중복 클릭으로 인한 Provider 상태 꼬임을 방지한다.
@@ -48,6 +60,51 @@ namespace CamViewer.Presenters
         /// 영상 조회 요청을 Player가 준비될 때까지 보관하는 저장소.
         /// </summary>
         private readonly IApplicationLaunchRequestStore _launchRequestStore;
+
+        /// <summary>
+        /// PlayerView가 실행되는 WinForms UI 스레드의 컨텍스트.
+        ///
+        /// Named Pipe 요청은 백그라운드 스레드에서 수신되므로
+        /// View를 변경하기 전에 이 컨텍스트를 통해 UI 스레드로 전환한다.
+        /// </summary>
+        private SynchronizationContext _uiSynchronizationContext;
+
+        /// <summary>
+        /// PlayerView의 Load 처리가 완료되어
+        /// 외부 실행 요청을 즉시 적용할 수 있는지 여부.
+        /// </summary>
+        private bool _isViewLoaded;
+
+        /// <summary>
+        /// 저장소에 들어온 외부 실행 요청을 처리 중인지 여부.
+        ///
+        /// 여러 Pipe 요청이 짧은 시간 안에 연속으로 들어와도
+        /// 중복 처리 루프가 실행되지 않도록 보호한다.
+        /// </summary>
+        private bool _isPendingLaunchRequestProcessing;
+
+        /// <summary>
+        /// 설정 화면이 열려 있는지 여부.
+        ///
+        /// 설정 창이 열린 동안 외부 요청은 저장소에 보관하고,
+        /// 설정 창이 닫힌 뒤 최신 요청을 처리한다.
+        /// </summary>
+        private volatile bool _isSettingsOpen;
+
+        /// <summary>
+        /// PlayerView와 재생 서비스를 종료하는 중인지 여부.
+        ///
+        /// 종료가 시작된 뒤에는 새로운 외부 요청을 처리하지 않는다.
+        /// </summary>
+        private volatile bool _isClosing;
+
+        /// <summary>
+        /// 재생 상태가 변경되는 명령의 세대 번호.
+        ///
+        /// 타이머 동기화 작업을 시작한 뒤 새로운 재생 명령이 실행되면
+        /// 이전 타이머 결과가 현재 화면을 덮어쓰지 않도록 비교한다.
+        /// </summary>
+        private long _playbackCommandVersion;
 
         /// <summary>
         /// PlayerPresenter를 초기화한다.
@@ -88,6 +145,15 @@ namespace CamViewer.Presenters
             _openSettingsFunc = openSettingsFunc;
             _reloadConfigFunc = reloadConfigFunc;
             _launchRequestStore = launchRequestStore;
+
+            /*
+             * 실행 중 Pipe Server가 저장소에 새로운 요청을 저장하면
+             * PlayerPresenter가 이를 감지한다.
+             *
+             * 이벤트는 Pipe 백그라운드 스레드에서 발생할 수 있으므로
+             * 이벤트 처리 메서드에서 UI 스레드로 전환한다.
+             */
+            _launchRequestStore.PendingRequestStored += OnPendingLaunchRequestStored;
 
             _playbackState = PlaybackState.Stopped;
             _lastPlaybackDirection = PlaybackState.Playing;
@@ -135,6 +201,17 @@ namespace CamViewer.Presenters
             object sender,
             EventArgs e)
         {
+            /*
+             * Form Load 이벤트는 WinForms UI 스레드에서 실행된다.
+             *
+             * Named Pipe 백그라운드 스레드에서 수신한 요청을
+             * 안전하게 UI 스레드로 되돌리기 위해 현재 컨텍스트를 저장한다.
+             */
+            _uiSynchronizationContext =
+                SynchronizationContext.Current;
+
+            _isViewLoaded = true;
+
             _view.SetPlaybackTime(null);
             _view.SetPlaybackState(_playbackState);
 
@@ -166,6 +243,167 @@ namespace CamViewer.Presenters
 
 
         /// <summary>
+        /// 실행 요청 저장소에 새로운 요청이 저장되었을 때 호출된다.
+        ///
+        /// 이 메서드는 Named Pipe 수신 백그라운드 스레드에서
+        /// 호출될 수 있으므로 View에 직접 접근하지 않는다.
+        /// </summary>
+        /// <param name="request">
+        /// 저장소에 새로 저장된 실행 요청.
+        /// </param>
+        private void OnPendingLaunchRequestStored(
+            ApplicationLaunchRequest request)
+        {
+            /*
+             * 직접 중복 실행은 기존 창 활성화만 수행해야 하므로
+             * Player의 조회 조건이나 재생 상태를 변경하지 않는다.
+             */
+            if (request == null || !request.IsExternalPlaybackRequest)
+            {
+                return;
+            }
+
+            /*
+             * 종료가 시작된 후 들어온 요청은 처리하지 않는다.
+             */
+            if (_isClosing)
+            {
+                return;
+            }
+
+            Interlocked.Increment(
+                ref _playbackCommandVersion);
+
+            /*
+             * 실행 중인 재생 명령에는 취소를 요청한다.
+             */
+            CancelCurrentPlaybackCommand();
+
+            /*
+             * 설정 화면이 열려 있으면 요청을 저장소에 남겨 둔다.
+             * 설정 창이 닫힌 뒤 OnSettings()에서 처리한다.
+             */
+            if (_isSettingsOpen)
+            {
+                return;
+            }
+
+            SynchronizationContext uiContext = _uiSynchronizationContext;
+
+            /*
+             * Player 화면이 아직 준비되지 않았다면
+             * 요청은 저장소에 그대로 남아 있다.
+             *
+             * 이후 OnLoadView()의 TryTakePendingRequest()가
+             * 해당 요청을 가져와 처리한다.
+             */
+            if (!_isViewLoaded
+                || uiContext == null)
+            {
+                return;
+            }
+
+            /*
+             * Pipe 수신 스레드에서 WinForms 컨트롤에 접근하지 않고
+             * UI 스레드에 요청 처리를 예약한다.
+             */
+            uiContext.Post(
+                async state =>
+                {
+                    await ProcessPendingLaunchRequestsAsync();
+                },
+                null);
+        }
+
+        /// <summary>
+        /// 저장소에 보관된 외부 실행 요청을 UI 스레드에서 처리한다.
+        ///
+        /// 처리 도중 새 요청이 들어오면 저장소의 최신 요청을 계속 확인하여
+        /// 이벤트 호출 시점의 경합으로 요청이 남지 않도록 한다.
+        /// </summary>
+        private async Task ProcessPendingLaunchRequestsAsync()
+        {
+            if( !_isViewLoaded || _isClosing || _isSettingsOpen)
+            {
+                return;
+            }
+            /*
+             * 외부 요청을 처리할 수 있는 동안 계속 확인한다.
+             *
+             * 내부 처리 종료 직전에 새 요청이 저장된 경우에도
+             * 저장소를 다시 확인하여 요청 유실을 막는다.
+             */
+            while (_isViewLoaded && !_isClosing && !_isSettingsOpen)
+            {
+                /*
+                 * 이미 다른 처리 루프가 동작 중이면
+                 * 해당 루프가 저장소의 최신 요청까지 처리한다.
+                 */
+                if (_isPendingLaunchRequestProcessing)
+                {
+                    return;
+                }
+
+                _isPendingLaunchRequestProcessing = true;
+
+                try
+                {
+                    while (_isViewLoaded)
+                    {
+                        /*
+                         * 기존 명령에 취소 요청을 전달했더라도
+                         * finally에서 EndPlaybackCommand()가 실행될 때까지 기다린다.
+                         */
+                        if (_isPlaybackCommandRunning)
+                        {
+                            await Task.Delay(100);
+                            continue;
+                        }
+
+                        ApplicationLaunchRequest pendingRequest;
+
+                        /*
+                         * 저장소에서 가장 최근 요청을 꺼내면서 제거한다.
+                         *
+                         * 처리할 요청이 없으면 현재 내부 루프를 종료한다.
+                         */
+                        if (!_launchRequestStore.TryTakePendingRequest( out pendingRequest))
+                        {
+                            break;
+                        }
+
+                        if (pendingRequest == null
+                            || !pendingRequest.IsExternalPlaybackRequest)
+                        {
+                            continue;
+                        }
+
+                        /*
+                         * 실행 중 전달된 요청이므로
+                         * 기존 영상 대신 새 요청 영상을 재생한다.
+                         */
+                        await ApplyLaunchRequestAsync( pendingRequest, true);
+                    }
+                }
+                finally
+                {
+                    _isPendingLaunchRequestProcessing = false;
+                }
+
+                /*
+                 * 처리 종료 직전에 새 요청이 저장되었는지 다시 확인한다.
+                 *
+                 * 새 요청이 없다면 정상 종료하고,
+                 * 요청이 있으면 외부 while 루프가 다시 처리권을 획득한다.
+                 */
+                if (!_isViewLoaded || !_isClosing || _isSettingsOpen || !_launchRequestStore.HasPendingRequest)
+                {
+                    return;
+                }
+            }
+        }
+
+        /// <summary>
         /// 계산대 선택값이 변경되면 좌/우 채널 정보를 갱신한다.
         /// </summary>
         private void OnCounterChanged(object sender, EventArgs e)
@@ -178,67 +416,139 @@ namespace CamViewer.Presenters
         /// </summary>
         private async void OnPlaybackSpeedChanged(object sender, EventArgs e)
         {
-            if (_isPlaybackCommandRunning)
+            if (!TryBeginPlaybackCommand())
             {
-                _view.SetStatus("재생 명령 처리 중에는 재생속도를 변경할 수 없습니다.");
                 return;
             }
 
-            PlayerPlaybackResult result =
-                await _playbackService.SetPlaybackSpeedAsync(
-                    _view.SelectedPlaybackSpeed,
-                    CancellationToken.None);
+            CancellationToken cancellationToken =
+                GetPlaybackCommandCancellationToken();
 
-            if (!result.Success)
+            try
             {
-                _view.ShowMessage(result.Message);
+                PlayerPlaybackResult result =
+                    await _playbackService.SetPlaybackSpeedAsync(
+                        _view.SelectedPlaybackSpeed,
+                        cancellationToken);
 
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                if (!result.Success)
+                {
+                    _view.ShowMessage(
+                        result.Message);
+
+                    _view.SelectPlaybackSpeed(
+                        _playbackService.CurrentPlaybackSpeed);
+
+                    return;
+                }
+
+                _view.SetPlaybackTime(
+                    _playbackService.CurrentPlaybackTime);
+
+                _view.SetPlaybackState(
+                    _playbackService.CurrentState);
+
+                if (_playbackService.CurrentState
+                        == PlaybackState.Paused
+                    || _playbackService.CurrentState
+                        == PlaybackState.Stopped)
+                {
+                    _view.StopPlaybackTimer();
+                }
+                else
+                {
+                    _view.StartPlaybackTimer();
+                }
+
+                _view.SetStatus(
+                    result.Message);
+            }
+            catch (OperationCanceledException)
+            {
+                /*
+                 * 새로운 외부 요청으로 속도 변경이 취소되었다.
+                 * 서비스의 실제 속도를 다시 화면에 반영한다.
+                 */
                 _view.SelectPlaybackSpeed(
                     _playbackService.CurrentPlaybackSpeed);
 
-                return;
+                _view.SetStatus(
+                    "새로운 외부 요청을 처리하기 위해 "
+                    + "재생속도 변경을 취소했습니다.");
             }
-
-            _view.SetPlaybackTime(
-                _playbackService.CurrentPlaybackTime);
-
-            _view.SetPlaybackState(
-                _playbackService.CurrentState);
-
-            if (_playbackService.CurrentState == PlaybackState.Paused
-                || _playbackService.CurrentState == PlaybackState.Stopped)
+            catch (Exception ex)
             {
-                _view.StopPlaybackTimer();
-            }
-            else
-            {
-                _view.StartPlaybackTimer();
-            }
+                _view.SelectPlaybackSpeed(
+                    _playbackService.CurrentPlaybackSpeed);
 
-            _view.SetStatus(result.Message);
+                _view.ShowMessage(
+                    "재생속도를 변경하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
+            }
+            finally
+            {
+                EndPlaybackCommand();
+            }
         }
 
         /// <summary>
         /// 검색 버튼 클릭 시 현재 조회 조건으로 재생을 시작한다.
         /// </summary>
-        private async void OnSearch(object sender, EventArgs e)
+        private async void OnSearch(
+            object sender,
+            EventArgs e)
         {
             if (!TryBeginPlaybackCommand())
             {
                 return;
             }
 
+            /*
+             * 이번 검색 명령에서 사용할 토큰을
+             * 명령 시작 직후 한 번만 가져온다.
+             */
+            CancellationToken cancellationToken =
+                GetPlaybackCommandCancellationToken();
+
             try
             {
                 PlayerPlaybackResult result =
-                    await PlayFromCurrentSearchRangeAsync();
+                    await PlayFromCurrentSearchRangeAsync( cancellationToken);
 
-                HandlePlaybackCommandResult(result);
+                /*
+                 * 작업 완료 직전에 취소된 경우
+                 * 과거 결과를 화면에 반영하지 않는다.
+                 */
+                cancellationToken.ThrowIfCancellationRequested();
+
+                HandlePlaybackCommandResult(
+                    result);
 
                 if (!result.Success)
                 {
-                    _view.ShowMessage(result.Message);
+                    _view.ShowMessage(
+                        result.Message);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                /*
+                 * 새 외부 요청 등으로 취소된 정상 흐름이다.
+                 * 오류 메시지 창은 표시하지 않는다.
+                 */
+                _view.SetStatus(
+                    "이전 영상 조회 작업이 취소되었습니다.");
+            }
+            catch (Exception ex)
+            {
+                _view.ShowMessage(
+                    "영상 조회 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
             }
             finally
             {
@@ -249,54 +559,85 @@ namespace CamViewer.Presenters
         /// <summary>
         /// 역재생 버튼 요청을 처리한다.
         /// </summary>
-        private async void OnRewind(object sender, EventArgs e)
+        private async void OnRewind(
+            object sender,
+            EventArgs e)
         {
             if (!TryBeginPlaybackCommand())
             {
                 return;
             }
 
+            CancellationToken cancellationToken =
+                GetPlaybackCommandCancellationToken();
+
             try
             {
                 PlayerPlaybackResult result;
 
-                if (_playbackService.CurrentState == PlaybackState.Rewinding)
+                if (_playbackService.CurrentState
+                    == PlaybackState.Rewinding)
                 {
                     result =
                         await _playbackService.PauseAsync(
-                            CancellationToken.None);
+                            cancellationToken);
                 }
-                else if (_playbackService.CurrentState == PlaybackState.Paused
-                    && _lastPlaybackDirection == PlaybackState.Rewinding)
+                else if (_playbackService.CurrentState
+                             == PlaybackState.Paused
+                    && _lastPlaybackDirection
+                             == PlaybackState.Rewinding)
                 {
                     result =
                         await _playbackService.ResumeAsync(
-                            CancellationToken.None);
+                            cancellationToken);
                 }
                 else
                 {
                     result =
                         await _playbackService.RewindAsync(
-                            CancellationToken.None);
+                            cancellationToken);
                 }
 
-                HandlePlaybackCommandResult(result);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                HandlePlaybackCommandResult(
+                    result);
 
                 if (!result.Success)
                 {
-                    _view.ShowMessage(result.Message);
                     return;
                 }
 
                 DateTime? playbackTime =
-                    await _playbackService.SyncPlaybackTimeAsync(
-                        CancellationToken.None);
+                    await _playbackService
+                        .SyncPlaybackTimeAsync(
+                            cancellationToken);
 
-                _view.SetPlaybackTime(playbackTime);
-                _view.SetTimelinePlaybackTime(playbackTime);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                _view.SetPlaybackTime(
+                    playbackTime);
+
+                _view.SetTimelinePlaybackTime(
+                    playbackTime);
 
                 UpdatePlaybackTimerState();
                 UpdatePlaybackStateDisplay();
+            }
+            catch (OperationCanceledException)
+            {
+                _view.SetStatus(
+                    "새로운 외부 요청을 처리하기 위해 "
+                    + "기존 역재생 명령을 취소했습니다.");
+            }
+            catch (Exception ex)
+            {
+                _view.ShowMessage(
+                    "역재생 상태를 변경하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
             }
             finally
             {
@@ -306,39 +647,69 @@ namespace CamViewer.Presenters
 
 
         /// <summary>
-        /// 10초 전 이동 요청을 처리한다.
+        /// 설정된 시간만큼 이전 위치로 이동한다.
         /// </summary>
-        private async void OnSeekBackward10(object sender, EventArgs e)
+        private async void OnSeekBackward10(
+            object sender,
+            EventArgs e)
         {
             if (!TryBeginPlaybackCommand())
             {
                 return;
             }
 
+            CancellationToken cancellationToken =
+                GetPlaybackCommandCancellationToken();
+
             try
             {
-                int seconds = _view.TimeAdjustSeconds;
+                int seconds =
+                    _view.TimeAdjustSeconds;
 
                 PlayerPlaybackResult result =
                     await _playbackService.SeekSecondsAsync(
                         -seconds,
-                        CancellationToken.None);
+                        cancellationToken);
 
-                HandlePlaybackCommandResult(result);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                HandlePlaybackCommandResult(
+                    result);
 
                 if (!result.Success)
                 {
                     return;
                 }
 
-
                 DateTime? playbackTime =
-                    await _playbackService.SyncPlaybackTimeAsync(
-                        CancellationToken.None);
+                    await _playbackService
+                        .SyncPlaybackTimeAsync(
+                            cancellationToken);
 
-                _view.SetPlaybackTime(playbackTime);
-                _view.SetTimelinePlaybackTime(playbackTime);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                _view.SetPlaybackTime(
+                    playbackTime);
+
+                _view.SetTimelinePlaybackTime(
+                    playbackTime);
+
                 _view.StartPlaybackTimer();
+            }
+            catch (OperationCanceledException)
+            {
+                _view.SetStatus(
+                    "새로운 외부 요청을 처리하기 위해 "
+                    + "이전 위치 이동 작업을 취소했습니다.");
+            }
+            catch (Exception ex)
+            {
+                _view.ShowMessage(
+                    "이전 위치로 이동하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
             }
             finally
             {
@@ -356,6 +727,7 @@ namespace CamViewer.Presenters
             {
                 return;
             }
+             CancellationToken cancellationToken = GetPlaybackCommandCancellationToken();
 
             try
             {
@@ -363,35 +735,28 @@ namespace CamViewer.Presenters
 
                 if (_playbackService.CurrentState == PlaybackState.Playing)
                 {
-                    result =
-                        await _playbackService.PauseAsync(
-                            CancellationToken.None);
+                    result = await _playbackService.PauseAsync( cancellationToken);
                 }
                 else if (_playbackService.CurrentState == PlaybackState.Paused
                     && _lastPlaybackDirection == PlaybackState.Playing)
                 {
-                    result =
-                        await _playbackService.ResumeAsync(
-                            CancellationToken.None);
+                    result = await _playbackService.ResumeAsync(cancellationToken);
                 }
                 else if (_playbackService.CurrentState == PlaybackState.Rewinding)
                 {
-                    result =
-                        await _playbackService.PlayForwardFromCurrentTimeAsync(
-                            CancellationToken.None);
+                    result = await _playbackService.PlayForwardFromCurrentTimeAsync(cancellationToken);
                 }
                 else if (_playbackService.CurrentState == PlaybackState.Paused
                     && _lastPlaybackDirection == PlaybackState.Rewinding)
                 {
-                    result =
-                        await _playbackService.PlayForwardFromCurrentTimeAsync(
-                            CancellationToken.None);
+                    result = await _playbackService.PlayForwardFromCurrentTimeAsync(cancellationToken);
                 }
                 else
                 {
-                    result =
-                        await PlayFromCurrentSearchRangeAsync();
+                    result = await PlayFromCurrentSearchRangeAsync(cancellationToken);
                 }
+
+                cancellationToken.ThrowIfCancellationRequested();
 
                 HandlePlaybackCommandResult(result);
 
@@ -400,8 +765,7 @@ namespace CamViewer.Presenters
                     return;
                 }
 
-                DateTime? playbackTime =
-                    _playbackService.CurrentPlaybackTime;
+                DateTime? playbackTime = _playbackService.CurrentPlaybackTime;
 
                 _view.SetPlaybackTime(playbackTime);
                 _view.SetTimelinePlaybackTime(playbackTime);
@@ -409,52 +773,73 @@ namespace CamViewer.Presenters
                 UpdatePlaybackTimerState();
                 UpdatePlaybackStateDisplay();
             }
+            catch (OperationCanceledException)
+            {
+                _view.SetStatus("새로운 외부 요청을 처리하기 위"
+                    + "기존 재생 명령을 취소했습니다.");
+            }
+            catch (Exception ex)
+            {
+                _view.SetStatus(
+                    "재생 상태를 변경하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.ToString());
+            }
             finally
             {
                 EndPlaybackCommand();
             }
         }
 
-        private async Task ApplyVideoSourceInfoAsync(
-    PlayerPlaybackRequest request)
-        {
-            if (request == null || request.Channels == null)
-            {
-                return;
-            }
-
-            foreach (PlayerChannelTarget channel in request.Channels)
-            {
-                PlayerVideoSourceInfoResult infoResult =
-                    await _playbackService.GetVideoSourceInfoAsync(
-                        channel,
-                        CancellationToken.None);
-
-                if (!infoResult.Success)
-                {
-                    continue;
+        /// <summary> 
+        /// 재생 대상 채널의 실제 영상 해상도를 조회하여 View에 반영한다. 
+        /// </summary> 
+        /// <param name="request"> 
+        /// 해상도를 조회할 재생 요청. 
+        /// </param> 
+        /// <param name="cancellationToken"> 
+        /// 현재 재생 명령의 취소 토큰. 
+        /// </param> 
+        private async Task ApplyVideoSourceInfoAsync( PlayerPlaybackRequest request, CancellationToken cancellationToken) 
+        { 
+            if (request == null || request.Channels == null) 
+            { 
+                return; 
+            } 
+            foreach (PlayerChannelTarget channel in request.Channels) 
+            { 
+                cancellationToken .ThrowIfCancellationRequested(); 
+                PlayerVideoSourceInfoResult infoResult = await _playbackService .GetVideoSourceInfoAsync( channel, cancellationToken); 
+                cancellationToken .ThrowIfCancellationRequested(); 
+                if (!infoResult.Success) 
+                { 
+                    continue; 
                 }
-
-                _view.SetVideoSourceSize(
-                    infoResult.ScreenPosition,
-                    infoResult.Width,
-                    infoResult.Height);
-            }
-
-            _view.UpdateVideoLayout();
+                
+                _view.SetVideoSourceSize( infoResult.ScreenPosition, infoResult.Width, infoResult.Height); 
+            } 
+            
+            cancellationToken .ThrowIfCancellationRequested(); 
+            
+            _view.UpdateVideoLayout(); 
         }
 
 
         /// <summary>
         /// 현재 PlayerView의 조회 조건을 기준으로 재생을 시작한다.
         /// </summary>
-        private async Task<PlayerPlaybackResult> PlayFromCurrentSearchRangeAsync()
+        private async Task<PlayerPlaybackResult> PlayFromCurrentSearchRangeAsync(CancellationToken cancellationToken)
         {
             PlayerPlaybackRequest request;
 
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 request = BuildPlaybackRequest();
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -465,12 +850,13 @@ namespace CamViewer.Presenters
 
             _view.StopPlaybackTimer();
 
-            await ApplyVideoSourceInfoAsync(request);
+            await ApplyVideoSourceInfoAsync(request, cancellationToken);
 
-            PlayerPlaybackResult playResult =
-                await _playbackService.PlayAsync(
-                    request,
-                    CancellationToken.None);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            PlayerPlaybackResult playResult = await _playbackService.PlayAsync( request, cancellationToken);
+
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (!playResult.Success)
             {
@@ -479,14 +865,12 @@ namespace CamViewer.Presenters
 
                 _view.SetPlaybackTime(
                     _playbackService.CurrentPlaybackTime);
+
                 _view.SetTimelinePlaybackTime(
                     _playbackService.CurrentPlaybackTime);
-
-
                 return playResult;
             }
-            DateTime? playbackTime =
-                _playbackService.CurrentPlaybackTime;
+            DateTime? playbackTime = _playbackService.CurrentPlaybackTime;
 
             _view.SetPlaybackTime(playbackTime);
 
@@ -503,15 +887,21 @@ namespace CamViewer.Presenters
 
             return playResult;
         }
+
         /// <summary>
-        /// 10초 뒤 이동 요청을 처리한다.
+        /// 설정된 시간만큼 이후 위치로 이동한다.
         /// </summary>
-        private async void OnSeekForward10(object sender, EventArgs e)
+        private async void OnSeekForward10(
+            object sender,
+            EventArgs e)
         {
             if (!TryBeginPlaybackCommand())
             {
                 return;
             }
+
+            CancellationToken cancellationToken =
+                GetPlaybackCommandCancellationToken();
 
             try
             {
@@ -521,23 +911,47 @@ namespace CamViewer.Presenters
                 PlayerPlaybackResult result =
                     await _playbackService.SeekSecondsAsync(
                         seconds,
-                        CancellationToken.None);
+                        cancellationToken);
 
-                HandlePlaybackCommandResult(result);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                HandlePlaybackCommandResult(
+                    result);
 
                 if (!result.Success)
                 {
-                    _view.ShowMessage(result.Message);
                     return;
                 }
 
                 DateTime? playbackTime =
-                    await _playbackService.SyncPlaybackTimeAsync(
-                        CancellationToken.None);
+                    await _playbackService
+                        .SyncPlaybackTimeAsync(
+                            cancellationToken);
 
-                _view.SetPlaybackTime(playbackTime);
-                _view.SetTimelinePlaybackTime(playbackTime);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                _view.SetPlaybackTime(
+                    playbackTime);
+
+                _view.SetTimelinePlaybackTime(
+                    playbackTime);
+
                 _view.StartPlaybackTimer();
+            }
+            catch (OperationCanceledException)
+            {
+                _view.SetStatus(
+                    "새로운 외부 요청을 처리하기 위해 "
+                    + "이후 위치 이동 작업을 취소했습니다.");
+            }
+            catch (Exception ex)
+            {
+                _view.ShowMessage(
+                    "이후 위치로 이동하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
             }
             finally
             {
@@ -555,61 +969,167 @@ namespace CamViewer.Presenters
                 return;
             }
 
+            CancellationToken cancellationToken =
+                GetPlaybackCommandCancellationToken();
+
             try
             {
                 _view.StopPlaybackTimer();
 
                 PlayerPlaybackResult result =
                     await _playbackService.StopAsync(
-                        CancellationToken.None);
+                        cancellationToken);
 
-                HandlePlaybackCommandResult(result);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
 
-                _view.SetPlaybackTime(null);
-                _view.SetTimelinePlaybackTime(null);
+                HandlePlaybackCommandResult(
+                    result);
+
+                if (!result.Success)
+                {
+                    return;
+                }
+
+                _view.SetPlaybackTime(
+                    null);
+
+                _view.SetTimelinePlaybackTime(
+                    null);
 
                 _view.SetPlaybackState(
                     _playbackService.CurrentState);
             }
+            catch (OperationCanceledException)
+            {
+                /*
+                 * 새로운 외부 요청이 들어온 경우 정지 처리 완료를 기다리지 않고
+                 * 최신 외부 요청 처리 흐름으로 넘어간다.
+                 */
+                _view.SetStatus(
+                    "새로운 외부 요청을 처리하기 위해 "
+                    + "기존 정지 작업을 취소했습니다.");
+            }
+            catch (Exception ex)
+            {
+                _view.ShowMessage(
+                    "영상을 정지하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
+            }
             finally
             {
                 EndPlaybackCommand();
-            }            
+            }
         }
 
         /// <summary>
         /// PlayerView 종료 요청을 처리한다.
-        /// NVR 재생과 privier 리소스를 정리한 뒤 화면을 닫는다.
+        ///
+        /// 현재 진행 중인 재생 명령을 취소하고,
+        /// Pipe 이벤트와 NVR 재생 리소스를 정리한 뒤 화면을 닫는다.
         /// </summary>
-        private async void OnClose(object sender, EventArgs e)
+        private async void OnClose( object sender, EventArgs e)
         {
-            if (_isPlaybackCommandRunning)
+            if (_isClosing)
             {
-                               _view.ShowMessage(
-                    "재생 명령을 처리 중입니다."
-                    + Environment.NewLine
-                    + "처리가 완료된 후 whdfygo 주세요.");
                 return;
             }
 
-            if (!TryBeginPlaybackCommand())
+            _isClosing = true;
+            _isViewLoaded = false;
+
+            /*
+             * 종료가 시작된 이후에는 새로운 Pipe 요청이
+             * PlayerPresenter로 전달되지 않도록 먼저 구독을 해제한다.
+             */
+            _launchRequestStore.PendingRequestStored -= OnPendingLaunchRequestStored;
+
+            /*
+             * 아직 처리하지 않은 실행 요청은 종료 시 폐기한다.
+             */
+            _launchRequestStore.Clear();
+
+            _view.StopPlaybackTimer();
+
+            /*
+             * 현재 실행 중인 NVR 명령에 취소를 요청한다.
+             */
+            CancelCurrentPlaybackCommand();
+
+            /*
+             * 기존 명령의 finally에서 EndPlaybackCommand()가 실행될 때까지
+             * 최대 5초 동안 기다린다.
+             */
+            DateTime waitLimit = DateTime.UtcNow.AddSeconds(5);
+
+            while (_isPlaybackCommandRunning && DateTime.UtcNow < waitLimit)
             {
-                return;
+                await Task.Delay(50);
             }
 
             try
             {
-                _view.StopPlaybackTimer();
+                /*
+                 * 기존 명령이 정상적으로 종료된 경우에만
+                 * 마지막 Stop 명령을 별도로 실행한다.
+                 *
+                 * 아직 명령이 끝나지 않았다면 Dispose를 통해
+                 * Provider 리소스 정리를 시도한다.
+                 */
+                if (!_isPlaybackCommandRunning)
+                {
+                    using (var closeCancellationTokenSource = new CancellationTokenSource())
+                    {
+                        closeCancellationTokenSource
+                            .CancelAfter( TimeSpan.FromSeconds(5));
 
-                await _playbackService.StopAsync(CancellationToken.None);
-
-                _playbackService.Dispose();
-
-                _view.CloseView();
+                        try
+                        {
+                            await _playbackService.StopAsync( closeCancellationTokenSource.Token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            /*
+                             * 종료 시 정지 명령이 제한시간을 넘긴 경우에도
+                             * 애플리케이션 종료는 계속 진행한다.
+                             */
+                        }
+                    }
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                /*
+                 * 다른 종료 경로에서 서비스가 먼저 해제된 경우이다.
+                 */
+            }
+            catch (Exception ex)
+            {
+                /*
+                 * 종료 자체를 막지는 않고 상태만 기록한다.
+                 */
+                _view.SetStatus(
+                    "재생 리소스 정리 중 오류가 발생했습니다. "
+                    + ex.Message);
             }
             finally
             {
-                EndPlaybackCommand();
+                try
+                {
+                    _playbackService.Dispose();
+                }
+                catch
+                {
+                    /*
+                     * 종료 단계에서는 Dispose 오류로
+                     * 애플리케이션 종료를 중단하지 않는다.
+                     */
+                }
+
+                _uiSynchronizationContext = null;
+
+                _view.CloseView();
             }
         }
 
@@ -768,27 +1288,42 @@ namespace CamViewer.Presenters
 
         /// <summary>
         /// PlayerView에서 설정 버튼 클릭 시 설정 화면을 연다.
-        /// 재생 중이면 먼저 재생을 정지한 뒤 설정 화면을 실행한다.
-        /// 설정 저장 후에는 로컬 설정을 다시 불러와 화면을 갱신한다.
+        ///
+        /// 재생 중이면 먼저 재생을 정지한다.
+        /// 설정 화면이 열린 동안 들어온 외부 요청은 저장소에 보관하고,
+        /// 설정 화면이 닫힌 뒤 최신 요청을 처리한다.
         /// </summary>
         private async void OnSettings(object sender, EventArgs e)
         {
+            if (_isClosing
+                || _isSettingsOpen)
+            {
+                return;
+            }
+
             if (_isPlaybackCommandRunning)
             {
                 _view.ShowMessage(
                     "재생 명령을 처리 중입니다."
                     + Environment.NewLine
                     + "처리가 완료된 후 설정을 열어 주세요.");
+
                 return;
             }
 
             if (_openSettingsFunc == null)
             {
-                _view.ShowMessage("설정 화면 실행 구성이 없습니다.");
+                _view.ShowMessage(
+                    "설정 화면 실행 구성이 없습니다.");
+
                 return;
             }
 
-            if (_playbackService.CurrentState != PlaybackState.Stopped)
+            /*
+             * 영상 재생 중이라면 설정 화면을 열기 전에 정지한다.
+             */
+            if (_playbackService.CurrentState
+                != PlaybackState.Stopped)
             {
                 bool confirmStop =
                     _view.Confirm(
@@ -803,49 +1338,117 @@ namespace CamViewer.Presenters
                     return;
                 }
 
-                _view.StopPlaybackTimer();
-
-                PlayerPlaybackResult stopResult =
-                    await _playbackService.StopAsync(
-                        CancellationToken.None);
-
-                if (!stopResult.Success)
+                if (!TryBeginPlaybackCommand())
                 {
-                    _view.ShowMessage(stopResult.Message);
                     return;
                 }
 
-                _view.SetPlaybackTime(null);
-                _view.SetPlaybackState(_playbackService.CurrentState);
-                _view.SetStatus("재생을 중지했습니다.");
+                CancellationToken cancellationToken = GetPlaybackCommandCancellationToken();
+
+                try
+                {
+                    _view.StopPlaybackTimer();
+
+                    PlayerPlaybackResult stopResult = await _playbackService.StopAsync(cancellationToken);
+
+                    cancellationToken .ThrowIfCancellationRequested();
+
+                    if (!stopResult.Success)
+                    {
+                        _view.ShowMessage(stopResult.Message);
+
+                        return;
+                    }
+
+                    _view.SetPlaybackTime(null);
+
+                    _view.SetTimelinePlaybackTime(null);
+
+                    _view.SetPlaybackState(_playbackService.CurrentState);
+
+                    _view.SetStatus("재생을 중지했습니다.");
+                }
+                catch (OperationCanceledException)
+                {
+                    /*
+                     * 정지 처리 도중 외부 요청이 들어온 경우
+                     * 설정 화면을 열지 않고 최신 외부 요청을 우선 처리한다.
+                     */
+                    _view.SetStatus(
+                        "새로운 외부 요청으로 인해 "
+                        + "설정 화면 실행을 취소했습니다.");
+
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _view.ShowMessage(
+                        "설정 화면을 열기 위해 영상을 정지하는 중 "
+                        + "오류가 발생했습니다."
+                        + Environment.NewLine
+                        + ex.Message);
+
+                    return;
+                }
+                finally
+                {
+                    EndPlaybackCommand();
+                }
             }
 
-            bool saved = _openSettingsFunc();
+            /*
+             * 여기부터는 설정 창이 열린 동안 외부 요청 자동 실행을 보류한다.
+             */
+            _isSettingsOpen = true;
 
-            if (!saved)
+            try
             {
-                return;
-            }
+                bool saved = _openSettingsFunc();
 
-            if (_reloadConfigFunc == null)
+                if (!saved)
+                {
+                    return;
+                }
+
+                if (_reloadConfigFunc == null)
+                {
+                    return;
+                }
+
+                ViewerConfig reloadedConfig = _reloadConfigFunc();
+
+                if (reloadedConfig == null)
+                {
+                    _view.ShowMessage( "변경된 설정을 다시 불러오지 못했습니다.");
+
+                    return;
+                }
+
+                _viewerConfig = reloadedConfig;
+
+                ReloadViewByConfig();
+
+                _view.SetStatus( "설정이 변경되어 화면을 갱신했습니다.");
+            }
+            catch (Exception ex)
             {
-                return;
+                _view.ShowMessage( "설정 화면을 처리하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
             }
-
-            ViewerConfig reloadedConfig =
-                _reloadConfigFunc();
-
-            if (reloadedConfig == null)
+            finally
             {
-                _view.ShowMessage("변경된 설정을 다시 불러오지 못했습니다.");
-                return;
+                _isSettingsOpen = false;
+
+                /*
+                 * 설정 창이 열린 동안 외부 요청이 들어왔다면
+                 * 설정 반영이 끝난 후 최신 요청을 처리한다.
+                 */
+                if (_isViewLoaded && !_isClosing && _launchRequestStore.HasPendingRequest)
+                {
+                    await ProcessPendingLaunchRequestsAsync();
+                }
             }
-
-            _viewerConfig = reloadedConfig;
-
-            ReloadViewByConfig();
-
-            _view.SetStatus("설정이 변경되어 화면을 갱신했습니다.");
         }
 
         /// <summary>
@@ -1163,39 +1766,92 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
-        /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치를 화면에 반영한다.
-        /// Provider가 실제 재생시간을 제공하면 실제 시간을 사용하고,
-        /// 제공하지 못하면 추정 시간을 사용한다.
+        /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치와
+        /// 좌우 동기화 상태를 화면에 반영한다.
+        ///
+        /// 타이머 조회 도중 새로운 재생 명령이 시작되면
+        /// 이전 조회 결과는 화면에 반영하지 않는다.
         /// </summary>
-        /// <summary>
-        /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치와 좌/우 동기화 상태를 화면에 반영한다.
-        /// </summary>
-        private async void OnPlaybackTimerTick(object sender, EventArgs e)
+        private async void OnPlaybackTimerTick( object sender, EventArgs e)
         {
-            if (_isPlaybackTimerTickRunning)
+            /*
+             * 이전 Tick이 아직 처리 중이거나
+             * 재생 명령이 실행 중이면 이번 Tick은 건너뛴다.
+             */
+            if (_isPlaybackTimerTickRunning
+                || _isPlaybackCommandRunning
+                || !_isViewLoaded)
             {
                 return;
             }
 
             _isPlaybackTimerTickRunning = true;
 
+            /*
+             * 이번 타이머 작업이 시작된 시점의 명령 버전을 보관한다.
+             */
+            long commandVersion =
+                Interlocked.Read(ref _playbackCommandVersion);
+
             try
             {
-                DateTime? playbackTime =
-                    await _playbackService.SyncPlaybackTimeAsync(
-                        CancellationToken.None);
+                DateTime? playbackTime = await _playbackService .SyncPlaybackTimeAsync(CancellationToken.None);
+
+                /*
+                 * 조회 도중 새로운 재생 명령이 시작되었다면
+                 * 과거 재생시간을 현재 화면에 적용하지 않는다.
+                 */
+                if (!_isViewLoaded
+                    || _isPlaybackCommandRunning
+                    || commandVersion
+                        != Interlocked.Read(ref _playbackCommandVersion))
+                {
+                    return;
+                }
 
                 _view.SetPlaybackTime(playbackTime);
+
                 _view.SetTimelinePlaybackTime(playbackTime);
 
                 PlaybackSyncStatus syncStatus =
-                    await _playbackService.GetPlaybackSyncStatusAsync(
-                        CancellationToken.None);
+                    await _playbackService
+                        .GetPlaybackSyncStatusAsync(CancellationToken.None);
+
+                /*
+                 * 동기화 상태를 가져오는 동안에도
+                 * 새로운 명령이 시작될 수 있으므로 다시 확인한다.
+                 */
+                if (!_isViewLoaded
+                    || _isPlaybackCommandRunning
+                    || commandVersion
+                        != Interlocked.Read(ref _playbackCommandVersion))
+                {
+                    return;
+                }
 
                 if (syncStatus != null)
                 {
-                    _view.SetPlaybackSyncStatus(
-                        syncStatus.ToDisplayText());
+                    _view.SetPlaybackSyncStatus(syncStatus.ToDisplayText());
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                /*
+                 * Player 종료와 타이머 조회가 동시에 발생한 경우에는
+                 * 종료 과정의 정상적인 경합으로 처리한다.
+                 */
+            }
+            catch (Exception ex)
+            {
+                /*
+                 * 반복되는 타이머 오류에서 메시지 창을 계속 띄우지 않고
+                 * 상태 영역에만 오류를 표시한다.
+                 */
+                if (_isViewLoaded)
+                {
+                    _view.SetStatus(
+                        "재생시간을 동기화하지 못했습니다. "
+                        + ex.Message);
                 }
             }
             finally
@@ -1207,37 +1863,74 @@ namespace CamViewer.Presenters
         /// <summary>
         /// 영상 동기화 버튼 요청을 처리한다.
         /// </summary>
-        private async void OnSync(object sender, EventArgs e)
+        private async void OnSync(object sender,EventArgs e)
         {
             if (!TryBeginPlaybackCommand())
             {
                 return;
             }
 
+            CancellationToken cancellationToken =
+                GetPlaybackCommandCancellationToken();
+
             try
             {
                 PlayerPlaybackResult result =
-                    await _playbackService.ResyncPlaybackSessionsAsync(
-                        CancellationToken.None);
+                    await _playbackService
+                        .ResyncPlaybackSessionsAsync(
+                            cancellationToken);
 
-                HandlePlaybackCommandResult(result);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                HandlePlaybackCommandResult(
+                    result);
+
+                if (!result.Success)
+                {
+                    return;
+                }
 
                 DateTime? playbackTime =
-                    await _playbackService.SyncPlaybackTimeAsync(
-                        CancellationToken.None);
+                    await _playbackService
+                        .SyncPlaybackTimeAsync(
+                            cancellationToken);
 
-                _view.SetPlaybackTime(playbackTime);
-                _view.SetTimelinePlaybackTime(playbackTime);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                _view.SetPlaybackTime(
+                    playbackTime);
+
+                _view.SetTimelinePlaybackTime(
+                    playbackTime);
 
                 PlaybackSyncStatus syncStatus =
-                    await _playbackService.GetPlaybackSyncStatusAsync(
-                        CancellationToken.None);
+                    await _playbackService
+                        .GetPlaybackSyncStatusAsync(
+                            cancellationToken);
+
+                cancellationToken
+                    .ThrowIfCancellationRequested();
 
                 if (syncStatus != null)
                 {
                     _view.SetPlaybackSyncStatus(
                         syncStatus.ToDisplayText());
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                _view.SetStatus(
+                    "새로운 외부 요청을 처리하기 위해 "
+                    + "영상 동기화 작업을 취소했습니다.");
+            }
+            catch (Exception ex)
+            {
+                _view.ShowMessage(
+                    "영상을 동기화하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
             }
             finally
             {
@@ -1246,7 +1939,7 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
-        /// 타임라인 클릭 이동 요청을 처리한다.
+        /// 타임라인 클릭에 따른 재생 위치 이동 요청을 처리한다.
         /// </summary>
         private async void OnTimelineSeekRequested(
             object sender,
@@ -1257,28 +1950,55 @@ namespace CamViewer.Presenters
                 return;
             }
 
+            CancellationToken cancellationToken =
+                GetPlaybackCommandCancellationToken();
+
             try
             {
                 PlayerPlaybackResult result =
                     await _playbackService.SeekToTimeAsync(
                         e.TargetTime,
-                        CancellationToken.None);
+                        cancellationToken);
 
-                HandlePlaybackCommandResult(result);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                HandlePlaybackCommandResult(
+                    result);
 
                 if (!result.Success)
                 {
-                    _view.ShowMessage(result.Message);
                     return;
                 }
 
                 DateTime? playbackTime =
-                    await _playbackService.SyncPlaybackTimeAsync(
-                        CancellationToken.None);
+                    await _playbackService
+                        .SyncPlaybackTimeAsync(
+                            cancellationToken);
 
-                _view.SetPlaybackTime(playbackTime);
-                _view.SetTimelinePlaybackTime(playbackTime);
+                cancellationToken
+                    .ThrowIfCancellationRequested();
+
+                _view.SetPlaybackTime(
+                    playbackTime);
+
+                _view.SetTimelinePlaybackTime(
+                    playbackTime);
+
                 _view.StartPlaybackTimer();
+            }
+            catch (OperationCanceledException)
+            {
+                _view.SetStatus(
+                    "새로운 외부 요청을 처리하기 위해 "
+                    + "타임라인 이동 작업을 취소했습니다.");
+            }
+            catch (Exception ex)
+            {
+                _view.ShowMessage(
+                    "타임라인 위치로 이동하는 중 오류가 발생했습니다."
+                    + Environment.NewLine
+                    + ex.Message);
             }
             finally
             {
@@ -1460,6 +2180,8 @@ namespace CamViewer.Presenters
                 return;
             }
 
+            CancellationToken cancellationToken = GetPlaybackCommandCancellationToken();
+
             try
             {
                 /*
@@ -1483,7 +2205,8 @@ namespace CamViewer.Presenters
 
                     PlayerPlaybackResult stopResult =
                         await _playbackService.StopAsync(
-                            CancellationToken.None);
+                            cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
 
                     if (!stopResult.Success)
                     {
@@ -1516,7 +2239,9 @@ namespace CamViewer.Presenters
                  * 외부 요청은 조회 범위를 적용한 뒤 즉시 영상을 재생한다.
                  */
                 PlayerPlaybackResult playResult =
-                    await PlayFromCurrentSearchRangeAsync();
+                    await PlayFromCurrentSearchRangeAsync( cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
 
                 HandlePlaybackCommandResult(
                     playResult);
@@ -1528,6 +2253,18 @@ namespace CamViewer.Presenters
 
                 UpdatePlaybackTimerState();
                 UpdatePlaybackStateDisplay();
+            }
+            catch (OperationCanceledException)
+            {
+                /*
+                 * 현재 외부 요청을 처리하는 도중
+                 * 더 최근의 외부 요청이 들어온 경우이다.
+                 *
+                 * 오류로 취급하지 않고 최신 요청 처리로 넘어간다.
+                 */
+                _view.SetStatus(
+                    "새로운 외부 요청을 처리하기 위해 "
+                    + "이전 재생 작업을 취소했습니다.");
             }
             catch (Exception ex)
             {
@@ -1542,61 +2279,117 @@ namespace CamViewer.Presenters
             }
         }
 
+
         /// <summary>
-        /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치와 좌/우 동기화 상태를 화면에 반영한다.
+        /// 새로운 재생 명령을 시작한다.
+        ///
+        /// 명령이 시작되면 해당 명령에서 사용할
+        /// CancellationTokenSource를 생성한다.
         /// </summary>
-        //private async void OnPlaybackTimerTick(object sender, EventArgs e)
-        //{
-        //    if (_isPlaybackTimerTickRunning)
-        //    {
-        //        return;
-        //    }
-
-        //    _isPlaybackTimerTickRunning = true;
-
-        //    try
-        //    {
-        //        DateTime? playbackTime =
-        //            await _playbackService.SyncPlaybackTimeAsync(
-        //                CancellationToken.None);
-
-        //        _view.SetPlaybackTime(playbackTime);
-
-        //        PlaybackSyncStatus syncStatus =
-        //            await _playbackService.GetPlaybackSyncStatusAsync(
-        //                CancellationToken.None);
-
-        //        if (syncStatus != null)
-        //        {
-        //            _view.SetPlaybackSyncStatus(
-        //                syncStatus.ToDisplayText());
-        //        }
-        //    }
-        //    finally
-        //    {
-        //        _isPlaybackTimerTickRunning = false;
-        //    }
-        //}
-
-
         private bool TryBeginPlaybackCommand()
         {
-            if (_isPlaybackCommandRunning)
+            lock (_playbackCommandCancellationSyncRoot)
             {
-                _view.SetStatus("이전 재생 명령을 처리 중입니다.");
-                return false;
-            }
+                if (_isPlaybackCommandRunning)
+                {
+                    _view.SetStatus(
+                        "이전 재생 명령을 처리 중입니다.");
 
-            _isPlaybackCommandRunning = true;
-            return true;
+                    return false;
+                }
+
+                _playbackCommandCancellationTokenSource =
+                    new CancellationTokenSource();
+
+                /*
+                 * 새로운 재생 명령이 시작되었으므로
+                 * 이전 비동기 조회 결과를 무효화한다.
+                 */
+                Interlocked.Increment(
+                    ref _playbackCommandVersion);
+
+                _isPlaybackCommandRunning = true;
+
+                return true;
+            }
         }
 
         /// <summary>
-        /// 재생 명령 실행 상태를 해제한다.
+        /// 현재 실행 중인 재생 명령의 취소 토큰을 반환한다.
+        ///
+        /// 실행 중인 명령이 없으면 취소할 수 없는 기본 토큰을 반환한다.
+        /// </summary>
+        private CancellationToken GetPlaybackCommandCancellationToken()
+        {
+            lock (_playbackCommandCancellationSyncRoot)
+            {
+                if (_playbackCommandCancellationTokenSource == null)
+                {
+                    return CancellationToken.None;
+                }
+
+                return _playbackCommandCancellationTokenSource.Token;
+            }
+        }
+
+        /// <summary>
+        /// 현재 실행 중인 재생 명령에 취소를 요청한다.
+        ///
+        /// 이 메서드는 Named Pipe 백그라운드 스레드에서도
+        /// 호출될 수 있으므로 내부 접근을 lock으로 보호한다.
+        /// </summary>
+        private void CancelCurrentPlaybackCommand()
+        {
+            CancellationTokenSource cancellationTokenSource;
+
+            lock (_playbackCommandCancellationSyncRoot)
+            {
+                cancellationTokenSource =
+                    _playbackCommandCancellationTokenSource;
+            }
+
+            if (cancellationTokenSource == null
+                || cancellationTokenSource.IsCancellationRequested)
+            {
+                return;
+            }
+
+            try
+            {
+                cancellationTokenSource.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                /*
+                 * 작업 종료와 취소 요청이 동시에 발생한 경우
+                 * 이미 해제된 토큰에 대한 예외는 무시한다.
+                 */
+            }
+        }
+
+        /// <summary>
+        /// 재생 명령 실행 상태와 취소 토큰을 정리한다.
         /// </summary>
         private void EndPlaybackCommand()
         {
-            _isPlaybackCommandRunning = false;
+            CancellationTokenSource cancellationTokenSource;
+
+            lock (_playbackCommandCancellationSyncRoot)
+            {
+                cancellationTokenSource =
+                    _playbackCommandCancellationTokenSource;
+
+                _playbackCommandCancellationTokenSource =
+                    null;
+
+                _isPlaybackCommandRunning =
+                    false;
+            }
+
+            if (cancellationTokenSource != null)
+            {
+                cancellationTokenSource.Dispose();
+            }
         }
 
         /// <summary>

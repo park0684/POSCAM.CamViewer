@@ -1,4 +1,5 @@
-﻿using CamViewer.Interfaces;
+﻿using CamViewer.Infrastructure;
+using CamViewer.Interfaces;
 using CamViewer.Models;
 using CamViewer.Nvr.Core.Abstractions;
 using CamViewer.Nvr.Core.Providers;
@@ -25,23 +26,14 @@ namespace CamViewer
         /// 처리 순서:
         /// 1. Windows Forms 실행 환경 초기화
         /// 2. 프로그램 실행 인자 분석
-        /// 3. 직접 실행 또는 외부 영상 조회 요청 생성
-        /// 4. Player 화면이 준비될 때까지 실행 요청 저장
-        /// 5. 인증 및 설정 확인을 담당하는 Landing 화면 실행
-        /// 6. 인증 완료 후 PlayerPresenter에 동일한 요청 저장소 전달
+        /// 3. 단일 인스턴스 실행 권한 확인
+        /// 4. 중복 직접 실행이면 기존 창 활성화 후 종료
+        /// 5. 중복 외부 실행이면 기존 프로세스로 영상 요청 전송 후 종료
+        /// 6. 최초 프로세스이면 Named Pipe 서버 시작
+        /// 7. 최초 실행 요청을 메모리 저장소에 보관
+        /// 8. 인증 및 설정 확인을 담당하는 Landing 화면 실행
+        /// 9. 인증 완료 후 PlayerPresenter에 동일한 요청 저장소 전달
         /// </summary>
-        /// <param name="args">
-        /// 프로그램 실행 시 전달된 명령행 인자.
-        ///
-        /// 직접 실행:
-        /// CamViewer.exe
-        ///
-        /// 외부 시간 전달:
-        /// CamViewer.exe --playback-time "2026-06-15T14:30:00"
-        ///
-        /// 외부 시간 및 계산대 전달:
-        /// CamViewer.exe --playback-time "2026-06-15T14:30:00" --counter 2
-        /// </param>
         [STAThread]
         private static void Main(
             string[] args)
@@ -52,10 +44,10 @@ namespace CamViewer
             InitializeDebugFileLog();
 
             /*
-             * 프로그램 실행 인자를 CamViewer 내부 실행 요청 모델로 변환한다.
+             * 명령행 인자를 CamViewer 내부 실행 요청으로 변환한다.
              *
-             * 인자가 없으면 DirectLaunch 요청이 생성되고,
-             * --playback-time이 있으면 ExternalPlayback 요청이 생성된다.
+             * 인자가 없으면 직접 실행 요청,
+             * --playback-time이 있으면 외부 영상 조회 요청이다.
              */
             IApplicationLaunchArgumentParser argumentParser =
                 new ApplicationLaunchArgumentParser();
@@ -81,98 +73,223 @@ namespace CamViewer
             }
 
             /*
-             * 인증 및 설정 확인 중에는 PlayerPresenter가 아직 생성되지 않는다.
-             * 따라서 최초 실행 요청을 메모리 저장소에 임시 보관한다.
+             * ApplicationSingleInstance는 프로그램이 종료될 때까지 유지한다.
              *
-             * 이 인스턴스는 PlayerPresenter까지 동일하게 전달되어야 한다.
+             * 첫 번째 프로세스가 Mutex를 소유하고,
+             * 두 번째 프로세스는 기존 프로세스에 요청만 전달하고 종료한다.
              */
-            IApplicationLaunchRequestStore launchRequestStore =
-                new ApplicationLaunchRequestStore();
+            using (var singleInstance =
+                new ApplicationSingleInstance())
+            {
+                bool isFirstInstance =
+                    singleInstance.TryAcquire();
 
-            launchRequestStore.SetPendingRequest(
-                launchRequest);
-
-            /*
-             * CamViewer 인증, 설정 API 및 로컬 설정 저장 기능을 제공하는
-             * Client Facade를 생성한다.
-             */
-            var clientFacade =
-                new CamViewerClientFacade();
-
-            /*
-             * HWID, PC 이름, 프로그램 버전 등
-             * 현재 PC 실행환경 정보를 제공한다.
-             */
-            var environmentProvider =
-                new ClientEnvironmentProvider();
-
-            /*
-             * 온라인 인증 이후 로컬 설정 확인,
-             * 서버 설정 버전 확인 및 다운로드 정책을 담당한다.
-             */
-            ILandingStartupService landingStartupService =
-                new LandingStartupService(
-                    clientFacade);
-
-            /*
-             * NVR Provider DLL을 등록할 Catalog를 생성하고
-             * providers 폴더의 Provider를 동적으로 불러온다.
-             */
-            var providerCatalog =
-                new NvrProviderCatalog();
-
-            LoadNvrProviders(
-                providerCatalog);
-
-            /*
-             * 설정에 기록된 ProviderKey를 기준으로
-             * 실제 NVR Provider 인스턴스를 생성하는 Factory이다.
-             */
-            var providerFactory =
-                new NvrProviderFactory(
-                    providerCatalog);
-
-            /*
-             * 설정 화면 표시, 설정 저장 및 서버 업로드 흐름을 담당한다.
-             */
-            var settingsFlowService =
-                new SettingsFlowService(
-                    clientFacade,
-                    providerCatalog,
-                    providerFactory,
-                    environmentProvider);
-
-            /*
-             * 프로그램 시작 시 인증 상태와 설정 상태를 표시하는
-             * Landing 화면을 생성한다.
-             */
-            var landingView =
-                new LandingView();
-
-            /*
-             * LandingPresenter는 실행 인자 자체를 알 필요가 없다.
-             *
-             * 인증 및 설정 확인이 끝난 후 실행되는 openPlayerAction 람다가
-             * launchRequestStore를 캡처하여 Player 생성 메서드로 전달한다.
-             */
-            var landingPresenter =
-                new LandingPresenter(
-                    landingView,
-                    clientFacade,
-                    landingStartupService,
-                    environmentProvider,
-                    CreateLoginView,
-                    settingsFlowService.OpenSettings,
-                    () =>
+                /*
+                 * 이미 CamViewer가 실행 중인 경우.
+                 */
+                if (!isFirstInstance)
+                {
+                    /*
+                     * 직접 중복 실행은 기존 재생 상태를 변경하지 않는다.
+                     *
+                     * 기존 창만 복원하고 두 번째 프로세스를 종료한다.
+                     */
+                    if (!launchRequest.IsExternalPlaybackRequest)
                     {
-                        OpenPlayerTemporary(
-                            clientFacade,
-                            settingsFlowService,
-                            providerFactory,
-                            launchRequestStore);
-                    });
+                        MessageBox.Show(
+                            "프로그램이 이미 실행 중입니다.",
+                            "POSCAM CamViewer",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Information);
 
-            landingPresenter.Show();
+                        singleInstance.TryActivateExistingInstance();
+
+                        return;
+                    }
+
+                    /*
+                     * 외부 영상 조회 요청이면 현재 프로세스에서 Player를 만들지 않고
+                     * 기존 CamViewer의 Named Pipe 서버로 요청을 전달한다.
+                     */
+                    var pipeClient =
+                        new ApplicationLaunchPipeClient();
+
+                    string pipeErrorMessage;
+
+                    bool sendSuccess =
+                        pipeClient.TrySend(
+                            launchRequest,
+                            out pipeErrorMessage);
+
+                    if (!sendSuccess)
+                    {
+                        /*
+                         * 요청 전송에 실패한 경우 새 프로세스를 계속 실행하면
+                         * 단일 실행 정책이 깨지므로 오류만 안내하고 종료한다.
+                         */
+                        MessageBox.Show(
+                            "실행 중인 CamViewer로 영상 요청을 전달하지 못했습니다."
+                            + Environment.NewLine
+                            + pipeErrorMessage,
+                            "POSCAM CamViewer",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                    }
+
+                    /*
+                     * 요청 전송 성공 여부와 관계없이 기존 CamViewer 창을
+                     * 복원하여 사용자가 현재 상태를 확인할 수 있게 한다.
+                     */
+                    singleInstance.TryActivateExistingInstance();
+
+                    return;
+                }
+
+                /*
+                 * 최초 프로세스에서 사용할 요청 저장소이다.
+                 *
+                 * 최초 실행 요청과 실행 중 Pipe로 전달되는 요청이
+                 * 모두 동일한 저장소를 사용해야 한다.
+                 */
+                IApplicationLaunchRequestStore launchRequestStore =
+                    new ApplicationLaunchRequestStore();
+
+                /*
+                 * 최초 실행 요청을 저장한다.
+                 *
+                 * PlayerPresenter가 생성된 뒤 OnLoadView에서
+                 * TryTakePendingRequest()로 가져간다.
+                 */
+                launchRequestStore.SetPendingRequest(
+                    launchRequest);
+
+                /*
+                 * 기존 프로세스로 전달되는 실행 요청을 수신할
+                 * Named Pipe 서버를 생성한다.
+                 *
+                 * using 범위를 Application.Run 종료 시점까지 유지하여
+                 * 프로그램 실행 중 항상 요청을 받을 수 있도록 한다.
+                 */
+                using (var pipeServer =
+                    new ApplicationLaunchPipeServer())
+                {
+                    /*
+                     * Pipe Server가 받은 요청을 공용 요청 저장소에 저장한다.
+                     *
+                     * 저장소는 PendingRequestStored 이벤트를 발생시키고,
+                     * PlayerPresenter가 이를 UI 스레드에서 처리한다.
+                     */
+                    pipeServer.RequestReceived +=
+                        launchRequestStore.SetPendingRequest;
+
+                    /*
+                     * Landing, Login 또는 Player 화면이 실행되기 전에
+                     * Pipe 서버를 먼저 시작한다.
+                     *
+                     * 따라서 프로그램 초기화 도중 외부 요청이 들어와도
+                     * 저장소에 보관할 수 있다.
+                     */
+                    pipeServer.Start();
+
+                    try
+                    {
+                        /*
+                         * CamViewer 인증, 설정 API 및 로컬 설정 저장 기능을 제공한다.
+                         */
+                        var clientFacade =
+                            new CamViewerClientFacade();
+
+                        /*
+                         * HWID, PC 이름, 프로그램 버전 등
+                         * 현재 PC 실행환경 정보를 제공한다.
+                         */
+                        var environmentProvider =
+                            new ClientEnvironmentProvider();
+
+                        /*
+                         * 온라인 인증 후 로컬 설정과 서버 설정 버전을 확인한다.
+                         */
+                        ILandingStartupService landingStartupService =
+                            new LandingStartupService(
+                                clientFacade);
+
+                        /*
+                         * 실행 폴더의 NVR Provider를 등록한다.
+                         */
+                        var providerCatalog =
+                            new NvrProviderCatalog();
+
+                        LoadNvrProviders(
+                            providerCatalog);
+
+                        /*
+                         * 설정에 기록된 ProviderKey에 맞는
+                         * NVR Provider 인스턴스를 생성한다.
+                         */
+                        var providerFactory =
+                            new NvrProviderFactory(
+                                providerCatalog);
+
+                        /*
+                         * 설정 화면 표시, 로컬 저장 및 서버 업로드를 담당한다.
+                         */
+                        var settingsFlowService =
+                            new SettingsFlowService(
+                                clientFacade,
+                                providerCatalog,
+                                providerFactory,
+                                environmentProvider);
+
+                        /*
+                         * 프로그램 시작 화면을 생성한다.
+                         */
+                        var landingView =
+                            new LandingView();
+
+                        /*
+                         * 인증과 설정 확인이 완료되면 Player를 생성한다.
+                         *
+                         * 최초 요청과 실행 중 외부 요청이 들어오는
+                         * 동일한 launchRequestStore를 PlayerPresenter에 전달한다.
+                         */
+                        var landingPresenter =
+                            new LandingPresenter(
+                                landingView,
+                                clientFacade,
+                                landingStartupService,
+                                environmentProvider,
+                                CreateLoginView,
+                                settingsFlowService.OpenSettings,
+                                () =>
+                                {
+                                    OpenPlayerTemporary(
+                                        clientFacade,
+                                        settingsFlowService,
+                                        providerFactory,
+                                        launchRequestStore);
+                                });
+
+                        /*
+                         * LandingView.ShowView() 내부에서 Application.Run()이 실행된다.
+                         *
+                         * 화면이 종료될 때까지 현재 메서드는 여기에서 대기하므로
+                         * Mutex와 Pipe Server도 계속 유지된다.
+                         */
+                        landingPresenter.Show();
+                    }
+                    finally
+                    {
+                        /*
+                         * 애플리케이션 종료 시 이벤트 연결을 해제한다.
+                         *
+                         * pipeServer.Dispose()는 using 블록 종료 시 자동 호출되어
+                         * 연결 대기 중인 Named Pipe도 정리된다.
+                         */
+                        pipeServer.RequestReceived -=
+                            launchRequestStore.SetPendingRequest;
+                    }
+                }
+            }
         }
 
         /// <summary>

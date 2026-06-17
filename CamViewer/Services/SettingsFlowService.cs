@@ -7,6 +7,7 @@ using CamViewerClient.Enums;
 using CamViewerClient.Models.Auth;
 using CamViewerClient.Models.Config;
 using CamViewerClient.Results;
+using CamViewerClient.Mappers;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -155,25 +156,91 @@ namespace CamViewer.Services
             }
 
             /*
-             * 먼저 로컬 설정 파일에 저장한다.
-             * 서버 업로드 실패가 발생해도 최소한 로컬 설정은 보존되어야 한다.
+             * 저장 전 로컬 설정을 불러와
+             * 서버 동기화 대상 값이 실제로 변경되었는지 비교한다.
+             *
+             * 로컬 설정 파일이 없거나 정상적으로 불러오지 못한 경우에는
+             * 최초 서버 설정 등록 또는 복구 저장으로 판단하여
+             * 서버 관리 설정이 변경된 것으로 처리한다.
              */
-            savedConfig.SyncStatus =
-                ViewerConfigSyncStatus.LocalModified;
+            ViewerConfig previousConfig =
+                null;
 
+            if (_clientFacade.HasLocalConfig())
+            {
+                ClientResult<ViewerConfig> previousLoadResult =
+                    _clientFacade.LoadLocalConfig();
+
+                if (previousLoadResult.Success
+                    && previousLoadResult.Data != null)
+                {
+                    previousConfig =
+                        previousLoadResult.Data;
+                }
+            }
+
+            bool hasServerManagedChanges =
+                ViewerConfigServerSettingsComparer
+                    .HasServerManagedChanges(
+                        previousConfig,
+                        savedConfig);
+
+            /*
+             * 서버 동기화 대상 값이 변경된 경우에만
+             * LocalModified 상태로 변경한다.
+             *
+             * 재생시간이나 영상 표시 방식처럼
+             * 로컬 전용 값만 변경했다면 기존 동기화 상태를 유지한다.
+             */
+            if (hasServerManagedChanges)
+            {
+                savedConfig.SyncStatus =
+                    ViewerConfigSyncStatus.LocalModified;
+            }
+            else if (previousConfig != null)
+            {
+                savedConfig.SyncStatus =
+                    previousConfig.SyncStatus;
+
+                /*
+                 * 로컬 전용 설정 변경으로 인해
+                 * 서버 버전과 동기화 이력이 사라지지 않도록 유지한다.
+                 */
+                savedConfig.ConfigVersion =
+                    previousConfig.ConfigVersion;
+
+                savedConfig.LastDownloadedAtUtc =
+                    previousConfig.LastDownloadedAtUtc;
+
+                savedConfig.LastUploadedAtUtc =
+                    previousConfig.LastUploadedAtUtc;
+            }
+
+            /*
+             * 서버 업로드 여부와 관계없이
+             * 사용자가 변경한 설정은 먼저 로컬 파일에 저장한다.
+             */
             ClientResult saveResult =
                 _clientFacade.SaveLocalConfig(
                     savedConfig);
 
-            if (!saveResult.Success)
+            /*
+             * 서버 동기화 대상 값이 변경되지 않았다면 서버 업로드 질문을 표시하지 않는다.
+             *
+             * 이 경우 변경된 값은 이 PC에서sharp만 사용하는 로컬 전용 설정이다.
+             */
+            if (!hasServerManagedChanges)
             {
                 MessageBox.Show(
-                    saveResult.Message,
-                    "POSCAM 캠뷰어 설정 저장 실패",
+                    "로컬 전용 설정이 저장되었습니다."
+                    + Environment.NewLine
+                    + "서버 설정은 변경되지 않았습니다.",
+                    "POSCAM 캠뷰어 설정",
                     MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                    MessageBoxIcon.Information);
 
-                return false;
+                _saved = true;
+                return true;
             }
 
             bool uploadConfirm =

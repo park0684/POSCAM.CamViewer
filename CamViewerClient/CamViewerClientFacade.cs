@@ -194,20 +194,69 @@ namespace CamViewerClient
                     latestResult.ErrorCode);
             }
 
-            ViewerConfig localConfig =
+            /*
+             * 서버 응답을 CamViewer에서 사용하는 ViewerConfig로 변환한다.
+             *
+             * 이 시점의 설정에는 서버가 관리하는 NVR 접속정보와
+             * 계산대·채널 매핑이 반영되어 있다.
+             */
+            ViewerConfig downloadedConfig =
                 ViewerConfigApiMapper.ToLocalConfig(
                     latestResult.Data);
 
-            if (localConfig == null)
+            if (downloadedConfig == null)
             {
                 return ClientResult<ViewerConfig>.Fail(
                     "서버 설정정보를 로컬 설정으로 변환할 수 없습니다.",
                     "SERVER_CONFIG_MAP_FAILED");
             }
 
+            /*
+             * 서버 설정을 적용하기 전에 기존 로컬 설정을 불러온다.
+             *
+             * 기존 로컬 설정에는 다음과 같은 PC별 설정이 들어 있을 수 있다.
+             *
+             * - 영상 재생 이전/이후 시간
+             * - 영상 표시 비율
+             * - NVR Provider 선택값
+             * - Provider별 추가 설정
+             * - 영상 원본 해상도
+             */
+            ViewerConfig existingLocalConfig =
+                null;
+
+            if (_configStore.Exists())
+            {
+                ClientResult<ViewerConfig> localLoadResult =
+                    _configStore.Load();
+
+                /*
+                 * 기존 로컬 설정을 정상적으로 읽은 경우에만 병합한다.
+                 *
+                 * 로컬 파일이 손상되었더라도 서버 설정 다운로드 자체를
+                 * 실패 처리하지 않고 서버 설정만 사용한다.
+                 */
+                if (localLoadResult.Success
+                    && localLoadResult.Data != null)
+                {
+                    existingLocalConfig =
+                        localLoadResult.Data;
+                }
+            }
+
+            /*
+             * 서버 설정을 기준으로 유지하되,
+             * 서버에서 관리하지 않는 PC별 로컬 설정을 다시 병합한다.
+             */
+            ViewerConfig mergedConfig =
+                ViewerConfigLocalSettingsMerger.Merge(
+                    downloadedConfig,
+                    existingLocalConfig);
+
             return ClientResult<ViewerConfig>.Ok(
-                localConfig,
-                "서버 캠뷰어 설정정보를 다운로드했습니다.");
+                mergedConfig,
+                "서버 캠뷰어 설정정보를 다운로드하고 "
+                + "기존 로컬 전용 설정을 유지했습니다.");
         }
 
         /// <summary>
