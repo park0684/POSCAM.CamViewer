@@ -157,47 +157,60 @@ namespace CamViewer.Services
 
             try
             {
-                // 기존 재생이 있으면 먼저 정리한다.
                 /*
-                 * 실제 재생 세션이 존재하는 경우에만
-                 * 기존 세션과 Provider를 전체 정리한다.
+                 * 재조회 시에는 기존 영상 재생만 즉시 중지한다.
                  *
-                 * 재생 전 영상 원본 정보 조회를 위해 생성한
-                 * 정상 로그인 Provider는 그대로 재사용한다.
+                 * Provider 로그인까지 해제하면 매 조회마다
+                 * Logout → Dispose → Initialize → Login이 반복되어
+                 * 조회 시간이 길어지므로 로그인된 Provider는 재사용한다.
                  */
-                if (_sessions.Count > 0
-                    || CurrentState != PlaybackState.Stopped)
+                if (_sessions.Count > 0)
                 {
+                    /*
+                     * 실제 Stop 명령이 처리되는 동안에도
+                     * 서비스 시간과 UI가 계속 움직이지 않도록
+                     * 먼저 논리적인 재생 시계를 정지한다.
+                     */
+                    DateTime stoppedPlaybackTime =
+                        GetEstimatedPlaybackTime();
+
+                    _currentPlaybackTime =
+                        ClampPlaybackTime(
+                            stoppedPlaybackTime);
+
+                    _playbackClockStartedAtUtc =
+                        null;
+
+                    CurrentState =
+                        PlaybackState.Stopped;
+
                     PlayerPlaybackResult stopResult =
-                        await StopAsync(
+                        await StopCurrentPlaybackSessionsOnlyAsync(
                             CancellationToken.None);
 
                     if (stopResult == null
                         || !stopResult.Success)
                     {
                         return PlayerPlaybackResult.Fail(
-                            "기존 재생 정리 중 오류가 발생했습니다. "
+                            "기존 재생 세션 정리 중 오류가 발생했습니다. "
                             + (
                                 stopResult == null
                                     ? "정리 결과가 없습니다."
                                     : stopResult.Message
                             ),
                             stopResult == null
-                                ? "PLAYBACK_STOP_RESULT_EMPTY"
+                                ? "PLAYBACK_SESSION_STOP_RESULT_EMPTY"
                                 : stopResult.ErrorCode);
                     }
                 }
                 else
                 {
                     /*
-                     * 세션은 없지만 원본 정보 조회에서 로그인된 Provider가 있을 수 있다.
-                     * Provider는 유지하고 재생 관련 상태만 초기화한다.
+                     * 세션은 없지만 영상 원본 정보 조회 과정에서
+                     * 로그인된 Provider가 존재할 수 있으므로 Provider는 유지한다.
                      */
                     _sessions.Clear();
                     _sessionTimeOffsets.Clear();
-
-                    _currentRequest =
-                        null;
 
                     _currentPlaybackTime =
                         null;
@@ -208,6 +221,13 @@ namespace CamViewer.Services
                     CurrentState =
                         PlaybackState.Stopped;
                 }
+
+                /*
+                 * 기존 재생 요청은 정리가 끝난 뒤 제거한다.
+                 * 바로 아래에서 새 요청으로 교체된다.
+                 */
+                _currentRequest =
+                    null;
 
                 // StopAsync에서 내부 상태가 초기화될 수 있으므로 선택 속도를 복원한다.
                 _currentSpeed = selectedSpeed;
@@ -1788,49 +1808,253 @@ namespace CamViewer.Services
         /// <summary>
         /// 현재 재생 세션만 정리한다.
         /// Provider와 로그인 상태, 현재 재생 요청 정보는 유지한다.
-        /// 
-        /// 사용 시점:
-        /// - 정방향 재생에서 역재생으로 전환
-        /// - 역재생에서 정방향 재생으로 전환
+        ///
+        /// 처리 순서:
+        /// 1. 서비스 재생시간 즉시 정지
+        /// 2. 모든 채널을 Pause하여 화면을 먼저 고정
+        /// 3. 모든 재생 세션 Stop
+        /// 4. 세션 Dispose
+        /// 5. 세션 및 시간 보정값 초기화
         /// </summary>
-        private async Task<PlayerPlaybackResult> StopCurrentPlaybackSessionsOnlyAsync(
-            CancellationToken cancellationToken)
+        private async Task<PlayerPlaybackResult>
+            StopCurrentPlaybackSessionsOnlyAsync(
+                CancellationToken cancellationToken)
         {
-            string warningMessage =
-                string.Empty;
+            List<string> cleanupWarnings =
+                new List<string>();
 
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions.ToList())
+            List<KeyValuePair<int, INvrPlaybackSession>> sessionItems =
+                _sessions.ToList();
+
+            /*
+             * 실제 Provider 정리가 끝날 때까지
+             * 서비스 재생시간이 계속 증가하지 않도록 먼저 정지한다.
+             */
+            if (_currentRequest != null)
             {
+                _currentPlaybackTime =
+                    ClampPlaybackTime(
+                        GetEstimatedPlaybackTime());
+            }
+
+            _playbackClockStartedAtUtc =
+                null;
+
+            CurrentState =
+                PlaybackState.Stopped;
+
+            /*
+             * 1차 처리:
+             * Stop 처리 시간이 오래 걸리더라도 기존 영상이 계속 움직이지 않도록
+             * 모든 채널을 먼저 Pause한다.
+             */
+            foreach (KeyValuePair<int, INvrPlaybackSession> item
+                in sessionItems)
+            {
+                int sessionKey =
+                    item.Key;
+
+                INvrPlaybackSession session =
+                    item.Value;
+
+                if (session == null)
+                {
+                    cleanupWarnings.Add(
+                        "재생 세션 정보가 없습니다. "
+                        + "SessionKey="
+                        + sessionKey);
+
+                    continue;
+                }
+
+                INvrProvider provider =
+                    GetProviderByNvrNo(
+                        session.NvrNo);
+
+                if (provider == null)
+                {
+                    cleanupWarnings.Add(
+                        "재생 화면을 일시정지할 Provider를 찾을 수 없습니다. "
+                        + "NvrNo="
+                        + session.NvrNo
+                        + ", ChannelNo="
+                        + session.ChannelNo
+                        + ", ScreenPosition="
+                        + session.ScreenPosition);
+
+                    continue;
+                }
+
                 try
                 {
-                    INvrProvider provider =
-                        GetProviderByNvrNo(
-                            item.Value.NvrNo);
+                    /*
+                     * 재조회 또는 방향 전환 중 취소가 발생하더라도
+                     * 기존 화면 정리는 반드시 수행한다.
+                     */
+                    NvrResult pauseResult =
+                        await provider.PauseAsync(
+                            session,
+                            CancellationToken.None);
 
-                    if (provider != null)
+                    if (pauseResult == null)
                     {
-                        await provider.StopAsync(
-                            item.Value,
-                            cancellationToken);
+                        cleanupWarnings.Add(
+                            "재생 일시정지 결과가 없습니다. "
+                            + "NvrNo="
+                            + session.NvrNo
+                            + ", ChannelNo="
+                            + session.ChannelNo);
                     }
-
-                    item.Value.Dispose();
+                    else if (!pauseResult.Success)
+                    {
+                        cleanupWarnings.Add(
+                            "기존 재생 화면 일시정지에 실패했습니다. "
+                            + "NvrNo="
+                            + session.NvrNo
+                            + ", ChannelNo="
+                            + session.ChannelNo
+                            + ", Message="
+                            + (
+                                string.IsNullOrWhiteSpace(
+                                    pauseResult.Message)
+                                    ? pauseResult.Status.ToString()
+                                    : pauseResult.Message
+                            ));
+                    }
                 }
                 catch (Exception ex)
                 {
-                    warningMessage =
-                        ex.Message;
+                    /*
+                     * Pause 실패 여부와 관계없이
+                     * 아래 Stop과 Dispose는 계속 수행한다.
+                     */
+                    cleanupWarnings.Add(
+                        "기존 재생 화면 일시정지 중 예외가 발생했습니다. "
+                        + "NvrNo="
+                        + session.NvrNo
+                        + ", ChannelNo="
+                        + session.ChannelNo
+                        + ", Error="
+                        + ex.Message);
+                }
+            }
+
+            /*
+             * 2차 처리:
+             * 화면을 고정한 후 실제 재생 세션을 중지하고 해제한다.
+             */
+            foreach (KeyValuePair<int, INvrPlaybackSession> item
+                in sessionItems)
+            {
+                int sessionKey =
+                    item.Key;
+
+                INvrPlaybackSession session =
+                    item.Value;
+
+                if (session == null)
+                {
+                    continue;
+                }
+
+                INvrProvider provider =
+                    GetProviderByNvrNo(
+                        session.NvrNo);
+
+                if (provider == null)
+                {
+                    cleanupWarnings.Add(
+                        "재생 세션을 중지할 Provider를 찾을 수 없습니다. "
+                        + "NvrNo="
+                        + session.NvrNo
+                        + ", ChannelNo="
+                        + session.ChannelNo
+                        + ", ScreenPosition="
+                        + session.ScreenPosition);
+                }
+                else
+                {
+                    try
+                    {
+                        NvrResult stopResult =
+                            await provider.StopAsync(
+                                session,
+                                CancellationToken.None);
+
+                        if (stopResult == null)
+                        {
+                            cleanupWarnings.Add(
+                                "재생 중지 결과가 없습니다. "
+                                + "NvrNo="
+                                + session.NvrNo
+                                + ", ChannelNo="
+                                + session.ChannelNo);
+                        }
+                        else if (!stopResult.Success)
+                        {
+                            cleanupWarnings.Add(
+                                "재생 세션 중지에 실패했습니다. "
+                                + "NvrNo="
+                                + session.NvrNo
+                                + ", ChannelNo="
+                                + session.ChannelNo
+                                + ", Message="
+                                + (
+                                    string.IsNullOrWhiteSpace(
+                                        stopResult.Message)
+                                        ? stopResult.Status.ToString()
+                                        : stopResult.Message
+                                ));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        cleanupWarnings.Add(
+                            "재생 세션 중지 중 예외가 발생했습니다. "
+                            + "NvrNo="
+                            + session.NvrNo
+                            + ", ChannelNo="
+                            + session.ChannelNo
+                            + ", Error="
+                            + ex.Message);
+                    }
+                }
+
+                /*
+                 * Provider Stop 성공 여부와 관계없이
+                 * 세션의 로컬 리소스는 반드시 해제한다.
+                 */
+                try
+                {
+                    session.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    cleanupWarnings.Add(
+                        "재생 세션 리소스 해제 중 예외가 발생했습니다. "
+                        + "SessionKey="
+                        + sessionKey
+                        + ", NvrNo="
+                        + session.NvrNo
+                        + ", ChannelNo="
+                        + session.ChannelNo
+                        + ", Error="
+                        + ex.Message);
                 }
             }
 
             _sessions.Clear();
             _sessionTimeOffsets.Clear();
 
-            if (!string.IsNullOrWhiteSpace(warningMessage))
+            if (cleanupWarnings.Count > 0)
             {
                 return PlayerPlaybackResult.Ok(
-                    "기존 재생 세션은 정리되었지만 일부 경고가 발생했습니다. "
-                    + warningMessage);
+                    "기존 재생 세션은 정리되었지만 일부 경고가 발생했습니다."
+                    + Environment.NewLine
+                    + string.Join(
+                        Environment.NewLine,
+                        cleanupWarnings.Select(
+                            warning => "- " + warning)));
             }
 
             return PlayerPlaybackResult.Ok(

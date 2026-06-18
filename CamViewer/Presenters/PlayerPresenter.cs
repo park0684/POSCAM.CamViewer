@@ -211,7 +211,9 @@ namespace CamViewer.Presenters
         /// <summary>
         /// 검색 버튼 클릭 시 현재 조회 조건으로 재생을 시작한다.
         /// </summary>
-        private async void OnSearch(object sender, EventArgs e)
+        private async void OnSearch(
+            object sender,
+            EventArgs e)
         {
             if (!TryBeginPlaybackCommand())
             {
@@ -220,12 +222,52 @@ namespace CamViewer.Presenters
 
             try
             {
+                /*
+                 * 재조회 준비 중 UI 재생시간이 계속 증가하지 않도록
+                 * 먼저 타이머를 중지한다.
+                 */
+                _view.StopPlaybackTimer();
+
+                /*
+                 * 기존 영상이 실제 재생 중이면
+                 * 영상 원본 정보 조회나 새 재생 준비보다 먼저
+                 * Dahua 재생 핸들을 일시정지한다.
+                 *
+                 * 여기서 StopAsync를 호출하면 Provider 로그아웃과 재로그인이
+                 * 발생할 수 있으므로 PauseAsync만 실행한다.
+                 *
+                 * 기존 세션의 실제 정리는 이후 PlayAsync에서 처리한다.
+                 */
+                if (_playbackService.CurrentState
+                        == PlaybackState.Playing
+                    || _playbackService.CurrentState
+                        == PlaybackState.Rewinding)
+                {
+                    PlayerPlaybackResult pauseResult =
+                        await _playbackService.PauseAsync(
+                            CancellationToken.None);
+
+                    if (pauseResult == null
+                        || !pauseResult.Success)
+                    {
+                        HandlePlaybackCommandResult(
+                            pauseResult
+                            ?? PlayerPlaybackResult.Fail(
+                                "기존 영상 일시정지 결과가 없습니다.",
+                                "PLAYBACK_PAUSE_RESULT_EMPTY"));
+
+                        return;
+                    }
+                }
+
                 PlayerPlaybackResult result =
                     await PlayFromCurrentSearchRangeAsync();
 
-                HandlePlaybackCommandResult(result);
+                HandlePlaybackCommandResult(
+                    result);
 
-                if (result == null || !result.Success)
+                if (result == null
+                    || !result.Success)
                 {
                     return;
                 }
@@ -235,7 +277,6 @@ namespace CamViewer.Presenters
                 EndPlaybackCommand();
             }
         }
-
         /// <summary>
         /// 역재생 버튼 요청을 처리한다.
         /// </summary>
