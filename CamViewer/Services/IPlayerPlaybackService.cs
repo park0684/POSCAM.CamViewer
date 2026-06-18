@@ -117,6 +117,17 @@ namespace CamViewer.Services
             CancellationToken cancellationToken);
 
         /// <summary>
+        /// 타임라인에서 선택한 절대 시각으로 이동한다.
+        ///
+        /// 현재 배속이 1배속이 아니면 기존 세션에 별도로
+        /// 1배속 명령을 보내지 않고, 논리 속도를 1배속으로 변경한 뒤
+        /// 새 재생 핸들을 선택한 시각에서 생성한다.
+        /// </summary>
+        Task<PlayerPlaybackResult> SeekTimelineToTimeAsync(
+            DateTime targetTime,
+            CancellationToken cancellationToken);
+
+        /// <summary>
         /// 재생 대상 채널의 영상 원본 정보를 조회한다.
         /// Provider가 지원하지 않으면 실패 결과를 반환한다.
         /// </summary>

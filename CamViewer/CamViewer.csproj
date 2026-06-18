@@ -118,6 +118,7 @@
     <Compile Include="Services\IPlayerPlaybackService.cs" />
     <Compile Include="Services\LandingStartupService.cs" />
     <Compile Include="Services\NvrPlayerPlaybackService.cs" />
+    <Compile Include="Services\PlaybackLogWriter.cs" />
     <Compile Include="Services\SettingsFlowService.cs" />
     <Compile Include="Views\CounterEditView.cs">
       <SubType>Form</SubType>
@@ -278,85 +279,42 @@
     <!-- Provider 프로젝트 빌드 결과 경로 -->
     <DahuaProviderBuildDir>$(MSBuildProjectDirectory)\..\CamViewer.Nvr\CamViewer.Nvr.Dahua\bin\$(Platform)\$(Configuration)\</DahuaProviderBuildDir>
     <ApiProviderBuildDir>$(MSBuildProjectDirectory)\..\CamViewer.Nvr\CamViewer.Nvr.ApiProviders\bin\$(Platform)\$(Configuration)\</ApiProviderBuildDir>
-
     <!-- NetSDKCS 관리 DLL 빌드 결과 경로 -->
     <NetSdkBuildDir>$(MSBuildProjectDirectory)\..\..\CamViewer_External\Dahua\NetSDKCS\bin\$(Platform)\$(Configuration)\</NetSdkBuildDir>
-
     <!-- Dahua 네이티브 SDK 원본 위치 -->
     <DahuaNativeSourceDir>$(MSBuildProjectDirectory)\..\..\CamViewer_External\Dahua\native\Dahua\</DahuaNativeSourceDir>
-
     <!-- CamViewer 실행 폴더의 최종 배치 경로 -->
     <DahuaProviderDeployDir>$(TargetDir)providers\Dahua\</DahuaProviderDeployDir>
     <ApiProviderDeployDir>$(TargetDir)providers\Api\</ApiProviderDeployDir>
     <DahuaNativeDeployDir>$(TargetDir)native\Dahua\</DahuaNativeDeployDir>
   </PropertyGroup>
-
   <!--
   x64 빌드 완료 후 CamViewer 실행 폴더에
   Provider 및 네이티브 SDK 구조를 자동으로 생성한다.
 -->
-  <Target Name="PrepareNvrRuntimeLayout"
-          AfterTargets="Build"
-          Condition="'$(Platform)' == 'x64'">
-
+  <Target Name="PrepareNvrRuntimeLayout" AfterTargets="Build" Condition="'$(Platform)' == 'x64'">
     <ItemGroup>
       <!-- Dahua 네이티브 SDK DLL 전체 -->
       <DahuaNativeFiles Include="$(DahuaNativeSourceDir)*.dll" />
     </ItemGroup>
-
     <!-- 필수 관리 DLL 생성 여부 검증 -->
-    <Error
-      Condition="!Exists('$(DahuaProviderBuildDir)CamViewer.Nvr.Dahua.dll')"
-      Text="CamViewer.Nvr.Dahua.dll 빌드 결과를 찾을 수 없습니다. 경로: $(DahuaProviderBuildDir)" />
-
-    <Error
-      Condition="!Exists('$(NetSdkBuildDir)NetSDKCS.dll')"
-      Text="NetSDKCS.dll 빌드 결과를 찾을 수 없습니다. 경로: $(NetSdkBuildDir)" />
-
-    <Error
-      Condition="!Exists('$(ApiProviderBuildDir)CamViewer.Nvr.ApiProviders.dll')"
-      Text="CamViewer.Nvr.ApiProviders.dll 빌드 결과를 찾을 수 없습니다. 경로: $(ApiProviderBuildDir)" />
-
+    <Error Condition="!Exists('$(DahuaProviderBuildDir)CamViewer.Nvr.Dahua.dll')" Text="CamViewer.Nvr.Dahua.dll 빌드 결과를 찾을 수 없습니다. 경로: $(DahuaProviderBuildDir)" />
+    <Error Condition="!Exists('$(NetSdkBuildDir)NetSDKCS.dll')" Text="NetSDKCS.dll 빌드 결과를 찾을 수 없습니다. 경로: $(NetSdkBuildDir)" />
+    <Error Condition="!Exists('$(ApiProviderBuildDir)CamViewer.Nvr.ApiProviders.dll')" Text="CamViewer.Nvr.ApiProviders.dll 빌드 결과를 찾을 수 없습니다. 경로: $(ApiProviderBuildDir)" />
     <!-- Dahua 네이티브 SDK 원본 검증 -->
-    <Error
-      Condition="!Exists('$(DahuaNativeSourceDir)')"
-      Text="Dahua 네이티브 SDK 원본 폴더가 없습니다. 경로: $(DahuaNativeSourceDir)" />
-
-    <Error
-      Condition="'@(DahuaNativeFiles)' == ''"
-      Text="Dahua 네이티브 SDK DLL이 없습니다. 경로: $(DahuaNativeSourceDir)" />
-
+    <Error Condition="!Exists('$(DahuaNativeSourceDir)')" Text="Dahua 네이티브 SDK 원본 폴더가 없습니다. 경로: $(DahuaNativeSourceDir)" />
+    <Error Condition="'@(DahuaNativeFiles)' == ''" Text="Dahua 네이티브 SDK DLL이 없습니다. 경로: $(DahuaNativeSourceDir)" />
     <!-- 최종 실행 폴더 구조 생성 -->
     <MakeDir Directories="$(DahuaProviderDeployDir)" />
     <MakeDir Directories="$(ApiProviderDeployDir)" />
     <MakeDir Directories="$(DahuaNativeDeployDir)" />
-
     <!-- Dahua Provider 및 관리 SDK 복사 -->
-    <Copy
-      SourceFiles="$(DahuaProviderBuildDir)CamViewer.Nvr.Dahua.dll"
-      DestinationFolder="$(DahuaProviderDeployDir)"
-      SkipUnchangedFiles="true" />
-
-    <Copy
-      SourceFiles="$(NetSdkBuildDir)NetSDKCS.dll"
-      DestinationFolder="$(DahuaProviderDeployDir)"
-      SkipUnchangedFiles="true" />
-
+    <Copy SourceFiles="$(DahuaProviderBuildDir)CamViewer.Nvr.Dahua.dll" DestinationFolder="$(DahuaProviderDeployDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(NetSdkBuildDir)NetSDKCS.dll" DestinationFolder="$(DahuaProviderDeployDir)" SkipUnchangedFiles="true" />
     <!-- API Provider 복사 -->
-    <Copy
-      SourceFiles="$(ApiProviderBuildDir)CamViewer.Nvr.ApiProviders.dll"
-      DestinationFolder="$(ApiProviderDeployDir)"
-      SkipUnchangedFiles="true" />
-
+    <Copy SourceFiles="$(ApiProviderBuildDir)CamViewer.Nvr.ApiProviders.dll" DestinationFolder="$(ApiProviderDeployDir)" SkipUnchangedFiles="true" />
     <!-- Dahua 네이티브 SDK DLL 복사 -->
-    <Copy
-      SourceFiles="@(DahuaNativeFiles)"
-      DestinationFolder="$(DahuaNativeDeployDir)"
-      SkipUnchangedFiles="true" />
-
-    <Message
-      Importance="high"
-      Text="CamViewer NVR 실행 파일 배치 완료: $(TargetDir)" />
-
+    <Copy SourceFiles="@(DahuaNativeFiles)" DestinationFolder="$(DahuaNativeDeployDir)" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="CamViewer NVR 실행 파일 배치 완료: $(TargetDir)" />
   </Target>
 </Project>

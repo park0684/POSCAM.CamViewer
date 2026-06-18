@@ -231,41 +231,164 @@ namespace CamViewer.Nvr.Dahua.Sdk
         }
 
         /// <summary>
-        /// 디버깅용으로 영상 포맷 객체의 필드 목록을 만든다.
+        /// 영상 포맷 객체가 가지고 있는 필드와 속성의 이름, 형식, 값을
+        /// 진단 메시지로 생성한다.
+        ///
+        /// Dahua NetSDKCS 버전에 따라 해상도가
+        /// 필드, 속성, 열거형 또는 중첩 구조체로 제공될 수 있으므로
+        /// 현재 사용 중인 SDK 구조를 확인하기 위해 사용한다.
         /// </summary>
         private static string BuildFieldList(
             object target)
         {
             if (target == null)
             {
-                return "";
+                return "Target: null";
             }
 
+            Type type =
+                target.GetType();
+
+            string result =
+                "Type: "
+                + type.FullName;
+
             FieldInfo[] fields =
-                target.GetType().GetFields(
+                type.GetFields(
                     BindingFlags.Instance
                     | BindingFlags.Public
                     | BindingFlags.NonPublic);
 
+            result += " / Fields: ";
+
             if (fields == null || fields.Length == 0)
             {
-                return "Fields: none";
+                result += "none";
+            }
+            else
+            {
+                for (int index = 0; index < fields.Length; index++)
+                {
+                    if (index > 0)
+                    {
+                        result += ", ";
+                    }
+
+                    FieldInfo field =
+                        fields[index];
+
+                    object value = null;
+
+                    try
+                    {
+                        value =
+                            field.GetValue(target);
+                    }
+                    catch
+                    {
+                        // 진단 과정의 필드 읽기 실패는 무시한다.
+                    }
+
+                    result +=
+                        field.Name
+                        + "("
+                        + field.FieldType.Name
+                        + ")="
+                        + ConvertMemberValueToText(value);
+                }
             }
 
-            string result =
-                "Fields: ";
+            PropertyInfo[] properties =
+                type.GetProperties(
+                    BindingFlags.Instance
+                    | BindingFlags.Public
+                    | BindingFlags.NonPublic);
 
-            for (int index = 0; index < fields.Length; index++)
+            result += " / Properties: ";
+
+            if (properties == null || properties.Length == 0)
             {
-                if (index > 0)
+                result += "none";
+            }
+            else
+            {
+                for (int index = 0; index < properties.Length; index++)
                 {
-                    result += ", ";
-                }
+                    if (index > 0)
+                    {
+                        result += ", ";
+                    }
 
-                result += fields[index].Name;
+                    PropertyInfo property =
+                        properties[index];
+
+                    object value = null;
+
+                    /*
+                     * 인덱서 속성은 인수 없이 읽을 수 없으므로 제외한다.
+                     */
+                    if (property.GetIndexParameters().Length == 0)
+                    {
+                        try
+                        {
+                            value =
+                                property.GetValue(
+                                    target,
+                                    null);
+                        }
+                        catch
+                        {
+                            // 일부 SDK 속성은 Getter 호출 중 예외가 발생할 수 있다.
+                        }
+                    }
+
+                    result +=
+                        property.Name
+                        + "("
+                        + property.PropertyType.Name
+                        + ")="
+                        + ConvertMemberValueToText(value);
+                }
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// 진단 대상 멤버 값을 안전한 문자열로 변환한다.
+        /// 배열이나 복잡한 구조체는 형식명만 표시한다.
+        /// </summary>
+        private static string ConvertMemberValueToText(
+            object value)
+        {
+            if (value == null)
+            {
+                return "null";
+            }
+
+            Type valueType =
+                value.GetType();
+
+            if (valueType.IsPrimitive
+                || valueType.IsEnum
+                || value is string
+                || value is decimal)
+            {
+                return value.ToString();
+            }
+
+            Array array =
+                value as Array;
+
+            if (array != null)
+            {
+                return valueType.Name
+                    + "[Length="
+                    + array.Length
+                    + "]";
+            }
+
+            return valueType.FullName;
         }
     }
 }

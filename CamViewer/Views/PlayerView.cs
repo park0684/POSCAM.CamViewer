@@ -76,6 +76,18 @@ namespace CamViewer.Views
         /// </summary>
         private double? _rightVideoAspectRatio;
 
+        /// <summary>
+        /// 사용자가 타임라인을 클릭하여 위치를 이동할 수 있는지 여부.
+        /// 패널 자체는 비활성화하지 않아 현재 위치 표시를 유지한다.
+        /// </summary>
+        private bool _timelineSeekEnabled;
+
+        /// <summary>
+        /// Presenter가 재생속도 ComboBox를 프로그램으로 변경할 때
+        /// SelectedIndexChanged 이벤트가 다시 실행되지 않도록 한다.
+        /// </summary>
+        private bool _suppressPlaybackSpeedChangedEvent;
+
         [DllImport("user32.dll")]
         private static extern bool ReleaseCapture();
 
@@ -587,7 +599,55 @@ namespace CamViewer.Views
             UpdateVideoRenderTargetLayout();
         }
 
+        /// <summary>
+        /// 이전/다음 상대시간 이동 버튼의 사용 가능 여부를 설정한다.
+        /// </summary>
+        public void SetSeekButtonsEnabled(
+            bool enabled)
+        {
+            btnSeekBackward10.Enabled =
+                enabled;
 
+            btnSeekForward10.Enabled =
+                enabled;
+
+            /*
+             * 이동 버튼을 사용할 수 없으면
+             * 이동 초 입력도 함께 비활성화한다.
+             */
+            nudTiemAdjustSeconds.Enabled =
+                enabled;
+        }
+
+        /// <summary>
+        /// 타임라인 위치 선택 입력의 사용 가능 여부를 설정한다.
+        ///
+        /// Panel.Enabled를 변경하면 표시 자체가 흐려질 수 있으므로
+        /// 입력 가능 상태만 별도 필드로 관리한다.
+        /// </summary>
+        public void SetTimelineSeekEnabled(
+            bool enabled)
+        {
+            _timelineSeekEnabled =
+                enabled;
+
+            pnlTimeLIne.Cursor =
+                enabled
+                    ? Cursors.Hand
+                    : Cursors.Default;
+
+            pnlTimeLIne.Invalidate();
+        }
+
+        /// <summary>
+        /// 수동 영상 동기화 버튼의 사용 가능 여부를 설정한다.
+        /// </summary>
+        public void SetPlaybackSyncEnabled(
+            bool enabled)
+        {
+            btnSync.Enabled =
+                enabled;
+        }
 
         /*내부 메서드*/
 
@@ -649,14 +709,33 @@ namespace CamViewer.Views
 
         public void SelectPlaybackSpeed(PlaybackSpeed speed)
         {
-            for (int index = 0; index < cboPlaybackSpeed.Items.Count; index++)
+            _suppressPlaybackSpeedChangedEvent =
+         true;
+
+            try
             {
-                PlaybackSpeedItem item = cboPlaybackSpeed.Items[index] as PlaybackSpeedItem;
-                if (item != null && item.Speed == speed)
+                for (int index = 0;
+                    index < cboPlaybackSpeed.Items.Count;
+                    index++)
                 {
-                    cboPlaybackSpeed.SelectedIndex = index;
-                    return;
+                    PlaybackSpeedItem item =
+                        cboPlaybackSpeed.Items[index]
+                            as PlaybackSpeedItem;
+
+                    if (item != null
+                        && item.Speed == speed)
+                    {
+                        cboPlaybackSpeed.SelectedIndex =
+                            index;
+
+                        return;
+                    }
                 }
+            }
+            finally
+            {
+                _suppressPlaybackSpeedChangedEvent =
+                    false;
             }
         }
 
@@ -757,6 +836,10 @@ namespace CamViewer.Views
             SetSearchDateTime(DateTime.Now);
             SetPlaybackSpeedOptions();
             InitializeRenderSelectComboBox();
+
+            SetSeekButtonsEnabled(false);
+            SetTimelineSeekEnabled(false);
+            SetPlaybackSyncEnabled(false);
         }
 
         /// <summary>
@@ -1252,7 +1335,14 @@ namespace CamViewer.Views
         /// </summary>
         private void OnPlaybackSpeedChanged(object sender, EventArgs e)
         {
-            PlaybackSpeedChangedEvent?.Invoke(this, EventArgs.Empty);
+            if (_suppressPlaybackSpeedChangedEvent)
+            {
+                return;
+            }
+
+            PlaybackSpeedChangedEvent?.Invoke(
+                this,
+                EventArgs.Empty);
         }
 
         /// <summary>
@@ -1548,6 +1638,16 @@ namespace CamViewer.Views
         /// </summary>
         private void OnTimelineMouseDown(object sender, MouseEventArgs e)
         {
+            if (!_timelineSeekEnabled)
+            {
+                return;
+            }
+
+            if (e.Button != MouseButtons.Left)
+            {
+                return;
+            }
+
             if (!_timelineStartTime.HasValue
                 || !_timelineEndTime.HasValue
                 || _timelineStartTime.Value >= _timelineEndTime.Value)

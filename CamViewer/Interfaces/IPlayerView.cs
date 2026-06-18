@@ -278,5 +278,24 @@ namespace CamViewer.Interfaces
         /// 영상 표시 방식을 선택한다.
         /// </summary>
         void SelectVideoRenderMode(VideoRenderMode renderMode);
+
+        /// <summary>
+        /// 이전/다음 상대시간 이동 버튼의 사용 가능 여부를 설정한다.
+        /// </summary>
+        void SetSeekButtonsEnabled(
+            bool enabled);
+
+        /// <summary>
+        /// 타임라인 위치 선택 입력의 사용 가능 여부를 설정한다.
+        /// 현재 위치 표시는 비활성 상태에서도 유지한다.
+        /// </summary>
+        void SetTimelineSeekEnabled(
+            bool enabled);
+
+        /// <summary>
+        /// 수동 영상 동기화 버튼의 사용 가능 여부를 설정한다.
+        /// </summary>
+        void SetPlaybackSyncEnabled(
+            bool enabled);
     }
 }

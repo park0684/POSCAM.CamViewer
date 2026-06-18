@@ -78,8 +78,7 @@ namespace CamViewer.Presenters
             }
             if (launchRequestStore == null)
             {
-                throw new ArgumentNullException(
-                    "launchRequestStore");
+                throw new ArgumentNullException("launchRequestStore");
             }
 
             _view = view;
@@ -139,8 +138,7 @@ namespace CamViewer.Presenters
             _view.SetPlaybackState(_playbackState);
 
             _view.SetPlaybackSpeedOptions();
-            _view.SelectPlaybackSpeed(
-                PlaybackSpeed.Normal);
+            _view.SelectPlaybackSpeed(PlaybackSpeed.Normal);
 
             // 설정에 등록된 계산대와 화면 정보를 먼저 반영한다.
             ReloadViewByConfig();
@@ -150,18 +148,14 @@ namespace CamViewer.Presenters
             // Program에서 보관한 실행 요청이 있으면 가져온다.
             // 요청을 가져오는 순간 저장소에서는 제거되어
             // 같은 요청이 중복 실행되지 않는다.
-            if (!_launchRequestStore.TryTakePendingRequest(
-                out launchRequest))
+            if (!_launchRequestStore.TryTakePendingRequest(out launchRequest))
             {
                 // 저장된 요청이 없는 예외 상황에서는
                 // 일반 직접 실행 요청으로 처리한다.
-                launchRequest =
-                    ApplicationLaunchRequest.CreateDirectLaunch();
+                launchRequest = ApplicationLaunchRequest.CreateDirectLaunch();
             }
 
-            await ApplyLaunchRequestAsync(
-                launchRequest,
-                false);
+            await ApplyLaunchRequestAsync(launchRequest, false);
         }
 
 
@@ -178,44 +172,40 @@ namespace CamViewer.Presenters
         /// </summary>
         private async void OnPlaybackSpeedChanged(object sender, EventArgs e)
         {
-            if (_isPlaybackCommandRunning)
+            if (!TryBeginPlaybackCommand())
             {
-                _view.SetStatus("재생 명령 처리 중에는 재생속도를 변경할 수 없습니다.");
-                return;
-            }
-
-            PlayerPlaybackResult result =
-                await _playbackService.SetPlaybackSpeedAsync(
-                    _view.SelectedPlaybackSpeed,
-                    CancellationToken.None);
-
-            if (!result.Success)
-            {
-                _view.ShowMessage(result.Message);
-
-                _view.SelectPlaybackSpeed(
-                    _playbackService.CurrentPlaybackSpeed);
+                _view.SelectPlaybackSpeed(_playbackService.CurrentPlaybackSpeed);
 
                 return;
             }
 
-            _view.SetPlaybackTime(
-                _playbackService.CurrentPlaybackTime);
-
-            _view.SetPlaybackState(
-                _playbackService.CurrentState);
-
-            if (_playbackService.CurrentState == PlaybackState.Paused
-                || _playbackService.CurrentState == PlaybackState.Stopped)
+            try
             {
-                _view.StopPlaybackTimer();
-            }
-            else
-            {
-                _view.StartPlaybackTimer();
-            }
+                PlayerPlaybackResult result =await _playbackService.SetPlaybackSpeedAsync(_view.SelectedPlaybackSpeed, CancellationToken.None);
 
-            _view.SetStatus(result.Message);
+                HandlePlaybackCommandResult(result);
+
+                if (result == null || !result.Success)
+                {
+                    _view.SelectPlaybackSpeed(_playbackService.CurrentPlaybackSpeed);
+
+                    return;
+                }
+
+                _view.SetPlaybackTime(_playbackService.CurrentPlaybackTime);
+                _view.SetTimelinePlaybackTime(_playbackService.CurrentPlaybackTime);
+
+                UpdatePlaybackTimerState();
+                UpdatePlaybackStateDisplay();
+            }
+            finally
+            {
+                /*
+                 * 여기에서 현재 속도에 따라
+                 * ±시간 이동과 동기화 버튼 상태도 갱신된다.
+                 */
+                EndPlaybackCommand();
+            }
         }
 
         /// <summary>
@@ -235,9 +225,9 @@ namespace CamViewer.Presenters
 
                 HandlePlaybackCommandResult(result);
 
-                if (!result.Success)
+                if (result == null || !result.Success)
                 {
-                    _view.ShowMessage(result.Message);
+                    return;
                 }
             }
             finally
@@ -262,35 +252,25 @@ namespace CamViewer.Presenters
 
                 if (_playbackService.CurrentState == PlaybackState.Rewinding)
                 {
-                    result =
-                        await _playbackService.PauseAsync(
-                            CancellationToken.None);
+                    result = await _playbackService.PauseAsync(CancellationToken.None);
                 }
-                else if (_playbackService.CurrentState == PlaybackState.Paused
-                    && _lastPlaybackDirection == PlaybackState.Rewinding)
+                else if (_playbackService.CurrentState == PlaybackState.Paused && _lastPlaybackDirection == PlaybackState.Rewinding)
                 {
-                    result =
-                        await _playbackService.ResumeAsync(
-                            CancellationToken.None);
+                    result = await _playbackService.ResumeAsync(CancellationToken.None);
                 }
                 else
                 {
-                    result =
-                        await _playbackService.RewindAsync(
-                            CancellationToken.None);
+                    result = await _playbackService.RewindAsync(CancellationToken.None);
                 }
 
                 HandlePlaybackCommandResult(result);
 
-                if (!result.Success)
+                if (result == null || !result.Success)
                 {
-                    _view.ShowMessage(result.Message);
                     return;
                 }
 
-                DateTime? playbackTime =
-                    await _playbackService.SyncPlaybackTimeAsync(
-                        CancellationToken.None);
+                DateTime? playbackTime = await _playbackService.SyncPlaybackTimeAsync(CancellationToken.None);
 
                 _view.SetPlaybackTime(playbackTime);
                 _view.SetTimelinePlaybackTime(playbackTime);
@@ -310,6 +290,16 @@ namespace CamViewer.Presenters
         /// </summary>
         private async void OnSeekBackward10(object sender, EventArgs e)
         {
+            if (_playbackService.CurrentPlaybackSpeed != PlaybackSpeed.Normal)
+            {
+                _view.SetStatus(
+                    "이전/다음 시간 이동은 1배속에서만 사용할 수 있습니다.");
+
+                UpdatePlaybackControlAvailability();
+
+                return;
+            }
+
             if (!TryBeginPlaybackCommand())
             {
                 return;
@@ -319,26 +309,22 @@ namespace CamViewer.Presenters
             {
                 int seconds = _view.TimeAdjustSeconds;
 
-                PlayerPlaybackResult result =
-                    await _playbackService.SeekSecondsAsync(
-                        -seconds,
-                        CancellationToken.None);
+                PlayerPlaybackResult result = await _playbackService.SeekSecondsAsync(-seconds, CancellationToken.None);
 
                 HandlePlaybackCommandResult(result);
 
-                if (!result.Success)
+                if (result == null || !result.Success)
                 {
                     return;
                 }
 
 
-                DateTime? playbackTime =
-                    await _playbackService.SyncPlaybackTimeAsync(
-                        CancellationToken.None);
+                DateTime? playbackTime = await _playbackService.SyncPlaybackTimeAsync(CancellationToken.None);
 
                 _view.SetPlaybackTime(playbackTime);
                 _view.SetTimelinePlaybackTime(playbackTime);
-                _view.StartPlaybackTimer();
+                UpdatePlaybackTimerState();
+                UpdatePlaybackStateDisplay();
             }
             finally
             {
@@ -395,7 +381,7 @@ namespace CamViewer.Presenters
 
                 HandlePlaybackCommandResult(result);
 
-                if (!result.Success)
+                if (result == null || !result.Success)
                 {
                     return;
                 }
@@ -415,23 +401,71 @@ namespace CamViewer.Presenters
             }
         }
 
+        /// <summary>
+        /// 재생 대상 채널의 실제 영상 해상도를 조회하여
+        /// 조회에 성공한 화면의 원본 크기만 갱신한다.
+        ///
+        /// 원본 정보 조회에 실패한 화면은 기존 크기를 유지한다.
+        /// </summary>
         private async Task ApplyVideoSourceInfoAsync(
-    PlayerPlaybackRequest request)
+            PlayerPlaybackRequest request)
         {
-            if (request == null || request.Channels == null)
+            if (request == null
+                || request.Channels == null
+                || request.Channels.Count == 0)
             {
+                _view.SetStatus(
+                    "영상 원본 정보를 조회할 채널이 없습니다.");
+
                 return;
             }
 
-            foreach (PlayerChannelTarget channel in request.Channels)
+            var resultMessages =
+                new List<string>();
+
+            bool layoutChanged =
+                false;
+
+            foreach (PlayerChannelTarget channel
+                in request.Channels)
             {
+                if (channel == null)
+                {
+                    continue;
+                }
+
                 PlayerVideoSourceInfoResult infoResult =
                     await _playbackService.GetVideoSourceInfoAsync(
                         channel,
                         CancellationToken.None);
 
-                if (!infoResult.Success)
+                string screenName =
+                    channel.ScreenPosition == ScreenPosition.Left
+                        ? "좌측"
+                        : "우측";
+
+                if (infoResult == null)
                 {
+                    resultMessages.Add(
+                        screenName
+                        + ": 원본 정보 조회 결과 없음");
+
+                    continue;
+                }
+
+                if (!infoResult.Success
+                    || infoResult.Width <= 0
+                    || infoResult.Height <= 0)
+                {
+                    /*
+                     * 조회 실패 시 0 × 0으로 초기화하지 않는다.
+                     * 마지막으로 정상 조회된 원본 비율을 유지한다.
+                     */
+                    resultMessages.Add(
+                        screenName
+                        + ": 원본 정보 조회 실패 - "
+                        + infoResult.Message);
+
                     continue;
                 }
 
@@ -439,9 +473,34 @@ namespace CamViewer.Presenters
                     infoResult.ScreenPosition,
                     infoResult.Width,
                     infoResult.Height);
+
+                layoutChanged =
+                    true;
+
+                resultMessages.Add(
+                    screenName
+                    + ": "
+                    + infoResult.Width
+                    + " × "
+                    + infoResult.Height);
             }
 
-            _view.UpdateVideoLayout();
+            /*
+             * 실제 원본 크기가 하나 이상 갱신된 경우에만
+             * 화면 배치를 다시 계산한다.
+             */
+            if (layoutChanged)
+            {
+                _view.UpdateVideoLayout();
+            }
+
+            if (resultMessages.Count > 0)
+            {
+                _view.SetStatus(
+                    string.Join(
+                        " / ",
+                        resultMessages));
+            }
         }
 
 
@@ -508,6 +567,15 @@ namespace CamViewer.Presenters
         /// </summary>
         private async void OnSeekForward10(object sender, EventArgs e)
         {
+            if (_playbackService.CurrentPlaybackSpeed != PlaybackSpeed.Normal)
+            {
+                _view.SetStatus(
+                    "이전/다음 시간 이동은 1배속에서만 사용할 수 있습니다.");
+
+                UpdatePlaybackControlAvailability();
+
+                return;
+            }
             if (!TryBeginPlaybackCommand())
             {
                 return;
@@ -525,9 +593,8 @@ namespace CamViewer.Presenters
 
                 HandlePlaybackCommandResult(result);
 
-                if (!result.Success)
+                if (result == null || !result.Success)
                 {
-                    _view.ShowMessage(result.Message);
                     return;
                 }
 
@@ -537,7 +604,8 @@ namespace CamViewer.Presenters
 
                 _view.SetPlaybackTime(playbackTime);
                 _view.SetTimelinePlaybackTime(playbackTime);
-                _view.StartPlaybackTimer();
+                UpdatePlaybackTimerState();
+                UpdatePlaybackStateDisplay();
             }
             finally
             {
@@ -626,7 +694,16 @@ namespace CamViewer.Presenters
 
             if (!result.Success)
             {
-                _view.ShowMessage(result.Message);
+                /*
+                 * 화면에 오류를 표시하기 전에 공통 실패 정보를 기록한다.
+                 *
+                 * NVR번호와 채널번호 등 세부 정보는 다음 단계에서
+                 * 서비스가 실패 결과를 생성하는 위치에 추가한다.
+                 */
+                PlaybackLogWriter.WriteResult("Player 재생 명령", result);
+
+                _view.ShowMessage(BuildPlaybackFailureMessage(result));
+
                 return;
             }
 
@@ -664,9 +741,6 @@ namespace CamViewer.Presenters
                 _view.SetLeftVideoTitle("좌측 영상 설정 없음");
                 _view.SetRightVideoTitle("우측 영상 설정 없음");
 
-                _view.SetVideoSourceSize(ScreenPosition.Left, 0, 0);
-                _view.SetVideoSourceSize(ScreenPosition.Right, 0, 0);
-
                 return;
             }
 
@@ -683,28 +757,6 @@ namespace CamViewer.Presenters
 
             _view.SetRightVideoTitle(
                 BuildVideoTitle("우측", counterNo, rightMap));
-
-            // 현재 CounterMap에 원본 해상도 정보가 없다면 0, 0으로 전달한다.
-            // 이 경우 원본 비율 모드는 안전하게 전체 채우기로 동작한다.
-            //_view.SetVideoSourceSize(
-            //    ScreenPosition.Left,
-            //    leftMap == null ? 0 : leftMap.VideoWidth,
-            //    leftMap == null ? 0 : leftMap.VideoHeight);
-
-            //_view.SetVideoSourceSize(
-            //    ScreenPosition.Right,
-            //    rightMap == null ? 0 : rightMap.VideoWidth,
-            //    rightMap == null ? 0 : rightMap.VideoHeight);
-
-            _view.SetVideoSourceSize(
-                ScreenPosition.Left,
-                1024,
-                768);
-
-            _view.SetVideoSourceSize(
-                ScreenPosition.Right,
-                1024,
-                768);
         }
 
         /// <summary>
@@ -948,7 +1000,7 @@ namespace CamViewer.Presenters
         /// </summary>
         private PlayerPlaybackRequest BuildPlaybackRequest()
         {
-            _view.UpdateVideoLayout();
+            //_view.UpdateVideoLayout();
 
             if (!_view.SelectedCounterNo.HasValue)
             {
@@ -1188,14 +1240,11 @@ namespace CamViewer.Presenters
                 _view.SetPlaybackTime(playbackTime);
                 _view.SetTimelinePlaybackTime(playbackTime);
 
-                PlaybackSyncStatus syncStatus =
-                    await _playbackService.GetPlaybackSyncStatusAsync(
-                        CancellationToken.None);
+                PlaybackSyncStatus syncStatus = await _playbackService.GetPlaybackSyncStatusAsync(CancellationToken.None);
 
                 if (syncStatus != null)
                 {
-                    _view.SetPlaybackSyncStatus(
-                        syncStatus.ToDisplayText());
+                    _view.SetPlaybackSyncStatus(syncStatus.ToDisplayText());
                 }
             }
             finally
@@ -1206,9 +1255,20 @@ namespace CamViewer.Presenters
 
         /// <summary>
         /// 영상 동기화 버튼 요청을 처리한다.
+        /// 현재 정방향 또는 역방향 상태를 유지하면서
+        /// 좌우 채널의 실제 재생시간을 보정한다.
         /// </summary>
         private async void OnSync(object sender, EventArgs e)
         {
+            if (_playbackService.CurrentPlaybackSpeed != PlaybackSpeed.Normal)
+            {
+                _view.SetStatus("영상 동기화는 1배속에서만 사용할 수 있습니다.");
+
+                UpdatePlaybackControlAvailability();
+
+                return;
+            }
+
             if (!TryBeginPlaybackCommand())
             {
                 return;
@@ -1220,14 +1280,26 @@ namespace CamViewer.Presenters
                     await _playbackService.ResyncPlaybackSessionsAsync(
                         CancellationToken.None);
 
-                HandlePlaybackCommandResult(result);
+                HandlePlaybackCommandResult(
+                    result);
+
+                if (result == null
+                    || !result.Success)
+                {
+                    UpdatePlaybackTimerState();
+                    UpdatePlaybackStateDisplay();
+                    return;
+                }
 
                 DateTime? playbackTime =
                     await _playbackService.SyncPlaybackTimeAsync(
                         CancellationToken.None);
 
-                _view.SetPlaybackTime(playbackTime);
-                _view.SetTimelinePlaybackTime(playbackTime);
+                _view.SetPlaybackTime(
+                    playbackTime);
+
+                _view.SetTimelinePlaybackTime(
+                    playbackTime);
 
                 PlaybackSyncStatus syncStatus =
                     await _playbackService.GetPlaybackSyncStatusAsync(
@@ -1238,6 +1310,13 @@ namespace CamViewer.Presenters
                     _view.SetPlaybackSyncStatus(
                         syncStatus.ToDisplayText());
                 }
+
+                /*
+                 * 역재생 동기화 과정에서 세션이 다시 생성될 수 있으므로
+                 * 실제 서비스 상태를 버튼과 타이머에 다시 반영한다.
+                 */
+                UpdatePlaybackTimerState();
+                UpdatePlaybackStateDisplay();
             }
             finally
             {
@@ -1247,6 +1326,9 @@ namespace CamViewer.Presenters
 
         /// <summary>
         /// 타임라인 클릭 이동 요청을 처리한다.
+        ///
+        /// 배속 상태에서도 타임라인 입력은 허용하지만,
+        /// 이동 결과는 항상 1배속으로 통일한다.
         /// </summary>
         private async void OnTimelineSeekRequested(
             object sender,
@@ -1260,15 +1342,26 @@ namespace CamViewer.Presenters
             try
             {
                 PlayerPlaybackResult result =
-                    await _playbackService.SeekToTimeAsync(
+                    await _playbackService.SeekTimelineToTimeAsync(
                         e.TargetTime,
                         CancellationToken.None);
 
-                HandlePlaybackCommandResult(result);
+                /*
+                 * 타임라인 이동이 정상 실행되면 서비스의 현재 속도는
+                 * 1배속으로 변경되어 있다.
+                 *
+                 * 프로그램 선택이므로 View 내부에서
+                 * PlaybackSpeedChangedEvent를 다시 발생시키지 않는다.
+                 */
+                _view.SelectPlaybackSpeed(
+                    _playbackService.CurrentPlaybackSpeed);
 
-                if (!result.Success)
+                HandlePlaybackCommandResult(
+                    result);
+
+                if (result == null
+                    || !result.Success)
                 {
-                    _view.ShowMessage(result.Message);
                     return;
                 }
 
@@ -1276,9 +1369,14 @@ namespace CamViewer.Presenters
                     await _playbackService.SyncPlaybackTimeAsync(
                         CancellationToken.None);
 
-                _view.SetPlaybackTime(playbackTime);
-                _view.SetTimelinePlaybackTime(playbackTime);
-                _view.StartPlaybackTimer();
+                _view.SetPlaybackTime(
+                    playbackTime);
+
+                _view.SetTimelinePlaybackTime(
+                    playbackTime);
+
+                UpdatePlaybackTimerState();
+                UpdatePlaybackStateDisplay();
             }
             finally
             {
@@ -1542,6 +1640,104 @@ namespace CamViewer.Presenters
             }
         }
 
+        private void UpdatePositionControlAvailability()
+        {
+            PlaybackState state =
+                _playbackService.CurrentState;
+
+            PlaybackSpeed speed =
+                _playbackService.CurrentPlaybackSpeed;
+
+            bool hasPlayback =
+                state != PlaybackState.Stopped;
+
+            bool isNormalSpeed =
+                speed == PlaybackSpeed.Normal;
+
+            /*
+             * 상대 이동은 현재시간 정확도가 필요하므로
+             * 1배속에서만 허용한다.
+             */
+            _view.SetSeekButtonsEnabled(
+                hasPlayback
+                && isNormalSpeed
+                && !_isPlaybackCommandRunning);
+
+            /*
+             * 타임라인은 절대 시각을 지정하므로
+             * 배속 상태에서도 허용한다.
+             */
+            _view.SetTimelineSeekEnabled(
+                hasPlayback
+                && !_isPlaybackCommandRunning);
+
+            /*
+             * 동기화는 1배속에서만 직접 실행한다.
+             * 배속 중 클릭을 허용한다면 내부에서 먼저 1배속으로 전환해야 한다.
+             */
+            _view.SetPlaybackSyncEnabled(
+                hasPlayback
+                && isNormalSpeed
+                && !_isPlaybackCommandRunning);
+        }
+
+        /// <summary>
+        /// 재생 실패 유형에 따라 사용자가 취할 수 있는 대응 방법을 추가한다.
+        /// </summary>
+        private static string BuildPlaybackFailureMessage(
+            PlayerPlaybackResult result)
+        {
+            if (result == null)
+            {
+                return "재생 처리 결과를 확인할 수 없습니다.";
+            }
+
+            string message =
+                string.IsNullOrWhiteSpace(
+                    result.Message)
+                    ? "재생 처리에 실패했습니다."
+                    : result.Message;
+
+            switch (result.FailureCategory)
+            {
+                case PlaybackFailureCategory.Retryable:
+                    return message
+                        + Environment.NewLine
+                        + Environment.NewLine
+                        + "NVR 또는 네트워크 상태를 확인한 후 다시 재생해 주세요.";
+
+                case PlaybackFailureCategory.Configuration:
+                    return message
+                        + Environment.NewLine
+                        + Environment.NewLine
+                        + "NVR 주소, 포트, 계정, Provider 및 채널 설정을 확인해 주세요.";
+
+                case PlaybackFailureCategory.NoRecord:
+                    return message
+                        + Environment.NewLine
+                        + Environment.NewLine
+                        + "해당 시간에 녹화 영상이 없습니다. 조회 시간을 변경해 주세요.";
+
+                case PlaybackFailureCategory.NotSupported:
+                    return message
+                        + Environment.NewLine
+                        + Environment.NewLine
+                        + "현재 NVR 또는 Provider에서 지원하지 않는 기능입니다.";
+
+                case PlaybackFailureCategory.System:
+                    return message
+                        + Environment.NewLine
+                        + Environment.NewLine
+                        + "프로그램 또는 Provider 구성 확인이 필요합니다."
+                        + Environment.NewLine
+                        + "오류 코드: "
+                        + result.ErrorCode;
+
+                case PlaybackFailureCategory.Cancelled:
+                default:
+                    return message;
+            }
+        }
         /// <summary>
         /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치와 좌/우 동기화 상태를 화면에 반영한다.
         /// </summary>
@@ -1583,11 +1779,17 @@ namespace CamViewer.Presenters
         {
             if (_isPlaybackCommandRunning)
             {
-                _view.SetStatus("이전 재생 명령을 처리 중입니다.");
+                _view.SetStatus(
+                    "이전 재생 명령을 처리 중입니다.");
+
                 return false;
             }
 
-            _isPlaybackCommandRunning = true;
+            _isPlaybackCommandRunning =
+                true;
+
+            UpdatePlaybackControlAvailability();
+
             return true;
         }
 
@@ -1596,7 +1798,10 @@ namespace CamViewer.Presenters
         /// </summary>
         private void EndPlaybackCommand()
         {
-            _isPlaybackCommandRunning = false;
+            _isPlaybackCommandRunning =
+                false;
+
+            UpdatePlaybackControlAvailability();
         }
 
         /// <summary>
@@ -1636,6 +1841,54 @@ namespace CamViewer.Presenters
             {
                 _view.StopPlaybackTimer();
             }
+        }
+
+        /// <summary>
+        /// 현재 재생 상태와 속도에 따라
+        /// 상대 이동, 타임라인, 수동 동기화 기능을 제어한다.
+        /// </summary>
+        private void UpdatePlaybackControlAvailability()
+        {
+            PlaybackState state =
+                _playbackService.CurrentState;
+
+            PlaybackSpeed speed =
+                _playbackService.CurrentPlaybackSpeed;
+
+            bool hasPlayback =
+                state != PlaybackState.Stopped;
+
+            bool commandAvailable =
+                !_isPlaybackCommandRunning;
+
+            bool isNormalSpeed =
+                speed == PlaybackSpeed.Normal;
+
+            /*
+             * ±시간 이동은 현재 재생시간을 기준으로 계산하므로
+             * 1배속에서만 허용한다.
+             */
+            _view.SetSeekButtonsEnabled(
+                hasPlayback
+                && commandAvailable
+                && isNormalSpeed);
+
+            /*
+             * 타임라인은 절대 시각을 지정하므로
+             * 모든 배속에서 허용한다.
+             */
+            _view.SetTimelineSeekEnabled(
+                hasPlayback
+                && commandAvailable);
+
+            /*
+             * 수동 동기화는 내부적으로 Seek가 발생할 수 있으므로
+             * 1배속에서만 허용한다.
+             */
+            _view.SetPlaybackSyncEnabled(
+                hasPlayback
+                && commandAvailable
+                && isNormalSpeed);
         }
     }
 }
