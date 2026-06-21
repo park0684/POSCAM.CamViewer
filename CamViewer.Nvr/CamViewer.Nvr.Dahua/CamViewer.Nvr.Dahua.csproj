@@ -51,6 +51,7 @@
   <ItemGroup>
     <Compile Include="Native\DahuaNative.cs" />
     <Compile Include="Native\Kernel32Native.cs" />
+    <Compile Include="Playback\DahuaPlaybackEngine.cs" />
     <Compile Include="Playback\DahuaPlaybackGroupChannel.cs" />
     <Compile Include="Playback\DahuaPlaybackGroupSession.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

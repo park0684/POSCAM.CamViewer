@@ -9,6 +9,7 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using CamViewer.Nvr.Dahua.Playback;
 
 namespace CamViewer.Nvr.Dahua.Providers
 {
@@ -23,7 +24,13 @@ namespace CamViewer.Nvr.Dahua.Providers
         "Dahua NetSDK",
         "Dahua",
         NvrConnectionType.Sdk)]
-    public sealed class DahuaNvrProvider : INvrProvider,INvrPlaybackPositionProvider,INvrVideoSourceInfoProvider, INvrReversePlaybackProvider, INvrPlaybackAlignmentProvider
+    public sealed class DahuaNvrProvider :
+    INvrProvider,
+    INvrPlaybackPositionProvider,
+    INvrVideoSourceInfoProvider,
+    INvrReversePlaybackProvider,
+    INvrPlaybackAlignmentProvider,
+    INvrPlaybackEngineProvider
     {
         private bool _disposed;
         private bool _runtimeAcquired;
@@ -93,6 +100,83 @@ namespace CamViewer.Nvr.Dahua.Providers
                 CanChangeSpeed = true,
                 CanGetVideoSourceInfo = true
             };
+        }
+
+        /// <summary>
+        /// 현재 로그인된 Dahua Provider에 연결된
+        /// 고수준 다중채널 재생 엔진을 생성한다.
+        ///
+        /// CamViewer 공통 서비스는 이 엔진에 명령만 전달하고,
+        /// Dahua SDK 호출 순서와 동기화 방법에는 관여하지 않는다.
+        /// </summary>
+        public NvrResult<INvrPlaybackEngine>
+            CreatePlaybackEngine()
+        {
+            EnsureNotDisposed();
+
+            if (!IsInitialized)
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.SdkError,
+                    "Dahua Provider가 초기화되지 않았습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_ENGINE_PROVIDER_NOT_INITIALIZED",
+
+                        ErrorMessage =
+                            "Dahua Provider가 초기화되지 않았습니다.",
+
+                        Operation =
+                            "CreatePlaybackEngine"
+                    });
+            }
+
+            if (!IsLoggedIn)
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.LoginFailed,
+                    "Dahua NVR에 로그인되어 있지 않습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_ENGINE_PROVIDER_NOT_LOGGED_IN",
+
+                        ErrorMessage =
+                            "Dahua NVR에 로그인되어 있지 않습니다.",
+
+                        Operation =
+                            "CreatePlaybackEngine"
+                    });
+            }
+
+            try
+            {
+                INvrPlaybackEngine engine =
+                    new DahuaPlaybackEngine(
+                        this);
+
+                return NvrResult<INvrPlaybackEngine>.Ok(
+                    engine,
+                    "Dahua 다중채널 재생 엔진을 생성했습니다.");
+            }
+            catch (Exception ex)
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 다중채널 재생 엔진 생성 중 오류가 발생했습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_PLAYBACK_ENGINE_CREATE_FAILED",
+
+                        ErrorMessage =
+                            ex.Message,
+
+                        Operation =
+                            "CreatePlaybackEngine"
+                    });
+            }
         }
 
         /// <summary>
