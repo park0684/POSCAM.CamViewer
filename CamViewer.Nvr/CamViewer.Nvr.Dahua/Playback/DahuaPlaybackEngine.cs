@@ -1738,16 +1738,456 @@ namespace CamViewer.Nvr.Dahua.Playback
         }
 
         /// <summary>
-        /// Dahua 재생 그룹의 재생속도를 변경한다.
+        /// Dahua 재생 그룹의 모든 채널 재생속도를 변경한다.
+        ///
+        /// 처리 순서:
+        /// 1. 그룹과 현재 상태 검증
+        /// 2. 속도 변경 전 실제 영상재생시간 확인
+        /// 3. 채널별 재생속도 변경
+        /// 4. 일부 채널 실패 시 이전 속도로 복원
+        /// 5. 모든 채널 성공 후 그룹 속도 확정
+        ///
+        /// 정책:
+        /// - Playing 상태에서 변경하면 Playing 상태를 유지한다.
+        /// - Rewinding 상태에서 변경하면 Rewinding 상태를 유지한다.
+        /// - Paused 상태에서 변경하면 Paused 상태를 유지한다.
+        /// - 속도 변경만으로 재생 상태를 변경하지 않는다.
         /// </summary>
-        public Task<NvrResult> SetSpeedAsync(
+        public async Task<NvrResult> SetSpeedAsync(
             INvrPlaybackGroupSession session,
             NvrPlaybackSpeed speed,
             CancellationToken cancellationToken)
         {
-            return Task.FromResult(
-                CreateNotImplementedResult(
-                    "SetSpeed"));
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Cancelled,
+                    "Dahua 재생속도 변경 요청이 취소되었습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_SPEED_CANCELLED",
+                        "Dahua 재생속도 변경 요청이 취소되었습니다.",
+                        "SetSpeed"));
+            }
+
+            DahuaPlaybackGroupSession groupSession =
+                session as DahuaPlaybackGroupSession;
+
+            if (groupSession == null)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹 세션이 아닙니다.",
+                    CreateError(
+                        "INVALID_DAHUA_GROUP_SESSION",
+                        "Dahua 재생 그룹 세션이 아닙니다.",
+                        "SetSpeed"));
+            }
+
+            if (!groupSession.IsReady)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹이 준비되지 않았습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_NOT_READY",
+                        "Dahua 재생 그룹이 준비되지 않았습니다.",
+                        "SetSpeed"));
+            }
+
+            if (groupSession.ChannelCount <= 0)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_CHANNEL_EMPTY",
+                        "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                        "SetSpeed"));
+            }
+
+            /*
+             * 정의되지 않은 enum 값이 전달되면
+             * Dahua SDK 명령을 실행하지 않는다.
+             */
+            if (!Enum.IsDefined(
+                    typeof(NvrPlaybackSpeed),
+                    speed))
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "지원하지 않는 Dahua 재생속도입니다. "
+                    + "Speed="
+                    + speed,
+                    CreateError(
+                        "DAHUA_GROUP_INVALID_SPEED",
+                        "지원하지 않는 Dahua 재생속도입니다.",
+                        "SetSpeed"));
+            }
+
+            /*
+             * 재생, 역재생 또는 일시정지 상태에서만
+             * 속도 변경을 허용한다.
+             */
+            if (groupSession.State != NvrPlaybackState.Playing
+                && groupSession.State != NvrPlaybackState.Rewinding
+                && groupSession.State != NvrPlaybackState.Paused)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생속도를 변경할 수 없는 상태입니다. "
+                    + "State="
+                    + groupSession.State,
+                    CreateError(
+                        "DAHUA_GROUP_INVALID_SPEED_STATE",
+                        "Dahua 재생속도를 변경할 수 없는 상태입니다.",
+                        "SetSpeed"));
+            }
+
+            /*
+             * 동일한 속도가 다시 전달되면
+             * SDK 명령을 반복 호출하지 않는다.
+             */
+            if (groupSession.Speed == speed)
+            {
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹이 이미 요청한 속도로 설정되어 있습니다.");
+            }
+
+            NvrPlaybackSpeed previousSpeed =
+                groupSession.Speed;
+
+            NvrPlaybackState previousState =
+                groupSession.State;
+
+            /*
+             * 재생 중 속도를 변경하는 경우,
+             * 이전 속도가 적용된 마지막 실제 OSD 시간을 먼저 읽는다.
+             *
+             * 이 시간을 그룹의 새로운 시간 기준점으로 저장한 후
+             * 채널 속도를 변경한다.
+             *
+             * Paused 상태에서는 시간이 진행되지 않으므로
+             * 별도의 OSD 기준점 갱신이 필요하지 않다.
+             */
+            if (previousState == NvrPlaybackState.Playing
+                || previousState == NvrPlaybackState.Rewinding)
+            {
+                NvrResult captureTimeResult =
+                    await CapturePlaybackTimeBeforeSpeedChangeAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (captureTimeResult == null
+                    || !captureTimeResult.Success)
+                {
+                    return captureTimeResult
+                        ?? NvrResult.Fail(
+                            NvrResultStatus.Failed,
+                            "속도 변경 전 영상재생시간 확인 결과가 없습니다.",
+                            CreateError(
+                                "DAHUA_GROUP_SPEED_TIME_RESULT_EMPTY",
+                                "속도 변경 전 영상재생시간 확인 결과가 없습니다.",
+                                "SetSpeed"));
+                }
+            }
+
+            IList<DahuaPlaybackGroupChannel> channels =
+                groupSession.GetChannels();
+
+            /*
+             * 일부 채널만 속도 변경에 성공할 가능성에 대비해
+             * 성공한 채널을 별도로 보관한다.
+             */
+            var changedChannels =
+                new List<DahuaPlaybackGroupChannel>();
+
+            foreach (DahuaPlaybackGroupChannel channel
+                in channels)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    bool rollbackSucceeded =
+                        await RestoreChannelSpeedsAsync(
+                            changedChannels,
+                            previousSpeed);
+
+                    if (!rollbackSucceeded)
+                    {
+                        SetSpeedRollbackFailedState(
+                            groupSession);
+                    }
+                    else
+                    {
+                        groupSession.SetSpeed(
+                            previousSpeed);
+
+                        groupSession.SetState(
+                            previousState);
+                    }
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Cancelled,
+                        "Dahua 재생속도 변경 요청이 취소되었습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_SPEED_CANCELLED",
+                            "Dahua 재생속도 변경 요청이 취소되었습니다.",
+                            "SetSpeed"));
+                }
+
+                if (channel == null
+                    || channel.Session == null)
+                {
+                    bool rollbackSucceeded =
+                        await RestoreChannelSpeedsAsync(
+                            changedChannels,
+                            previousSpeed);
+
+                    if (!rollbackSucceeded)
+                    {
+                        SetSpeedRollbackFailedState(
+                            groupSession);
+                    }
+                    else
+                    {
+                        groupSession.SetSpeed(
+                            previousSpeed);
+
+                        groupSession.SetState(
+                            previousState);
+                    }
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_CHANNEL_SESSION_INVALID",
+                            "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                            "SetSpeed"));
+                }
+
+                /*
+                 * Dahua Provider는 채널이 Paused 상태였다면
+                 * 속도 변경 후 다시 Pause를 적용한다.
+                 *
+                 * 따라서 이 엔진에서 별도로 Resume하거나 Pause하지 않는다.
+                 */
+                NvrResult speedResult =
+                    await _provider.SetPlaybackSpeedAsync(
+                        channel.Session,
+                        speed,
+                        cancellationToken);
+
+                if (speedResult == null
+                    || !speedResult.Success)
+                {
+                    bool rollbackSucceeded =
+                        await RestoreChannelSpeedsAsync(
+                            changedChannels,
+                            previousSpeed);
+
+                    if (!rollbackSucceeded)
+                    {
+                        SetSpeedRollbackFailedState(
+                            groupSession);
+                    }
+                    else
+                    {
+                        groupSession.SetSpeed(
+                            previousSpeed);
+
+                        groupSession.SetState(
+                            previousState);
+
+                        groupSession.SetReady(
+                            true,
+                            "Dahua 재생속도 변경에 실패하여 "
+                            + "이전 속도로 복원했습니다.");
+                    }
+
+                    return NvrResult.Fail(
+                        speedResult == null
+                            ? NvrResultStatus.Failed
+                            : speedResult.Status,
+
+                        speedResult == null
+                            ? "Dahua 채널 속도 변경 결과가 없습니다."
+                            : speedResult.Message,
+
+                        speedResult == null
+                            ? CreateError(
+                                "DAHUA_GROUP_SPEED_RESULT_EMPTY",
+                                "Dahua 채널 속도 변경 결과가 없습니다.",
+                                "SetSpeed")
+                            : speedResult.Error);
+                }
+
+                changedChannels.Add(
+                    channel);
+            }
+
+            /*
+             * 모든 채널의 속도 변경이 성공한 경우에만
+             * 그룹 전체 속도를 변경한다.
+             */
+            groupSession.SetSpeed(
+                speed);
+
+            /*
+             * 속도 변경 전 상태를 그대로 유지한다.
+             *
+             * 채널별 실제 상태도 Dahua Provider가 보존하므로
+             * 여기서는 그룹 상태만 이전 상태로 확정한다.
+             */
+            groupSession.SetState(
+                previousState);
+
+            groupSession.SetReady(
+                true,
+                "Dahua 재생 그룹의 속도를 변경했습니다.");
+
+            /*
+             * 단일 채널은 채널 간 시간차가 존재하지 않으므로
+             * 즉시 동기화 완료 상태로 처리한다.
+             */
+            if (groupSession.ChannelCount <= 1)
+            {
+                groupSession.SetSynchronizationStatus(
+                    true,
+                    0d,
+                    "단일 Dahua 채널의 재생속도를 변경했습니다.");
+
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹의 속도를 변경했습니다. "
+                    + GetPlaybackSpeedText(speed));
+            }
+
+            /*
+             * 배속 재생 중에는 Dahua 정렬 기능을 실행하지 않는다.
+             *
+             * 현재 DahuaPlaybackSynchronizer는 정방향 1배속 상태에서만
+             * 실제 OSD 시각을 기준으로 채널을 정렬한다.
+             */
+            if (speed != NvrPlaybackSpeed.Normal
+                || groupSession.Direction
+                    != NvrPlaybackDirection.Forward)
+            {
+                groupSession.SetSynchronizationStatus(
+                    false,
+                    null,
+                    "Dahua 재생속도가 변경되었습니다. "
+                    + "1배속 정방향으로 복귀한 뒤 "
+                    + "채널 동기화가 필요합니다.");
+
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹의 속도를 변경했습니다. "
+                    + GetPlaybackSpeedText(speed));
+            }
+
+            /*
+             * 다중채널이 1배속 정방향으로 복귀한 경우
+             * 실제 OSD 시각을 다시 확인하여 채널을 동기화한다.
+             *
+             * SynchronizeAsync는:
+             * - Playing이면 일시정지 후 동기화하고 다시 Playing으로 복원
+             * - Paused이면 동기화 후 Paused 상태 유지
+             *
+             * 속도 변경 직전 상태는 previousState에 보관되어 있다.
+             */
+            NvrResult synchronizeResult =
+                await _synchronizer.SynchronizeAsync(
+                    groupSession,
+                    cancellationToken);
+
+            if (synchronizeResult != null
+                && synchronizeResult.Success)
+            {
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹의 속도를 "
+                    + GetPlaybackSpeedText(speed)
+                    + "으로 변경하고 채널 동기화를 완료했습니다.");
+            }
+
+            /*
+             * 속도 변경 자체는 이미 성공했다.
+             *
+             * 동기화 실패로 그룹이 Paused 상태가 되었더라도
+             * 속도 변경 전 Playing 상태였다면 재생 상태를 복원한다.
+             */
+            NvrResult stateRestoreResult =
+                await RestoreStateAfterSpeedSynchronizationAsync(
+                    groupSession,
+                    previousState);
+
+            if (stateRestoreResult == null
+                || !stateRestoreResult.Success)
+            {
+                groupSession.SetState(
+                    NvrPlaybackState.Faulted);
+
+                groupSession.SetReady(
+                    false,
+                    "속도 변경 후 재생 상태를 복원하지 못했습니다.");
+
+                groupSession.SetSynchronizationStatus(
+                    false,
+                    null,
+                    "속도 변경 후 동기화 및 상태 복원에 실패했습니다.");
+
+                return NvrResult.Fail(
+                    stateRestoreResult == null
+                        ? NvrResultStatus.Failed
+                        : stateRestoreResult.Status,
+
+                    stateRestoreResult == null
+                        ? "속도 변경 후 재생 상태 복원 결과가 없습니다."
+                        : stateRestoreResult.Message,
+
+                    stateRestoreResult == null
+                        ? CreateError(
+                            "DAHUA_GROUP_SPEED_STATE_RESTORE_RESULT_EMPTY",
+                            "속도 변경 후 재생 상태 복원 결과가 없습니다.",
+                            "SetSpeed")
+                        : stateRestoreResult.Error);
+            }
+
+            /*
+             * 속도 변경은 성공했지만 동기화는 실패했다.
+             *
+             * 기존 재생 상태는 복원되었으므로 완전 실패가 아니라
+             * PartialSuccess로 반환한다.
+             */
+            groupSession.SetSynchronizationStatus(
+                false,
+                null,
+                "재생속도는 변경되었지만 "
+                + "채널 동기화를 완료하지 못했습니다.");
+
+            return new NvrResult
+            {
+                Success =
+                    true,
+
+                Status =
+                    NvrResultStatus.PartialSuccess,
+
+                Message =
+                    "Dahua 재생 그룹의 속도는 "
+                    + GetPlaybackSpeedText(speed)
+                    + "으로 변경되었지만 채널 동기화에 실패했습니다. "
+                    + (
+                        synchronizeResult == null
+                            ? "동기화 결과가 없습니다."
+                            : synchronizeResult.Message
+                    ),
+
+                Error =
+                    synchronizeResult == null
+                        ? CreateError(
+                            "DAHUA_GROUP_SPEED_SYNC_RESULT_EMPTY",
+                            "속도 변경 후 채널 동기화 결과가 없습니다.",
+                            "SetSpeed")
+                        : synchronizeResult.Error
+            };
         }
 
         /// <summary>
@@ -2255,5 +2695,351 @@ namespace CamViewer.Nvr.Dahua.Playback
                     operation
             };
         }
+
+        /// <summary>
+        /// 재생속도 변경 전에 기준 채널의 실제 OSD 시간을 읽어
+        /// 그룹의 현재 공통 영상재생시간을 갱신한다.
+        ///
+        /// 왼쪽 화면 채널을 우선 사용하며,
+        /// 왼쪽 채널이 없으면 첫 번째 채널을 사용한다.
+        /// </summary>
+        private async Task<NvrResult>
+            CapturePlaybackTimeBeforeSpeedChangeAsync(
+                DahuaPlaybackGroupSession groupSession,
+                CancellationToken cancellationToken)
+        {
+            IList<DahuaPlaybackGroupChannel> channels =
+                groupSession.GetChannels();
+
+            DahuaPlaybackGroupChannel referenceChannel =
+                null;
+
+            /*
+             * 화면 왼쪽 채널을 기준 채널로 우선 선택한다.
+             */
+            foreach (DahuaPlaybackGroupChannel channel
+                in channels)
+            {
+                if (channel != null
+                    && channel.ScreenPosition == 0)
+                {
+                    referenceChannel =
+                        channel;
+
+                    break;
+                }
+            }
+
+            /*
+             * 왼쪽 채널이 없으면 첫 번째 유효 채널을 사용한다.
+             */
+            if (referenceChannel == null)
+            {
+                foreach (DahuaPlaybackGroupChannel channel
+                    in channels)
+                {
+                    if (channel != null
+                        && channel.Session != null)
+                    {
+                        referenceChannel =
+                            channel;
+
+                        break;
+                    }
+                }
+            }
+
+            if (referenceChannel == null
+                || referenceChannel.Session == null)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "속도 변경 전 시간을 확인할 기준 채널이 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_SPEED_REFERENCE_CHANNEL_EMPTY",
+                        "속도 변경 전 시간을 확인할 기준 채널이 없습니다.",
+                        "SetSpeed"));
+            }
+
+            NvrResult<DateTime> timeResult =
+                await _provider.GetPlaybackTimeAsync(
+                    referenceChannel.Session,
+                    cancellationToken);
+
+            if (timeResult == null
+                || !timeResult.Success)
+            {
+                return NvrResult.Fail(
+                    timeResult == null
+                        ? NvrResultStatus.Failed
+                        : timeResult.Status,
+
+                    timeResult == null
+                        ? "속도 변경 전 영상재생시간 조회 결과가 없습니다."
+                        : timeResult.Message,
+
+                    timeResult == null
+                        ? CreateError(
+                            "DAHUA_GROUP_SPEED_TIME_RESULT_EMPTY",
+                            "속도 변경 전 영상재생시간 조회 결과가 없습니다.",
+                            "SetSpeed")
+                        : timeResult.Error);
+            }
+
+            /*
+             * Dahua OSD 원본 시각에서 채널 보정값을 제거하여
+             * CamViewer 공통 영상재생시간으로 변환한다.
+             */
+            DateTime commonPlaybackTime =
+                referenceChannel.ToCommonTime(
+                    timeResult.Data);
+
+            groupSession.SetCurrentPlaybackTime(
+                commonPlaybackTime);
+
+            return NvrResult.Ok(
+                "속도 변경 전 영상재생시간을 갱신했습니다.");
+        }
+
+        /// <summary>
+        /// 일부 채널 속도 변경 실패 시
+        /// 이미 변경된 채널들을 이전 속도로 복원한다.
+        /// </summary>
+        private async Task<bool> RestoreChannelSpeedsAsync(
+            IList<DahuaPlaybackGroupChannel> channels,
+            NvrPlaybackSpeed previousSpeed)
+        {
+            if (channels == null
+                || channels.Count == 0)
+            {
+                return true;
+            }
+
+            bool allSucceeded =
+                true;
+
+            /*
+             * 변경 순서의 역순으로 이전 속도를 복원한다.
+             */
+            for (int index = channels.Count - 1;
+                index >= 0;
+                index--)
+            {
+                DahuaPlaybackGroupChannel channel =
+                    channels[index];
+
+                if (channel == null
+                    || channel.Session == null)
+                {
+                    allSucceeded =
+                        false;
+
+                    continue;
+                }
+
+                try
+                {
+                    NvrResult restoreResult =
+                        await _provider.SetPlaybackSpeedAsync(
+                            channel.Session,
+                            previousSpeed,
+                            CancellationToken.None);
+
+                    if (restoreResult == null
+                        || !restoreResult.Success)
+                    {
+                        allSucceeded =
+                            false;
+                    }
+                }
+                catch
+                {
+                    allSucceeded =
+                        false;
+                }
+            }
+
+            return allSucceeded;
+        }
+
+        /// <summary>
+        /// 채널별 속도가 서로 다른 상태로 남았을 가능성이 있을 때
+        /// 그룹을 더 이상 안전하게 사용할 수 없는 상태로 변경한다.
+        /// </summary>
+        private static void SetSpeedRollbackFailedState(
+            DahuaPlaybackGroupSession groupSession)
+        {
+            if (groupSession == null)
+            {
+                return;
+            }
+
+            groupSession.SetState(
+                NvrPlaybackState.Faulted);
+
+            groupSession.SetReady(
+                false,
+                "일부 Dahua 채널의 속도를 이전 상태로 복원하지 못했습니다.");
+
+            groupSession.SetSynchronizationStatus(
+                false,
+                null,
+                "채널별 재생속도가 서로 다를 수 있어 "
+                + "재생 그룹을 다시 열어야 합니다.");
+        }
+
+        /// <summary>
+        /// 공통 재생속도를 사용자 표시 문자열로 변환한다.
+        /// </summary>
+        private static string GetPlaybackSpeedText(
+            NvrPlaybackSpeed speed)
+        {
+            switch (speed)
+            {
+                case NvrPlaybackSpeed.Half:
+                    return "0.5배속";
+
+                case NvrPlaybackSpeed.Normal:
+                    return "1배속";
+
+                case NvrPlaybackSpeed.Double:
+                    return "2배속";
+
+                case NvrPlaybackSpeed.Quad:
+                    return "4배속";
+
+                case NvrPlaybackSpeed.Octuple:
+                    return "8배속";
+
+                default:
+                    return speed.ToString();
+            }
+        }
+
+
+        /// <summary>
+        /// 속도 변경 후 자동 동기화가 실패했을 때
+        /// 속도 변경 전 그룹 재생 상태를 복원한다.
+        ///
+        /// 속도 변경 자체는 완료된 상태이므로
+        /// 이전 속도로 되돌리지는 않는다.
+        ///
+        /// 복원 정책:
+        /// - 이전 상태가 Paused이면 Paused 유지
+        /// - 이전 상태가 Playing이면 전체 채널 Resume
+        /// - 이미 이전 상태라면 추가 SDK 명령을 호출하지 않음
+        /// </summary>
+        private async Task<NvrResult>
+            RestoreStateAfterSpeedSynchronizationAsync(
+                DahuaPlaybackGroupSession groupSession,
+                NvrPlaybackState previousState)
+        {
+            if (groupSession == null)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "복원할 Dahua 재생 그룹 세션이 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_REQUIRED_FOR_STATE_RESTORE",
+                        "복원할 Dahua 재생 그룹 세션이 없습니다.",
+                        "RestoreSpeedState"));
+            }
+
+            /*
+             * 속도 변경 전부터 일시정지 상태였다면
+             * 동기화 실패 후에도 일시정지 상태를 유지한다.
+             */
+            if (previousState
+                == NvrPlaybackState.Paused)
+            {
+                groupSession.SetState(
+                    NvrPlaybackState.Paused);
+
+                groupSession.SetReady(
+                    true,
+                    "속도 변경 전 일시정지 상태를 유지합니다.");
+
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹의 일시정지 상태를 유지했습니다.");
+            }
+
+            /*
+             * 동기화 실패 과정에서 Pause가 실행되지 않았거나
+             * Pause 롤백이 완료되어 이미 Playing 상태라면
+             * 추가 Resume 명령이 필요하지 않다.
+             */
+            if (previousState == NvrPlaybackState.Playing
+                && groupSession.State
+                    == NvrPlaybackState.Playing)
+            {
+                groupSession.SetReady(
+                    true,
+                    "속도 변경 전 재생 상태를 유지합니다.");
+
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹이 재생 상태를 유지하고 있습니다.");
+            }
+
+            /*
+             * 속도 변경 전 재생 중이었으나
+             * 동기화 실패 후 Paused 상태로 남았다면
+             * 그룹 전체를 다시 재개한다.
+             */
+            if (previousState
+                == NvrPlaybackState.Playing)
+            {
+                groupSession.SetState(
+                    NvrPlaybackState.Paused);
+
+                NvrResult resumeResult =
+                    await ResumeAsync(
+                        groupSession,
+                        CancellationToken.None);
+
+                if (resumeResult == null)
+                {
+                    return NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 상태 복원 결과가 없습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_SPEED_RESUME_RESULT_EMPTY",
+                            "Dahua 재생 상태 복원 결과가 없습니다.",
+                            "RestoreSpeedState"));
+                }
+
+                return resumeResult;
+            }
+
+            /*
+             * 역재생은 자동 동기화 대상에서 제외되므로
+             * 일반적으로 이 구간에 진입하지 않는다.
+             *
+             * 방어적으로 기존 역재생 상태를 유지한다.
+             */
+            if (previousState
+                == NvrPlaybackState.Rewinding)
+            {
+                groupSession.SetState(
+                    NvrPlaybackState.Rewinding);
+
+                groupSession.SetReady(
+                    true,
+                    "속도 변경 전 역재생 상태를 유지합니다.");
+
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹의 역재생 상태를 유지했습니다.");
+            }
+
+            return NvrResult.Fail(
+                NvrResultStatus.Failed,
+                "복원할 수 없는 Dahua 재생 상태입니다. "
+                + "PreviousState="
+                + previousState,
+                CreateError(
+                    "DAHUA_GROUP_SPEED_STATE_RESTORE_NOT_SUPPORTED",
+                    "복원할 수 없는 Dahua 재생 상태입니다.",
+                    "RestoreSpeedState"));
+        }
+
     }
 }
