@@ -54,6 +54,7 @@
     <Compile Include="Playback\DahuaPlaybackEngine.cs" />
     <Compile Include="Playback\DahuaPlaybackGroupChannel.cs" />
     <Compile Include="Playback\DahuaPlaybackGroupSession.cs" />
+    <Compile Include="Playback\DahuaPlaybackSynchronizer.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Providers\DahuaNvrProvider.cs" />
     <Compile Include="Sdk\DahuaEncodeConfigReader.cs" />

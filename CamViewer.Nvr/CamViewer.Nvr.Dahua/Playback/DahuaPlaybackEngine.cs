@@ -33,7 +33,7 @@ namespace CamViewer.Nvr.Dahua.Playback
         INvrPlaybackEngine
     {
         private readonly DahuaNvrProvider _provider;
-
+        private readonly DahuaPlaybackSynchronizer _synchronizer;
         /// <summary>
         /// Dahua 재생 엔진을 초기화한다.
         ///
@@ -1610,15 +1610,33 @@ namespace CamViewer.Nvr.Dahua.Playback
         }
 
         /// <summary>
-        /// Dahua 제조사 방식으로 채널 간 동기화를 수행한다.
+        /// Dahua 제조사 방식으로 재생 그룹의 채널 시간을 동기화한다.
+        ///
+        /// 실제 OSD 조회, 채널별 보정값 적용, 허용 오차 판단,
+        /// 재시도 및 재생 상태 복원은 DahuaPlaybackSynchronizer가 처리한다.
         /// </summary>
         public Task<NvrResult> SynchronizeAsync(
             INvrPlaybackGroupSession session,
             CancellationToken cancellationToken)
         {
-            return Task.FromResult(
-                CreateNotImplementedResult(
-                    "Synchronize"));
+            DahuaPlaybackGroupSession groupSession =
+                session as DahuaPlaybackGroupSession;
+
+            if (groupSession == null)
+            {
+                return Task.FromResult(
+                    NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 그룹 세션이 아닙니다.",
+                        CreateError(
+                            "INVALID_DAHUA_GROUP_SESSION",
+                            "Dahua 재생 그룹 세션이 아닙니다.",
+                            "Synchronize")));
+            }
+
+            return _synchronizer.SynchronizeAsync(
+                groupSession,
+                cancellationToken);
         }
 
         /// <summary>
