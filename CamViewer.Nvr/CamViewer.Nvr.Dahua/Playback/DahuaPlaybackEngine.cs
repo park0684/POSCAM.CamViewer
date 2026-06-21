@@ -1725,17 +1725,628 @@ namespace CamViewer.Nvr.Dahua.Playback
 
 
         /// <summary>
-        /// Dahua 재생 그룹의 방향을 변경한다.
+        /// Dahua 재생 그룹의 재생 방향을 변경한다.
+        ///
+        /// Dahua SDK는 현재 재생 핸들의 방향을 직접 변경하지 않고,
+        /// 정방향 또는 역방향 재생 세션을 새로 생성하는 방식으로 처리한다.
+        ///
+        /// 처리 순서:
+        /// 1. 그룹과 현재 상태 검증
+        /// 2. 방향 변경 전 실제 영상재생시간 확보
+        /// 3. 기존 채널 전체 일시정지
+        /// 4. 새 방향의 채널 세션 생성 및 Paused 상태 준비
+        /// 5. 기존 세션 정리 후 새 세션으로 교체
+        /// 6. 기존 속도 적용
+        /// 7. 방향 변경 전 재생 상태 복원
         /// </summary>
-        public Task<NvrResult> SetDirectionAsync(
+        public async Task<NvrResult> SetDirectionAsync(
             INvrPlaybackGroupSession session,
             NvrPlaybackDirection direction,
             CancellationToken cancellationToken)
         {
-            return Task.FromResult(
-                CreateNotImplementedResult(
-                    "SetDirection"));
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Cancelled,
+                    "Dahua 재생 방향 변경 요청이 취소되었습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_DIRECTION_CANCELLED",
+                        "Dahua 재생 방향 변경 요청이 취소되었습니다.",
+                        "SetDirection"));
+            }
+
+            DahuaPlaybackGroupSession groupSession =
+                session as DahuaPlaybackGroupSession;
+
+            if (groupSession == null)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹 세션이 아닙니다.",
+                    CreateError(
+                        "INVALID_DAHUA_GROUP_SESSION",
+                        "Dahua 재생 그룹 세션이 아닙니다.",
+                        "SetDirection"));
+            }
+
+            if (!groupSession.IsReady)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹이 준비되지 않았습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_NOT_READY",
+                        "Dahua 재생 그룹이 준비되지 않았습니다.",
+                        "SetDirection"));
+            }
+
+            if (groupSession.ChannelCount <= 0)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_CHANNEL_EMPTY",
+                        "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                        "SetDirection"));
+            }
+
+            if (!Enum.IsDefined(
+                    typeof(NvrPlaybackDirection),
+                    direction))
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "지원하지 않는 Dahua 재생 방향입니다. "
+                    + "Direction="
+                    + direction,
+                    CreateError(
+                        "DAHUA_GROUP_INVALID_DIRECTION",
+                        "지원하지 않는 Dahua 재생 방향입니다.",
+                        "SetDirection"));
+            }
+
+            /*
+             * 방향 변경은 재생 중, 역재생 중 또는
+             * 일시정지 상태에서만 허용한다.
+             */
+            if (groupSession.State != NvrPlaybackState.Playing
+                && groupSession.State != NvrPlaybackState.Rewinding
+                && groupSession.State != NvrPlaybackState.Paused)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 방향을 변경할 수 없는 상태입니다. "
+                    + "State="
+                    + groupSession.State,
+                    CreateError(
+                        "DAHUA_GROUP_INVALID_DIRECTION_STATE",
+                        "Dahua 재생 방향을 변경할 수 없는 상태입니다.",
+                        "SetDirection"));
+            }
+
+            /*
+             * 같은 방향이 다시 전달되면
+             * 재생 세션을 불필요하게 다시 생성하지 않는다.
+             */
+            if (groupSession.Direction
+                == direction)
+            {
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹이 이미 요청한 방향으로 설정되어 있습니다.");
+            }
+
+            NvrPlaybackDirection previousDirection =
+                groupSession.Direction;
+
+            NvrPlaybackState previousState =
+                groupSession.State;
+
+            NvrPlaybackSpeed previousSpeed =
+                groupSession.Speed;
+
+            bool wasActive =
+                previousState == NvrPlaybackState.Playing
+                || previousState == NvrPlaybackState.Rewinding;
+
+            /*
+             * 재생 중 방향을 바꾸는 경우,
+             * 기존 방향이 적용된 마지막 실제 OSD 시간을 먼저 확보한다.
+             *
+             * SetSpeedAsync에서 작성한 기존 메서드를 재사용한다.
+             */
+            if (wasActive)
+            {
+                NvrResult captureResult =
+                    await CapturePlaybackTimeBeforeSpeedChangeAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (captureResult == null
+                    || !captureResult.Success)
+                {
+                    return captureResult
+                        ?? NvrResult.Fail(
+                            NvrResultStatus.Failed,
+                            "방향 변경 전 영상재생시간 확인 결과가 없습니다.",
+                            CreateError(
+                                "DAHUA_GROUP_DIRECTION_TIME_RESULT_EMPTY",
+                                "방향 변경 전 영상재생시간 확인 결과가 없습니다.",
+                                "SetDirection"));
+                }
+            }
+
+            DateTime transitionTime =
+                groupSession.CurrentPlaybackTime;
+
+            /*
+             * 조회 시작 지점에서는 더 이상 역방향으로 진행할 수 없다.
+             */
+            if (direction == NvrPlaybackDirection.Reverse
+                && transitionTime <= groupSession.StartTime)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "조회 시작시간보다 이전으로 역재생할 수 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_REVERSE_BEFORE_START",
+                        "조회 시작시간보다 이전으로 역재생할 수 없습니다.",
+                        "SetDirection"));
+            }
+
+            /*
+             * 조회 종료 지점에서는 정방향 세션을 시작할 수 없다.
+             */
+            if (direction == NvrPlaybackDirection.Forward
+                && transitionTime >= groupSession.EndTime)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "조회 종료시간 이후로 정방향 재생할 수 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_FORWARD_AFTER_END",
+                        "조회 종료시간 이후로 정방향 재생할 수 없습니다.",
+                        "SetDirection"));
+            }
+
+            /*
+             * 기존 세션이 움직이는 상태에서 새 세션을 만들지 않도록
+             * 먼저 기존 채널 전체를 일시정지한다.
+             */
+            if (wasActive)
+            {
+                NvrResult pauseResult =
+                    await PauseAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (pauseResult == null
+                    || !pauseResult.Success)
+                {
+                    return pauseResult
+                        ?? NvrResult.Fail(
+                            NvrResultStatus.Failed,
+                            "방향 변경 전 일시정지 결과가 없습니다.",
+                            CreateError(
+                                "DAHUA_GROUP_DIRECTION_PAUSE_RESULT_EMPTY",
+                                "방향 변경 전 일시정지 결과가 없습니다.",
+                                "SetDirection"));
+                }
+            }
+
+            IList<DahuaPlaybackGroupChannel> channels =
+                groupSession.GetChannels();
+
+            var swaps =
+                new List<DahuaDirectionSessionSwap>();
+
+            /*
+             * 기존 세션은 아직 유지한 상태에서
+             * 새 방향의 세션을 모두 먼저 준비한다.
+             *
+             * 새 세션은 생성 직후 Paused 상태로 만든다.
+             */
+            foreach (DahuaPlaybackGroupChannel channel
+                in channels)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    await CleanupPreparedDirectionSessionsAsync(
+                        swaps);
+
+                    NvrResult restoreResult =
+                        await RestoreDirectionChangeStateAsync(
+                            groupSession,
+                            previousState);
+
+                    if (restoreResult == null
+                        || !restoreResult.Success)
+                    {
+                        SetDirectionChangeFaulted(
+                            groupSession);
+
+                        return restoreResult
+                            ?? NvrResult.Fail(
+                                NvrResultStatus.Failed,
+                                "방향 변경 취소 후 상태 복원 결과가 없습니다.",
+                                CreateError(
+                                    "DAHUA_GROUP_DIRECTION_RESTORE_RESULT_EMPTY",
+                                    "방향 변경 취소 후 상태 복원 결과가 없습니다.",
+                                    "SetDirection"));
+                    }
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Cancelled,
+                        "Dahua 재생 방향 변경 요청이 취소되었습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_DIRECTION_CANCELLED",
+                            "Dahua 재생 방향 변경 요청이 취소되었습니다.",
+                            "SetDirection"));
+                }
+
+                if (channel == null
+                    || channel.Session == null)
+                {
+                    await CleanupPreparedDirectionSessionsAsync(
+                        swaps);
+
+                    NvrResult restoreResult =
+                        await RestoreDirectionChangeStateAsync(
+                            groupSession,
+                            previousState);
+
+                    if (restoreResult == null
+                        || !restoreResult.Success)
+                    {
+                        SetDirectionChangeFaulted(
+                            groupSession);
+
+                        return restoreResult
+                            ?? NvrResult.Fail(
+                                NvrResultStatus.Failed,
+                                "방향 변경 실패 후 상태 복원 결과가 없습니다.",
+                                CreateError(
+                                    "DAHUA_GROUP_DIRECTION_RESTORE_RESULT_EMPTY",
+                                    "방향 변경 실패 후 상태 복원 결과가 없습니다.",
+                                    "SetDirection"));
+                    }
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_CHANNEL_SESSION_INVALID",
+                            "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                            "SetDirection"));
+                }
+
+                NvrResult<DahuaPlaybackSession> createResult =
+                    await CreateDirectionPlaybackSessionAsync(
+                        groupSession,
+                        channel,
+                        direction,
+                        transitionTime,
+                        previousSpeed,
+                        cancellationToken);
+
+                if (createResult == null
+                    || !createResult.Success
+                    || createResult.Data == null)
+                {
+                    await CleanupPreparedDirectionSessionsAsync(
+                        swaps);
+
+                    NvrResult restoreResult =
+                        await RestoreDirectionChangeStateAsync(
+                            groupSession,
+                            previousState);
+
+                    if (restoreResult == null
+                        || !restoreResult.Success)
+                    {
+                        SetDirectionChangeFaulted(
+                            groupSession);
+
+                        return restoreResult
+                            ?? NvrResult.Fail(
+                                NvrResultStatus.Failed,
+                                "방향 변경 실패 후 상태 복원 결과가 없습니다.",
+                                CreateError(
+                                    "DAHUA_GROUP_DIRECTION_RESTORE_RESULT_EMPTY",
+                                    "방향 변경 실패 후 상태 복원 결과가 없습니다.",
+                                    "SetDirection"));
+                    }
+
+                    return NvrResult.Fail(
+                        createResult == null
+                            ? NvrResultStatus.Failed
+                            : createResult.Status,
+
+                        createResult == null
+                            ? "새 방향의 Dahua 재생 세션 생성 결과가 없습니다."
+                            : createResult.Message,
+
+                        createResult == null
+                            ? CreateError(
+                                "DAHUA_GROUP_DIRECTION_CREATE_RESULT_EMPTY",
+                                "새 방향의 Dahua 재생 세션 생성 결과가 없습니다.",
+                                "SetDirection")
+                            : createResult.Error);
+                }
+
+                swaps.Add(
+                    new DahuaDirectionSessionSwap
+                    {
+                        Channel =
+                            channel,
+
+                        PreviousSession =
+                            channel.Session,
+
+                        NewSession =
+                            createResult.Data
+                    });
+            }
+
+            var cleanupWarnings = new List<string>();
+            string synchronizationWarning = null;
+            /*
+             * 새 방향의 모든 세션 준비가 완료된 뒤
+             * 기존 세션을 정리하고 그룹 채널 참조를 교체한다.
+             */
+            foreach (DahuaDirectionSessionSwap swap
+                in swaps)
+            {
+                try
+                {
+                    NvrResult stopResult =
+                        await _provider.StopAsync(
+                            swap.PreviousSession,
+                            CancellationToken.None);
+
+                    if (stopResult == null
+                        || !stopResult.Success)
+                    {
+                        cleanupWarnings.Add(
+                            "기존 Dahua 재생 세션 중지에 실패했습니다. "
+                            + "ChannelNo="
+                            + swap.Channel.ChannelNo);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    cleanupWarnings.Add(
+                        "기존 Dahua 재생 세션 중지 중 예외가 발생했습니다. "
+                        + "ChannelNo="
+                        + swap.Channel.ChannelNo
+                        + ", Error="
+                        + ex.Message);
+                }
+
+                /*
+                 * StopAsync 결과와 관계없이 Dispose를 실행한다.
+                 * DahuaPlaybackSession.Dispose는 남아 있는 네이티브 핸들을
+                 * 다시 중지한 뒤 해제한다.
+                 */
+                try
+                {
+                    swap.PreviousSession.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    cleanupWarnings.Add(
+                        "기존 Dahua 재생 세션 해제 중 예외가 발생했습니다. "
+                        + "ChannelNo="
+                        + swap.Channel.ChannelNo
+                        + ", Error="
+                        + ex.Message);
+                }
+
+                swap.Channel.ReplaceSession(
+                    swap.NewSession);
+            }
+
+            groupSession.SetDirection(
+                direction);
+
+            groupSession.SetSpeed(
+                previousSpeed);
+
+            groupSession.SetCurrentPlaybackTime(
+                transitionTime);
+
+            groupSession.SetState(
+                NvrPlaybackState.Paused);
+
+            groupSession.SetReady(
+                true,
+                "Dahua 재생 방향을 변경했습니다.");
+
+            /*
+             * 단일 채널은 비교할 다른 채널이 없으므로
+             * 즉시 동기화 완료 상태로 처리한다.
+             */
+            if (groupSession.ChannelCount <= 1)
+            {
+                groupSession.SetSynchronizationStatus(
+                    true,
+                    0d,
+                    "단일 Dahua 채널의 재생 방향을 변경했습니다.");
+            }
+            /*
+             * 현재 DahuaPlaybackSynchronizer는
+             * 정방향 1배속 상태에서만 동기화를 지원한다.
+             *
+             * 새 방향 세션은 현재 Paused 상태이므로
+             * SynchronizeAsync 성공 후에도 Paused 상태를 유지한다.
+             */
+            else if (direction == NvrPlaybackDirection.Forward
+                && previousSpeed == NvrPlaybackSpeed.Normal)
+            {
+                NvrResult synchronizeResult =
+                    await _synchronizer.SynchronizeAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (synchronizeResult == null
+                    || !synchronizeResult.Success)
+                {
+                    /*
+                     * 방향 전환 자체는 이미 완료되었다.
+                     *
+                     * 동기화 실패 시 새 방향 세션을 제거하지 않고
+                     * Paused 상태로 유지한 뒤 아래 재생 상태 복원 구간으로 진행한다.
+                     */
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    groupSession.SetReady(
+                        true,
+                        "Dahua 재생 방향은 변경되었지만 "
+                        + "채널 동기화를 완료하지 못했습니다.");
+
+                    groupSession.SetSynchronizationStatus(
+                        false,
+                        null,
+                        "정방향 전환 후 채널 동기화에 실패했습니다.");
+
+                    /*
+                     * 사용자가 요청을 취소한 경우에는
+                     * 자동 Resume를 실행하지 않고 Paused 상태로 종료한다.
+                     */
+                    if (synchronizeResult != null
+                        && synchronizeResult.Status
+                            == NvrResultStatus.Cancelled)
+                    {
+                        return NvrResult.Fail(
+                            NvrResultStatus.Cancelled,
+                            "Dahua 재생 방향 변경 후 "
+                            + "채널 동기화가 취소되었습니다.",
+                            synchronizeResult.Error);
+                    }
+
+                    synchronizationWarning =
+                        synchronizeResult == null
+                            ? "정방향 전환 후 동기화 결과가 없습니다."
+                            : (
+                                string.IsNullOrWhiteSpace(
+                                    synchronizeResult.Message)
+                                    ? "정방향 전환 후 채널 동기화에 실패했습니다."
+                                    : synchronizeResult.Message
+                            );
+                }
+            }
+            /*
+             * 역방향 재생 또는 배속 재생 상태에서는
+             * 현재 자동 동기화를 실행하지 않는다.
+             */
+            else
+            {
+                groupSession.SetSynchronizationStatus(
+                    false,
+                    null,
+                    direction == NvrPlaybackDirection.Reverse
+                        ? "역방향 재생은 현재 자동 동기화 대상이 아닙니다."
+                        : "1배속 정방향으로 복귀한 뒤 "
+                            + "채널 동기화가 필요합니다.");
+            }
+
+            /*
+             * 방향 변경 전 재생 중이었다면
+             * 새 방향의 모든 세션을 함께 재개한다.
+             *
+             * 이전 상태가 Paused였다면 그대로 Paused 상태를 유지한다.
+             */
+            if (wasActive)
+            {
+                NvrResult resumeResult =
+                    await ResumeAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (resumeResult == null
+                    || !resumeResult.Success)
+                {
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    return resumeResult
+                        ?? NvrResult.Fail(
+                            NvrResultStatus.Failed,
+                            "방향 변경 후 재생 재개 결과가 없습니다.",
+                            CreateError(
+                                "DAHUA_GROUP_DIRECTION_RESUME_RESULT_EMPTY",
+                                "방향 변경 후 재생 재개 결과가 없습니다.",
+                                "SetDirection"));
+                }
+            }
+
+            string directionText =
+                GetPlaybackDirectionText(
+                    direction);
+
+            /*
+            * 방향 변경은 성공했지만
+            * 동기화 실패 또는 기존 세션 정리 경고가 있었다면
+            * PartialSuccess로 반환한다.
+            */
+            if (cleanupWarnings.Count > 0
+                || !string.IsNullOrWhiteSpace(
+                    synchronizationWarning))
+            {
+                var warningMessages =
+                    new List<string>();
+
+                if (!string.IsNullOrWhiteSpace(
+                        synchronizationWarning))
+                {
+                    warningMessages.Add(
+                        "채널 동기화 경고: "
+                        + synchronizationWarning);
+                }
+
+                foreach (string cleanupWarning
+                    in cleanupWarnings)
+                {
+                    if (!string.IsNullOrWhiteSpace(
+                            cleanupWarning))
+                    {
+                        warningMessages.Add(
+                            "세션 정리 경고: "
+                            + cleanupWarning);
+                    }
+                }
+
+                return new NvrResult
+                {
+                    /*
+                     * 방향 변경과 새 세션 적용은 완료되었으므로
+                     * 전체 실패가 아닌 부분 성공으로 처리한다.
+                     */
+                    Success =
+                        true,
+
+                    Status =
+                        NvrResultStatus.PartialSuccess,
+
+                    Message =
+                        "Dahua 재생 방향을 "
+                        + directionText
+                        + "으로 변경했지만 일부 경고가 발생했습니다."
+                        + Environment.NewLine
+                        + string.Join(
+                            Environment.NewLine,
+                            warningMessages)
+                };
+            }
+
+            return NvrResult.Ok(
+                "Dahua 재생 방향을 "
+                + directionText
+                + "으로 변경했습니다.");
         }
+
+
 
         /// <summary>
         /// Dahua 재생 그룹의 모든 채널 재생속도를 변경한다.
@@ -2223,75 +2834,310 @@ namespace CamViewer.Nvr.Dahua.Playback
         /// <summary>
         /// Dahua 재생 그룹의 현재 상태를 반환한다.
         ///
-        /// 그룹 상태는 제조사 프로젝트가 직접 관리한다.
+        /// 재생 중이거나 일시정지된 그룹은 기준 채널의 실제 OSD 시간을 조회하여
+        /// CamViewer 공통 영상재생시간으로 변환한 뒤 상태에 반영한다.
+        ///
+        /// 실제 OSD 시간 조회가 일시적으로 실패하더라도:
+        /// - 그룹 재생을 중지하지 않는다.
+        /// - 마지막으로 확인된 CurrentPlaybackTime을 반환한다.
+        /// - 결과는 PartialSuccess로 반환한다.
         /// </summary>
-        public Task<NvrResult<NvrPlaybackGroupStatus>>
-            GetStatusAsync(
+        public async Task<NvrResult<NvrPlaybackGroupStatus>> GetStatusAsync(
                 INvrPlaybackGroupSession session,
                 CancellationToken cancellationToken)
         {
             if (cancellationToken.IsCancellationRequested)
             {
-                return Task.FromResult(
-                    NvrResult<NvrPlaybackGroupStatus>.Fail(
-                        NvrResultStatus.Cancelled,
+                return NvrResult<NvrPlaybackGroupStatus>.Fail(
+                    NvrResultStatus.Cancelled,
+                    "Dahua 재생 그룹 상태 조회가 취소되었습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_STATUS_CANCELLED",
                         "Dahua 재생 그룹 상태 조회가 취소되었습니다.",
-                        CreateError(
-                            "DAHUA_GROUP_STATUS_CANCELLED",
-                            "Dahua 재생 그룹 상태 조회가 취소되었습니다.",
-                            "GetStatus")));
+                        "GetStatus"));
             }
 
-            DahuaPlaybackGroupSession dahuaSession =
+            DahuaPlaybackGroupSession groupSession =
                 session as DahuaPlaybackGroupSession;
 
-            if (dahuaSession == null)
+            if (groupSession == null)
             {
-                return Task.FromResult(
-                    NvrResult<NvrPlaybackGroupStatus>.Fail(
-                        NvrResultStatus.Failed,
+                return NvrResult<NvrPlaybackGroupStatus>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹 세션이 아닙니다.",
+                    CreateError(
+                        "INVALID_DAHUA_GROUP_SESSION",
                         "Dahua 재생 그룹 세션이 아닙니다.",
-                        CreateError(
-                            "INVALID_DAHUA_GROUP_SESSION",
-                            "Dahua 재생 그룹 세션이 아닙니다.",
-                            "GetStatus")));
+                        "GetStatus"));
             }
 
+            /*
+             * 실제 OSD 시간 조회 실패는 그룹 재생 실패로 보지 않는다.
+             *
+             * 상태 조회는 UI에 1초 단위로 반복 호출될 수 있으므로,
+             * 일시적인 SDK 조회 실패 때문에 영상 재생 전체를 중지하면 안 된다.
+             */
+            string playbackTimeWarning =
+                null;
+
+            /*
+             * 재생 명령을 받을 수 있는 정상 그룹이며
+             * 실제 채널 세션이 존재하는 경우에만 OSD 시간을 조회한다.
+             */
+            bool canReadPlaybackTime =
+                groupSession.IsReady
+                && groupSession.ChannelCount > 0
+                && (
+                    groupSession.State == NvrPlaybackState.Playing
+                    || groupSession.State == NvrPlaybackState.Rewinding
+                    || groupSession.State == NvrPlaybackState.Paused
+                );
+
+            if (canReadPlaybackTime)
+            {
+                /*
+                 * 영상재생시간 기준 채널은 왼쪽 화면을 우선 사용한다.
+                 *
+                 * 좌우 채널을 순차적으로 모두 조회하면
+                 * 각 SDK 호출 시점의 차이가 실제 시간차처럼 보일 수 있으므로,
+                 * 단순 상태 조회에서는 하나의 기준 채널만 읽는다.
+                 *
+                 * 채널 간 실제 시간차 계산은
+                 * DahuaPlaybackSynchronizer가 담당한다.
+                 */
+                DahuaPlaybackGroupChannel referenceChannel =
+                    groupSession.FindChannelByScreenPosition(
+                        0);
+
+                /*
+                 * 왼쪽 화면 채널이 없거나 세션이 유효하지 않다면
+                 * 첫 번째 유효 채널을 기준으로 사용한다.
+                 */
+                if (referenceChannel == null
+                    || referenceChannel.Session == null)
+                {
+                    IList<DahuaPlaybackGroupChannel> channels =
+                        groupSession.GetChannels();
+
+                    referenceChannel =
+                        null;
+
+                    foreach (DahuaPlaybackGroupChannel channel
+                        in channels)
+                    {
+                        if (channel != null
+                            && channel.Session != null)
+                        {
+                            referenceChannel =
+                                channel;
+
+                            break;
+                        }
+                    }
+                }
+
+                if (referenceChannel == null
+                    || referenceChannel.Session == null)
+                {
+                    playbackTimeWarning =
+                        "실제 영상재생시간을 확인할 "
+                        + "Dahua 기준 채널이 없습니다.";
+                }
+                else
+                {
+                    try
+                    {
+                        NvrResult<DateTime> timeResult =
+                            await _provider.GetPlaybackTimeAsync(
+                                referenceChannel.Session,
+                                cancellationToken);
+
+                        /*
+                         * 상태 조회 도중 취소된 경우에는
+                         * 마지막 시간으로 부분 성공 처리하지 않고
+                         * 취소 결과를 그대로 반환한다.
+                         */
+                        if (timeResult != null
+                            && timeResult.Status
+                                == NvrResultStatus.Cancelled)
+                        {
+                            return NvrResult<NvrPlaybackGroupStatus>.Fail(
+                                NvrResultStatus.Cancelled,
+                                string.IsNullOrWhiteSpace(
+                                    timeResult.Message)
+                                    ? "Dahua 재생 그룹 상태 조회가 취소되었습니다."
+                                    : timeResult.Message,
+                                timeResult.Error);
+                        }
+
+                        if (timeResult == null)
+                        {
+                            playbackTimeWarning =
+                                "Dahua 실제 영상재생시간 조회 결과가 없습니다.";
+                        }
+                        else if (!timeResult.Success)
+                        {
+                            playbackTimeWarning =
+                                string.IsNullOrWhiteSpace(
+                                    timeResult.Message)
+                                    ? "Dahua 실제 영상재생시간 조회에 실패했습니다."
+                                    : timeResult.Message;
+                        }
+                        else
+                        {
+                            /*
+                             * Dahua OSD에서 반환한 시간은
+                             * 해당 NVR 채널의 원본 영상 시각이다.
+                             *
+                             * 채널별 TimeOffsetSeconds를 제거하여
+                             * CamViewer 공통 영상재생시간으로 변환한다.
+                             */
+                            DateTime commonPlaybackTime =
+                                referenceChannel.ToCommonTime(
+                                    timeResult.Data);
+
+                            /*
+                             * 잘못된 OSD 값이 그룹 시간으로 저장되지 않도록
+                             * 현재 조회 구간 전후 5초까지만 허용한다.
+                             *
+                             * 전후 5초는 SDK 위치 이동과 OSD 갱신 과정의
+                             * 일시적인 오차를 허용하기 위한 범위다.
+                             */
+                            DateTime minimumValidTime =
+                                groupSession.StartTime.AddSeconds(
+                                    -5);
+
+                            DateTime maximumValidTime =
+                                groupSession.EndTime.AddSeconds(
+                                    5);
+
+                            if (commonPlaybackTime
+                                    < minimumValidTime
+                                || commonPlaybackTime
+                                    > maximumValidTime)
+                            {
+                                playbackTimeWarning =
+                                    "Dahua에서 반환한 실제 영상재생시간이 "
+                                    + "조회 범위를 벗어났습니다. "
+                                    + "PlaybackTime="
+                                    + commonPlaybackTime.ToString(
+                                        "yyyy-MM-dd HH:mm:ss");
+                            }
+                            else
+                            {
+                                /*
+                                 * SetCurrentPlaybackTime 내부에서
+                                 * 최종 시간을 조회 시작~종료 범위로 제한한다.
+                                 */
+                                groupSession.SetCurrentPlaybackTime(
+                                    commonPlaybackTime);
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return NvrResult<NvrPlaybackGroupStatus>.Fail(
+                            NvrResultStatus.Cancelled,
+                            "Dahua 재생 그룹 상태 조회가 취소되었습니다.",
+                            CreateError(
+                                "DAHUA_GROUP_STATUS_CANCELLED",
+                                "Dahua 재생 그룹 상태 조회가 취소되었습니다.",
+                                "GetStatus"));
+                    }
+                    catch (Exception ex)
+                    {
+                        /*
+                         * 실제 시간 조회 예외는 재생 세션을 Faulted로 만들지 않는다.
+                         * 마지막으로 확인된 시간을 상태에 반환한다.
+                         */
+                        playbackTimeWarning =
+                            "Dahua 실제 영상재생시간 조회 중 "
+                            + "예외가 발생했습니다. "
+                            + ex.Message;
+                    }
+                }
+            }
+
+            /*
+             * 실제 OSD 조회에 성공했다면 갱신된 시간이 사용되고,
+             * 실패했다면 마지막으로 정상 확인된 그룹 시간이 사용된다.
+             */
             var status =
                 new NvrPlaybackGroupStatus
                 {
                     CurrentPlaybackTime =
-                        dahuaSession.CurrentPlaybackTime,
+                        groupSession.CurrentPlaybackTime,
 
                     State =
-                        dahuaSession.State,
+                        groupSession.State,
 
                     Direction =
-                        dahuaSession.Direction,
+                        groupSession.Direction,
 
                     Speed =
-                        dahuaSession.Speed,
+                        groupSession.Speed,
 
                     IsReady =
-                        dahuaSession.IsReady,
+                        groupSession.IsReady,
 
+                    /*
+                     * 채널 간 동기화는 두 개 이상의 채널이 있고
+                     * 그룹이 준비된 경우에만 의미가 있다.
+                     */
                     SynchronizationAvailable =
-                        dahuaSession.ChannelCount > 1,
+                        groupSession.IsReady
+                        && groupSession.ChannelCount > 1,
 
                     IsSynchronized =
-                        dahuaSession.IsSynchronized,
+                        groupSession.IsSynchronized,
 
                     MaximumDriftSeconds =
-                        dahuaSession.MaximumDriftSeconds,
+                        groupSession.MaximumDriftSeconds,
 
                     Message =
-                        dahuaSession.StatusMessage
+                        string.IsNullOrWhiteSpace(
+                            playbackTimeWarning)
+                            ? groupSession.StatusMessage
+                            : groupSession.StatusMessage
+                                + Environment.NewLine
+                                + "영상재생시간 확인 경고: "
+                                + playbackTimeWarning
                 };
 
-            return Task.FromResult(
-                NvrResult<NvrPlaybackGroupStatus>.Ok(
-                    status,
-                    "Dahua 재생 그룹 상태를 조회했습니다."));
+            if (!string.IsNullOrWhiteSpace(
+                    playbackTimeWarning))
+            {
+                /*
+                 * 상태 정보와 마지막 영상재생시간은 정상 반환했지만
+                 * 이번 호출에서 실제 OSD 시간을 갱신하지 못했으므로
+                 * PartialSuccess로 구분한다.
+                 */
+                return new NvrResult<NvrPlaybackGroupStatus>
+                {
+                    Success =
+                        true,
+
+                    Status =
+                        NvrResultStatus.PartialSuccess,
+
+                    Message =
+                        "Dahua 재생 그룹 상태를 조회했지만 "
+                        + "실제 영상재생시간을 갱신하지 못했습니다.",
+
+                    Error =
+                        CreateError(
+                            "DAHUA_GROUP_STATUS_TIME_WARNING",
+                            playbackTimeWarning,
+                            "GetStatus"),
+
+                    Data =
+                        status
+                };
+            }
+
+            return NvrResult<NvrPlaybackGroupStatus>.Ok(
+                status,
+                "Dahua 재생 그룹 상태를 조회했습니다.");
         }
 
         /// <summary>
@@ -3041,5 +3887,433 @@ namespace CamViewer.Nvr.Dahua.Playback
                     "RestoreSpeedState"));
         }
 
+
+        /// <summary>
+        /// 지정된 방향으로 사용할 새 Dahua 채널 재생 세션을 생성한다.
+        ///
+        /// 반환되는 세션은 방향과 관계없이 Paused 상태이며,
+        /// 기존 그룹 속도가 적용된 상태여야 한다.
+        /// </summary>
+        private async Task<NvrResult<DahuaPlaybackSession>>
+            CreateDirectionPlaybackSessionAsync(
+                DahuaPlaybackGroupSession groupSession,
+                DahuaPlaybackGroupChannel channel,
+                NvrPlaybackDirection direction,
+                DateTime commonTransitionTime,
+                NvrPlaybackSpeed speed,
+                CancellationToken cancellationToken)
+        {
+            DateTime providerStartTime =
+                channel.ToProviderTime(
+                    groupSession.StartTime);
+
+            DateTime providerEndTime =
+                channel.ToProviderTime(
+                    groupSession.EndTime);
+
+            DateTime providerTransitionTime =
+                channel.ToProviderTime(
+                    commonTransitionTime);
+
+            var request =
+                new NvrPlaybackRequest
+                {
+                    CounterNo =
+                        groupSession.CounterNo,
+
+                    NvrNo =
+                        groupSession.NvrNo,
+
+                    ChannelNo =
+                        channel.ChannelNo,
+
+                    ScreenPosition =
+                        channel.ScreenPosition,
+
+                    SearchDateTime =
+                        groupSession.SearchDateTime,
+
+                    /*
+                     * 방향 전환 후에도 타임라인 전체 범위에서
+                     * Seek가 가능하도록 최초 조회 구간 전체를 유지한다.
+                     */
+                    StartTime =
+                        providerStartTime,
+
+                    EndTime =
+                        providerEndTime,
+
+                    RenderTargetHandle =
+                        channel.RenderTargetHandle,
+
+                    AutoPlay =
+                        false
+                };
+
+            NvrResult<INvrPlaybackSession> createResult;
+
+            if (direction
+                == NvrPlaybackDirection.Reverse)
+            {
+                createResult =
+                    await _provider.PlayReverseByTimeAsync(
+                        request,
+                        providerTransitionTime,
+                        cancellationToken);
+            }
+            else
+            {
+                createResult =
+                    await _provider.PlayByTimeAsync(
+                        request,
+                        cancellationToken);
+            }
+
+            if (createResult == null
+                || !createResult.Success
+                || createResult.Data == null)
+            {
+                return NvrResult<DahuaPlaybackSession>.Fail(
+                    createResult == null
+                        ? NvrResultStatus.Failed
+                        : createResult.Status,
+
+                    createResult == null
+                        ? "Dahua 방향 전환 세션 생성 결과가 없습니다."
+                        : createResult.Message,
+
+                    createResult == null
+                        ? CreateError(
+                            "DAHUA_DIRECTION_SESSION_RESULT_EMPTY",
+                            "Dahua 방향 전환 세션 생성 결과가 없습니다.",
+                            "CreateDirectionSession")
+                        : createResult.Error);
+            }
+
+            DahuaPlaybackSession newSession =
+                createResult.Data
+                    as DahuaPlaybackSession;
+
+            if (newSession == null)
+            {
+                return NvrResult<DahuaPlaybackSession>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 방향 전환 세션의 형식이 올바르지 않습니다.",
+                    CreateError(
+                        "INVALID_DAHUA_DIRECTION_SESSION",
+                        "Dahua 방향 전환 세션의 형식이 올바르지 않습니다.",
+                        "CreateDirectionSession"));
+            }
+
+            /*
+             * 정방향 세션은 최초 조회 시작시간에서 생성되므로
+             * 실제 전환 시각으로 다시 정렬해야 한다.
+             */
+            if (direction
+                == NvrPlaybackDirection.Forward)
+            {
+                var alignmentRequest =
+                    new NvrPlaybackAlignmentRequest
+                    {
+                        TargetTime =
+                            providerTransitionTime,
+
+                        Direction =
+                            NvrPlaybackDirection.Forward,
+
+                        /*
+                         * 방향 전환 위치 정렬은 우선 1배속에서 수행한다.
+                         * 기존 선택 속도는 정렬 완료 후 다시 적용한다.
+                         */
+                        Speed =
+                            NvrPlaybackSpeed.Normal,
+
+                        RemainPaused =
+                            true
+                    };
+
+                NvrResult<INvrPlaybackSession> alignmentResult =
+                    await _provider.AlignPlaybackAsync(
+                        newSession,
+                        alignmentRequest,
+                        cancellationToken);
+
+                if (alignmentResult == null
+                    || !alignmentResult.Success
+                    || alignmentResult.Data == null)
+                {
+                    await CleanupDirectionSessionAsync(
+                        newSession);
+
+                    return NvrResult<DahuaPlaybackSession>.Fail(
+                        alignmentResult == null
+                            ? NvrResultStatus.Failed
+                            : alignmentResult.Status,
+
+                        alignmentResult == null
+                            ? "Dahua 정방향 위치 정렬 결과가 없습니다."
+                            : alignmentResult.Message,
+
+                        alignmentResult == null
+                            ? CreateError(
+                                "DAHUA_FORWARD_ALIGNMENT_RESULT_EMPTY",
+                                "Dahua 정방향 위치 정렬 결과가 없습니다.",
+                                "CreateDirectionSession")
+                            : alignmentResult.Error);
+                }
+
+                DahuaPlaybackSession alignedSession =
+                    alignmentResult.Data
+                        as DahuaPlaybackSession;
+
+                if (alignedSession == null)
+                {
+                    await CleanupDirectionSessionAsync(
+                        newSession);
+
+                    return NvrResult<DahuaPlaybackSession>.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 정방향 정렬 세션의 형식이 올바르지 않습니다.",
+                        CreateError(
+                            "INVALID_DAHUA_FORWARD_ALIGNMENT_SESSION",
+                            "Dahua 정방향 정렬 세션의 형식이 올바르지 않습니다.",
+                            "CreateDirectionSession"));
+                }
+
+                newSession =
+                    alignedSession;
+            }
+            else
+            {
+                /*
+                 * 역재생 세션은 생성 즉시 움직이기 시작하므로
+                 * 다른 채널 준비가 끝날 때까지 일시정지한다.
+                 */
+                NvrResult pauseResult =
+                    await _provider.PauseAsync(
+                        newSession,
+                        cancellationToken);
+
+                if (pauseResult == null
+                    || !pauseResult.Success)
+                {
+                    await CleanupDirectionSessionAsync(
+                        newSession);
+
+                    return NvrResult<DahuaPlaybackSession>.Fail(
+                        pauseResult == null
+                            ? NvrResultStatus.Failed
+                            : pauseResult.Status,
+
+                        pauseResult == null
+                            ? "Dahua 역재생 세션 일시정지 결과가 없습니다."
+                            : pauseResult.Message,
+
+                        pauseResult == null
+                            ? CreateError(
+                                "DAHUA_REVERSE_PAUSE_RESULT_EMPTY",
+                                "Dahua 역재생 세션 일시정지 결과가 없습니다.",
+                                "CreateDirectionSession")
+                            : pauseResult.Error);
+                }
+            }
+
+            /*
+             * 새 세션은 기본 1배속으로 생성된다.
+             * 사용자가 선택한 기존 속도를 다시 적용한다.
+             *
+             * 현재 세션은 Paused 상태이므로 Provider가
+             * 속도 변경 후에도 일시정지를 다시 적용한다.
+             */
+            if (speed
+                != NvrPlaybackSpeed.Normal)
+            {
+                NvrResult speedResult =
+                    await _provider.SetPlaybackSpeedAsync(
+                        newSession,
+                        speed,
+                        cancellationToken);
+
+                if (speedResult == null
+                    || !speedResult.Success)
+                {
+                    await CleanupDirectionSessionAsync(
+                        newSession);
+
+                    return NvrResult<DahuaPlaybackSession>.Fail(
+                        speedResult == null
+                            ? NvrResultStatus.Failed
+                            : speedResult.Status,
+
+                        speedResult == null
+                            ? "Dahua 방향 전환 세션 속도 적용 결과가 없습니다."
+                            : speedResult.Message,
+
+                        speedResult == null
+                            ? CreateError(
+                                "DAHUA_DIRECTION_SPEED_RESULT_EMPTY",
+                                "Dahua 방향 전환 세션 속도 적용 결과가 없습니다.",
+                                "CreateDirectionSession")
+                            : speedResult.Error);
+                }
+            }
+
+            return NvrResult<DahuaPlaybackSession>.Ok(
+                newSession,
+                "Dahua 방향 전환 세션을 준비했습니다.");
+        }
+
+        /// <summary>
+        /// 준비 중인 새 방향 세션 하나를 정리한다.
+        /// </summary>
+        private async Task CleanupDirectionSessionAsync(
+            DahuaPlaybackSession session)
+        {
+            if (session == null)
+            {
+                return;
+            }
+
+            try
+            {
+                await _provider.StopAsync(
+                    session,
+                    CancellationToken.None);
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                session.Dispose();
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
+        /// 방향 변경 준비 도중 생성된 새 세션들을 정리한다.
+        /// </summary>
+        private async Task CleanupPreparedDirectionSessionsAsync(
+            IList<DahuaDirectionSessionSwap> swaps)
+        {
+            if (swaps == null)
+            {
+                return;
+            }
+
+            foreach (DahuaDirectionSessionSwap swap
+                in swaps)
+            {
+                if (swap == null)
+                {
+                    continue;
+                }
+
+                await CleanupDirectionSessionAsync(
+                    swap.NewSession);
+            }
+        }
+
+        /// <summary>
+        /// 방향 변경 준비 실패 후 기존 재생 상태를 복원한다.
+        /// </summary>
+        private async Task<NvrResult>
+            RestoreDirectionChangeStateAsync(
+                DahuaPlaybackGroupSession groupSession,
+                NvrPlaybackState previousState)
+        {
+            if (previousState
+                == NvrPlaybackState.Paused)
+            {
+                groupSession.SetState(
+                    NvrPlaybackState.Paused);
+
+                return NvrResult.Ok(
+                    "기존 일시정지 상태를 유지했습니다.");
+            }
+
+            /*
+             * 기존 세션은 Pause된 상태이고 Direction도 아직
+             * 이전 방향이므로 ResumeAsync로 원래 방향을 복원할 수 있다.
+             */
+            groupSession.SetState(
+                NvrPlaybackState.Paused);
+
+            return await ResumeAsync(
+                groupSession,
+                CancellationToken.None);
+        }
+
+        /// <summary>
+        /// 방향 변경 과정에서 기존 세션과 새 세션의
+        /// 교체 정보를 임시로 보관한다.
+        /// </summary>
+        private sealed class DahuaDirectionSessionSwap
+        {
+            public DahuaPlaybackGroupChannel Channel
+            {
+                get;
+                set;
+            }
+
+            public DahuaPlaybackSession PreviousSession
+            {
+                get;
+                set;
+            }
+
+            public DahuaPlaybackSession NewSession
+            {
+                get;
+                set;
+            }
+        }
+
+        /// <summary>
+        /// 재생 방향을 사용자 표시 문자열로 변환한다.
+        /// </summary>
+        private static string GetPlaybackDirectionText(
+            NvrPlaybackDirection direction)
+        {
+            switch (direction)
+            {
+                case NvrPlaybackDirection.Reverse:
+                    return "역방향";
+
+                case NvrPlaybackDirection.Forward:
+                    return "정방향";
+
+                default:
+                    return direction.ToString();
+            }
+        }
+
+        /// <summary>
+        /// 방향 변경 실패 후 기존 상태까지 복원하지 못한 경우
+        /// 그룹을 재사용할 수 없는 상태로 변경한다.
+        /// </summary>
+        private static void SetDirectionChangeFaulted(
+            DahuaPlaybackGroupSession groupSession)
+        {
+            if (groupSession == null)
+            {
+                return;
+            }
+
+            groupSession.SetState(
+                NvrPlaybackState.Faulted);
+
+            groupSession.SetReady(
+                false,
+                "Dahua 재생 방향 변경 후 기존 상태를 복원하지 못했습니다.");
+
+            groupSession.SetSynchronizationStatus(
+                false,
+                null,
+                "재생 그룹을 다시 열어야 합니다.");
+        }
     }
 }

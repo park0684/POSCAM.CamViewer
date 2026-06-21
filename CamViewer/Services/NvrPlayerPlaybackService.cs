@@ -7,7 +7,6 @@ using CamViewerClient.Enums;
 using CamViewerClient.Models.Config;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,29 +14,35 @@ using System.Threading.Tasks;
 namespace CamViewer.Services
 {
     /// <summary>
-    /// PlayerView의 재생 요청을 실제 NVR Provider에 전달하는 서비스이다.
+    /// PlayerView의 재생 요청을
+    /// NVR 번호별 제조사 재생 엔진에 전달하는 서비스이다.
     ///
     /// 처리 흐름:
-    /// 1. PlayerPlaybackRequest 수신
-    /// 2. NVR번호별 Provider 생성
-    /// 3. Provider Initialize
-    /// 4. NVR Login
-    /// 5. 좌/우 채널 PlayByTimeAsync 실행
-    /// 6. 생성된 재생 세션 보관
+    /// 1. PlayerPlaybackRequest 검증
+    /// 2. NVR 번호별 로그인 Provider 확보
+    /// 3. 제조사별 재생 엔진 생성 또는 재사용
+    /// 4. NVR 번호별 다중채널 재생 그룹 준비
+    /// 5. 재생·일시정지·이동·방향·속도 제어
+    /// 6. 제조사 그룹 상태와 영상재생시간 동기화
+    /// 7. 정지 또는 해제 시 그룹·엔진·Provider 정리
     /// </summary>
     public sealed class NvrPlayerPlaybackService : IPlayerPlaybackService
     {
         private readonly INvrProviderFactory _providerFactory;
 
         private readonly Dictionary<int, INvrProvider> _providers;
-        private readonly Dictionary<int, INvrPlaybackSession> _sessions;
+        
+        //NVR 번호별 제조사 전용 고수준 재생 엔진
+        private readonly Dictionary<int, INvrPlaybackEngine> _playbackEngines;
+        //NVR 번호별 다중채널 재생 그룹 세션.
+        private readonly Dictionary<int, INvrPlaybackGroupSession> _playbackGroupSessions;
 
         private PlayerPlaybackRequest _currentRequest;
         private DateTime? _currentPlaybackTime;
         private DateTime? _playbackClockStartedAtUtc;
         private bool _disposed;
         private PlaybackSpeed _currentSpeed;
-        private readonly Dictionary<int, int> _sessionTimeOffsets;
+        
 
         /// <summary>
         /// 현재 재생 상태.
@@ -63,11 +68,10 @@ namespace CamViewer.Services
 
             _providerFactory = providerFactory;
             _providers = new Dictionary<int, INvrProvider>();
-            _sessions = new Dictionary<int, INvrPlaybackSession>();
-
+            _playbackEngines = new Dictionary<int, INvrPlaybackEngine>(); //해당 NVR의 제조사별 고수준 재생 엔진은 해당 NVR의 로그인된 Provider에서 생성한다.
+            _playbackGroupSessions = new Dictionary<int, INvrPlaybackGroupSession>(); //OpenAsync로 준비된 그룹 세션을 NVR 번호 기준으로 보관한다.
             CurrentState = PlaybackState.Stopped;
             _currentSpeed = PlaybackSpeed.Normal;
-            _sessionTimeOffsets = new Dictionary<int, int>();
             _pausedFromState = PlaybackState.Playing;
         }
 
@@ -84,7 +88,8 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// NVR 재생 서비스가 보유한 세션과 Provider 리소스를 정리한다.
+        /// NVR 재생 서비스가 보유한
+        /// 그룹 세션, 재생 엔진 및 Provider 리소스를 정리한다.
         /// </summary>
         public void Dispose()
         {
@@ -95,16 +100,39 @@ namespace CamViewer.Services
 
             try
             {
-                StopAsync(CancellationToken.None)
+                /*
+                 * 정상 종료에서는 공개 StopAsync를 사용한다.
+                 *
+                 * StopAsync는 다음 순서로 정리한다.
+                 * - 제조사별 재생 그룹 중지
+                 * - 재생 엔진 정리
+                 * - Provider 로그아웃 및 정리
+                 * - 서비스 내부 상태 초기화
+                 */
+                StopAsync(
+                    CancellationToken.None)
                     .GetAwaiter()
                     .GetResult();
             }
             catch
             {
-                // 종료 정리 중 발생한 예외는 프로그램 종료 흐름을 막지 않는다.
+                /*
+                 * StopAsync 자체에서 예상하지 못한 예외가 발생한 경우
+                 * 다음 실행에서 손상된 그룹, 엔진 또는 Provider가
+                 * 재사용되지 않도록 로컬 리소스를 강제로 정리한다.
+                 */
+                ForceReleasePlaybackResources();
             }
-
-            _disposed = true;
+            finally
+            {
+                /*
+                 * StopAsync 자체에서 예상하지 못한 예외가 발생하면
+                 * 손상된 그룹, 엔진 또는 Provider가 다음 실행에서
+                 * 재사용되지 않도록 로컬 리소스를 강제로 정리한다.
+                 */
+                _disposed =
+                    true;
+            }
         }
 
         /// <summary>
@@ -112,10 +140,10 @@ namespace CamViewer.Services
         ///
         /// 처리 순서:
         /// 1. 재생 요청값 검증
-        /// 2. 기존 재생 세션 정리
-        /// 3. 좌/우 채널별 Provider 재생 요청
-        /// 4. 현재 재생시간 기준값 설정
-        /// 5. 선택된 재생속도 적용
+        /// 2. 기존 NVR 재생 그룹 정리
+        /// 3. NVR 번호별 제조사 재생 그룹 준비 및 시작
+        /// 4. 현재 영상재생시간 기준값 설정
+        /// 5. 사용자가 선택한 재생속도 적용
         /// 6. 재생 상태를 Playing으로 변경
         /// </summary>
         public async Task<PlayerPlaybackResult> PlayAsync(
@@ -157,107 +185,110 @@ namespace CamViewer.Services
 
             try
             {
+                
                 /*
-                 * 재조회 시에는 기존 영상 재생만 즉시 중지한다.
-                 *
-                 * Provider 로그인까지 해제하면 매 조회마다
-                 * Logout → Dispose → Initialize → Login이 반복되어
-                 * 조회 시간이 길어지므로 로그인된 Provider는 재사용한다.
+                 * 이전 그룹 재생 세션만 정리한다.
+                 * 
+                 * provider 로그인과 재생 엔진은 유지하므로
+                 * 새 조회 그룹 생성 시 재사용할 수 있다.
                  */
-                if (_sessions.Count > 0)
+                PlayerPlaybackResult stopGroupResult =
+                         await StopCurrentPlaybackGroupsOnlyAsync();
+
+                if (stopGroupResult == null
+                    || !stopGroupResult.Success)
                 {
-                    /*
-                     * 실제 Stop 명령이 처리되는 동안에도
-                     * 서비스 시간과 UI가 계속 움직이지 않도록
-                     * 먼저 논리적인 재생 시계를 정지한다.
-                     */
-                    DateTime stoppedPlaybackTime =
-                        GetEstimatedPlaybackTime();
-
-                    _currentPlaybackTime =
-                        ClampPlaybackTime(
-                            stoppedPlaybackTime);
-
-                    _playbackClockStartedAtUtc =
-                        null;
-
-                    CurrentState =
-                        PlaybackState.Stopped;
-
-                    PlayerPlaybackResult stopResult =
-                        await StopCurrentPlaybackSessionsOnlyAsync(
-                            CancellationToken.None);
-
-                    if (stopResult == null
-                        || !stopResult.Success)
-                    {
-                        return PlayerPlaybackResult.Fail(
-                            "기존 재생 세션 정리 중 오류가 발생했습니다. "
-                            + (
-                                stopResult == null
-                                    ? "정리 결과가 없습니다."
-                                    : stopResult.Message
-                            ),
-                            stopResult == null
-                                ? "PLAYBACK_SESSION_STOP_RESULT_EMPTY"
-                                : stopResult.ErrorCode);
-                    }
-                }
-                else
-                {
-                    /*
-                     * 세션은 없지만 영상 원본 정보 조회 과정에서
-                     * 로그인된 Provider가 존재할 수 있으므로 Provider는 유지한다.
-                     */
-                    _sessions.Clear();
-                    _sessionTimeOffsets.Clear();
-
-                    _currentPlaybackTime =
-                        null;
-
-                    _playbackClockStartedAtUtc =
-                        null;
-
-                    CurrentState =
-                        PlaybackState.Stopped;
+                    return stopGroupResult
+                        ?? PlayerPlaybackResult.Fail(
+                            "기존 채널별 재생 세션 정리 결과가 없습니다.",
+                            "LEGACY_PLAYBACK_STOP_RESULT_EMPTY",
+                            PlaybackFailureCategory.System);
                 }
 
                 /*
-                 * 기존 재생 요청은 정리가 끝난 뒤 제거한다.
-                 * 바로 아래에서 새 요청으로 교체된다.
+                 * 이전 요청 및 재생시간 상태를 초기화한 뒤
+                 * 새 요청을 서비스 기준 요청으로 등록한다.
                  */
                 _currentRequest =
                     null;
 
-                // StopAsync에서 내부 상태가 초기화될 수 있으므로 선택 속도를 복원한다.
-                _currentSpeed = selectedSpeed;
+                _currentPlaybackTime =
+                    null;
 
-                _currentRequest = request;
-                _currentPlaybackTime = request.PlayStartTime;
-                _playbackClockStartedAtUtc = null;
-                CurrentState = PlaybackState.Stopped;
+                _playbackClockStartedAtUtc =
+                    null;
 
-                foreach (PlayerChannelTarget channel in request.Channels)
+                CurrentState =
+                    PlaybackState.Stopped;
+
+                /*
+                 * 사용자가 재생 전에 선택한 속도는 유지한다.
+                 *
+                 * 실제 제조사 그룹은 정방향 1배속으로 준비되며,
+                 * Open과 Start가 끝난 후 선택 속도를 다시 적용한다.
+                 */
+                _currentSpeed =
+                    selectedSpeed;
+
+                _currentRequest =
+                    request;
+
+                _currentPlaybackTime =
+                    request.PlayStartTime;
+
+                /*
+                 * NVR 번호별로 다음 처리를 실행한다.
+                 *
+                 * - 로그인된 Provider 확보
+                 * - 제조사별 INvrPlaybackEngine 준비
+                 * - 그룹 요청 변환
+                 * - Engine.OpenAsync
+                 * - Engine.StartAsync
+                 */
+                PlayerPlaybackResult groupStartResult =
+                    await OpenAndStartPlaybackGroupsAsync(
+                        request,
+                        request.PlayStartTime,
+                        true,
+                        cancellationToken);
+
+                if (groupStartResult == null
+                    || !groupStartResult.Success)
                 {
-                    PlayerPlaybackResult playChannelResult =
-                        await PlayChannelAsync(
-                            request,
-                            channel,
-                            request.PlayStartTime,
-                            request.PlayEndTime,
-                            cancellationToken);
+                    /*
+                     *  일부 그룹이 시작된 상태가 남지 않도록
+                     *  전역 그룹 세션을 다시 정리한다.
+                     */
+                    await StopCurrentPlaybackGroupsOnlyAsync();
 
-                    if (!playChannelResult.Success)
-                    {
-                        await StopAsync(CancellationToken.None);
+                    _currentRequest =
+                        null;
 
-                        return playChannelResult;
-                    }
+                    _currentPlaybackTime =
+                        null;
+
+                    _playbackClockStartedAtUtc =
+                        null;
+
+                    CurrentState =
+                        PlaybackState.Stopped;
+
+                    _currentSpeed =
+                        selectedSpeed;
+
+                    return groupStartResult
+                        ?? PlayerPlaybackResult.Fail(
+                            "NVR 그룹 재생 시작 결과가 없습니다.",
+                            "PLAYBACK_GROUP_START_RESULT_EMPTY",
+                            PlaybackFailureCategory.System);
                 }
 
                 /*
-                 * 모든 채널 재생 세션 생성이 성공한 뒤
-                 * 기본 재생시간과 상태를 설정한다.
+                 * 모든 제조사 그룹의 Open과 Start가 성공한 시점이다.
+                 *
+                 * 제조사 엔진은 이미 최초 위치 정렬과 채널 동기화를
+                 * 처리했으므로 기존 WaitForPlaybackReadyAsync와
+                 * ResyncPlaybackSessionsAsync를 다시 호출하지 않는다.
                  */
                 _currentPlaybackTime =
                     request.PlayStartTime;
@@ -268,140 +299,156 @@ namespace CamViewer.Services
                 CurrentState =
                     PlaybackState.Playing;
 
+                _pausedFromState =
+                    PlaybackState.Playing;
+
                 /*
-                 * 새로 생성된 Dahua 재생 핸들은 실제로 1배속 상태다.
+                 * 그룹은 최초 1배속으로 준비된다.
                  *
-                 * 사용자가 이전 재생에서 선택한 배속은 별도로 보관하고,
-                 * 초기 준비 확인과 동기화는 1배속 기준으로 수행한다.
+                 * 사용자가 미리 선택한 속도가 1배속이 아니면
+                 * 제조사 엔진을 통해 각 그룹에 동일하게 적용한다.
                  */
-                PlaybackSpeed requestedSpeed =
-                    _currentSpeed;
-
-                _currentSpeed =
-                    PlaybackSpeed.Normal;
-
-                string readinessWarningMessage =
-                    string.Empty;
-
-                bool playbackReady =
-                    await WaitForPlaybackReadyAsync(
-                        cancellationToken);
-
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    PlayerPlaybackResult cancelledResult =
-                        PlayerPlaybackResult.Fail(
-                            "재생 준비 확인 요청이 취소되었습니다.",
-                            "PLAYBACK_READY_CANCELLED");
-
-                    _currentSpeed =
-                        requestedSpeed;
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 준비 확인",
-                        cancelledResult,
-                        "PLAYBACK_READY_CANCELLED");
-                }
-
-                /*
-                 * 좌우 채널에서 유효한 OSD 시간이 모두 확인된 경우에만
-                 * 초기 자동 동기화를 수행한다.
-                 */
-                if (playbackReady)
-                {
-                    PlayerPlaybackResult syncResult =
-                        await ResyncPlaybackSessionsAsync(
-                            cancellationToken);
-
-                    if (syncResult == null
-                        || !syncResult.Success)
-                    {
-                        /*
-                         * 기존 선택 배속값은 유지한 상태로 복구한다.
-                         */
-                        _currentSpeed =
-                            requestedSpeed;
-
-                        return await RecoverFromPlaybackFailureAsync(
-                            "좌우 영상 동기화",
-                            syncResult,
-                            "PLAYBACK_SYNC_FAILED");
-                    }
-                }
-                else
-                {
-                    /*
-                     * 3초 안에 좌우 모두 준비되지 않은 경우
-                     * 비정상적인 OSD 시간을 사용한 자동 Seek는 실행하지 않는다.
-                     *
-                     * 재생 자체는 계속 유지한다.
-                     */
-                    readinessWarningMessage =
-                        Environment.NewLine
-                        + "일부 채널의 재생 준비가 지연되어 "
-                        + "초기 자동 동기화를 생략했습니다.";
-                }
-
-                /*
-                 * 초기 동기화가 끝난 뒤
-                 * 사용자가 선택했던 재생속도를 복원한다.
-                 */
-                _currentSpeed =
-                    requestedSpeed;
-
-                if (_currentSpeed
+                if (selectedSpeed
                     != PlaybackSpeed.Normal)
                 {
                     PlayerPlaybackResult speedResult =
-                        await ApplyCurrentSpeedToSessionsAsync(
+                        await ApplyPlaybackSpeedToGroupsAsync(
+                            selectedSpeed,
                             cancellationToken);
 
-                    if (speedResult == null || !speedResult.Success)
+                    if (speedResult == null
+                        || !speedResult.Success)
                     {
                         /*
-                         * 일부 채널에만 배속이 적용됐을 가능성이 있으므로
-                         * 재생을 계속 유지하지 않고 전체 세션을 정리한다.
+                         * 일부 NVR 그룹에만 속도가 적용됐을 수 있으므로
+                         * 서로 다른 속도의 그룹을 계속 재생하지 않는다.
+                         */
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        _currentRequest =
+                            null;
+
+                        _currentPlaybackTime =
+                            null;
+
+                        _playbackClockStartedAtUtc =
+                            null;
+
+                        CurrentState =
+                            PlaybackState.Stopped;
+
+                        /*
+                         * 실제 재생 그룹이 모두 중지되었으므로
+                         * 서비스 속도도 기본값으로 복구한다.
                          */
                         _currentSpeed =
                             PlaybackSpeed.Normal;
 
-                        return await RecoverFromPlaybackFailureAsync(
-                            "재생 시작 후 배속 적용",
-                            speedResult,
-                            "PLAYBACK_INITIAL_SPEED_FAILED");
+                        return speedResult
+                            ?? PlayerPlaybackResult.Fail(
+                                "그룹 재생속도 적용 결과가 없습니다.",
+                                "PLAYBACK_GROUP_SPEED_RESULT_EMPTY",
+                                PlaybackFailureCategory.System);
                     }
                 }
 
+                /*
+                 * 실제 제조사 그룹에 선택 속도 적용이 완료된 뒤
+                 * 서비스의 현재 속도와 시간 기준 시계를 확정한다.
+                 */
+                _currentSpeed =
+                    selectedSpeed;
+
+                _currentPlaybackTime =
+                    request.PlayStartTime;
+
+                _playbackClockStartedAtUtc =
+                    DateTime.UtcNow;
+
+                CurrentState =
+                    PlaybackState.Playing;
+
                 return PlayerPlaybackResult.Ok(
-                    "NVR 재생을 시작했습니다. "
+                    "NVR 그룹 재생을 시작했습니다. "
                     + request.PlayStartTime.ToString(
                         "yyyy-MM-dd HH:mm:ss")
                     + " ~ "
                     + request.PlayEndTime.ToString(
                         "yyyy-MM-dd HH:mm:ss")
-                    + readinessWarningMessage);
+                    + (
+                        selectedSpeed == PlaybackSpeed.Normal
+                            ? string.Empty
+                            : Environment.NewLine
+                                + GetPlaybackSpeedText(
+                                    selectedSpeed)
+                                + "을 적용했습니다."
+                    ));
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    await StopCurrentPlaybackGroupsOnlyAsync();
+                }
+                catch
+                {
+                    // 취소 후 정리 예외가 원래 취소 결과를 덮어쓰지 않게 한다.
+                }
+
+                _currentRequest =
+                    null;
+
+                _currentPlaybackTime =
+                    null;
+
+                _playbackClockStartedAtUtc =
+                    null;
+
+                CurrentState =
+                    PlaybackState.Stopped;
+
+                _currentSpeed =
+                    selectedSpeed;
+
+                return PlayerPlaybackResult.Fail(
+                    "NVR 그룹 재생 요청이 취소되었습니다.",
+                    "PLAYBACK_GROUP_START_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
             }
             catch (Exception ex)
             {
                 try
                 {
-                    await StopAsync(CancellationToken.None);
+                    await StopCurrentPlaybackGroupsOnlyAsync();
                 }
                 catch
                 {
-                    // 재생 실패 후 정리 과정의 예외는 원래 예외 메시지를 가리지 않는다.
+                    // 재생 실패 후 정리 예외는 원래 예외 메시지를 가리지 않는다.
                 }
 
-                _currentRequest = null;
-                _currentPlaybackTime = null;
-                _playbackClockStartedAtUtc = null;
-                CurrentState = PlaybackState.Stopped;
+                _currentRequest =
+                    null;
+
+                _currentPlaybackTime =
+                    null;
+
+                _playbackClockStartedAtUtc =
+                    null;
+
+                CurrentState =
+                    PlaybackState.Stopped;
+
+                _currentSpeed =
+                    selectedSpeed;
 
                 return PlayerPlaybackResult.Fail(
-                    "NVR 재생 시작 중 오류가 발생했습니다. "
+                    "NVR 그룹 재생 시작 중 오류가 발생했습니다. "
                     + ex.Message,
-                    "PLAYBACK_START_FAILED");
+                    "PLAYBACK_GROUP_START_FAILED",
+                    PlaybackFailureCategory.System);
             }
+
+
         }
 
         /// <summary>
@@ -413,10 +460,505 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// Provider 실제 재생시간을 조회하지 못할 때 사용할 추정 영상재생시간을 계산한다.
-        /// 
-        /// 재생 중이면 시간이 증가하고,
-        /// 역재생 중이면 시간이 감소한다.
+        /// 지정한 재생속도를
+        /// 실행 중인 모든 NVR 재생 그룹에 적용한다.
+        ///
+        /// 처리 정책:
+        /// - 모든 그룹에 동일한 속도를 순차 적용한다.
+        /// - 한 그룹이라도 실패하면 실패 결과를 반환한다.
+        /// - 이전 속도 복원은 호출부에서 수행한다.
+        /// - PartialSuccess는 성공으로 처리하되 경고 메시지를 수집한다.
+        /// </summary>
+        private async Task<PlayerPlaybackResult> ApplyPlaybackSpeedToGroupsAsync(
+                PlaybackSpeed speed,
+                CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "그룹 재생속도 적용 요청이 취소되었습니다.",
+                    "PLAYBACK_GROUP_SPEED_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            if (_playbackGroupSessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생속도를 적용할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
+            }
+
+            NvrPlaybackSpeed nvrSpeed =
+                ToNvrPlaybackSpeed(
+                    speed);
+
+            var warningMessages =
+                new List<string>();
+
+            /*
+             * 동일한 속도를 모든 NVR 그룹에 순차적으로 적용한다.
+             */
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(
+                        pair => pair.Key))
+            {
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "재생속도를 적용할 그룹 세션 정보가 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_GROUP_SESSION_INVALID",
+                        PlaybackFailureCategory.System);
+                }
+
+                INvrPlaybackEngine engine;
+
+                if (!_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "재생속도를 적용할 NVR 재생 엔진이 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_ENGINE_NOT_FOUND",
+                        PlaybackFailureCategory.System);
+                }
+
+                NvrResult speedResult =
+                    await engine.SetSpeedAsync(
+                        groupSession,
+                        nvrSpeed,
+                        cancellationToken);
+
+                if (speedResult == null)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "NVR 그룹 재생속도 적용 결과가 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_GROUP_SPEED_RESULT_EMPTY",
+                        PlaybackFailureCategory.System);
+                }
+
+                if (!speedResult.Success)
+                {
+                    return ToPlayerResult(
+                        speedResult);
+                }
+
+                /*
+                 * 제조사 엔진에서 속도 적용은 성공했지만
+                 * 동기화 등의 경고가 있는 경우 메시지를 보관한다.
+                 */
+                if (speedResult.Status
+                        == NvrResultStatus.PartialSuccess
+                    && !string.IsNullOrWhiteSpace(
+                        speedResult.Message))
+                {
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": "
+                        + speedResult.Message);
+                }
+            }
+
+            if (warningMessages.Count > 0)
+            {
+                return PlayerPlaybackResult.Ok(
+                    GetPlaybackSpeedText(
+                        speed)
+                    + "을 NVR 재생 그룹에 적용했지만 "
+                    + "일부 경고가 발생했습니다."
+                    + Environment.NewLine
+                    + string.Join(
+                        Environment.NewLine,
+                        warningMessages.Select(
+                            warning =>
+                                "- "
+                                + warning)));
+            }
+
+            return PlayerPlaybackResult.Ok(
+                GetPlaybackSpeedText(
+                    speed)
+                + "을 모든 NVR 재생 그룹에 적용했습니다.");
+        }
+
+        /// <summary>
+        /// 정방향 1배속으로 변경한 뒤
+        /// 다중채널 NVR 그룹의 제조사별 동기화를 실행한다.
+        ///
+        /// 단일 채널 그룹은 비교할 다른 채널이 없으므로 생략한다.
+        ///
+        /// 처리 정책:
+        /// - PartialSuccess는 동기화 성공으로 보고 경고만 수집한다.
+        /// - 그룹 정보 누락, 취소, 예외, 동기화 실패는 실제 실패로 처리한다.
+        /// - 실제 실패가 발생하면 모든 그룹을 변경 전 Playing 또는 Paused 상태로 복원한다.
+        /// - 상태 복원에 실패하면 전체 그룹을 중지한다.
+        /// - 1배속 변경 자체는 유지한다.
+        /// </summary>
+        private async Task<PlayerPlaybackResult>
+            SynchronizePlaybackGroupsAfterNormalSpeedAsync(
+                PlaybackState stateBeforeChange,
+                CancellationToken cancellationToken)
+        {
+            /*
+             * 동기화는 완료됐지만 제조사 엔진에서
+             * 일부 채널 오차 등의 경고를 반환한 경우 보관한다.
+             *
+             * PartialSuccess는 실제 실패와 구분해야 한다.
+             */
+            var warningMessages =
+                new List<string>();
+
+            /*
+             * 다중채널 그룹에 대해 실제 SynchronizeAsync를
+             * 한 * 다중채널 그룹에 대해 실제 Synchron 번이라도 호출했는지 나타낸다.
+             */
+            bool synchronizationExecuted =
+                false;
+
+            /*
+             * 동기화 도중 실제 실패가 발생하여
+             * 모든 그룹의 Playing 또는 Paused 상태를
+             * 다시 통일해야 하는지 나타낸다.
+             *
+             * PartialSuccess만 발생한 경우에는 false를 유지한다.
+             */
+            bool requiresStateRestore =
+                false;
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(
+                        pair => pair.Key))
+            {
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                /*
+                 * 단일 채널 그룹은 비교할 채널이 없으므로
+                 * 제조사 동기화 명령을 실행하지 않는다.
+                 */
+                if (groupSession != null
+                    && groupSession.ChannelCount <= 1)
+                {
+                    continue;
+                }
+
+                INvrPlaybackEngine engine;
+
+                /*
+                 * 다중채널 그룹인데 세션 또는 엔진이 없다면
+                 * 정상적인 동기화를 수행할 수 없는 실제 실패다.
+                 */
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
+                {
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": 동기화할 그룹 또는 재생 엔진이 없습니다.");
+
+                    requiresStateRestore =
+                        true;
+
+                    break;
+                }
+
+                /*
+                 * 동기화 시작 전 요청이 취소됐다면
+                 * 일부 앞쪽 그룹만 동기화됐을 수 있으므로
+                 * 전체 그룹 상태를 다시 통일한다.
+                 */
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    warningMessages.Add(
+                        "사용자 요청 취소로 그룹 동기화를 중단했습니다.");
+
+                    requiresStateRestore =
+                        true;
+
+                    break;
+                }
+
+                synchronizationExecuted =
+                    true;
+
+                NvrResult synchronizeResult;
+
+                try
+                {
+                    synchronizeResult =
+                        await engine.SynchronizeAsync(
+                            groupSession,
+                            cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": 그룹 동기화가 취소되었습니다.");
+
+                    requiresStateRestore =
+                        true;
+
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": 그룹 동기화 중 오류가 발생했습니다. "
+                        + ex.Message);
+
+                    requiresStateRestore =
+                        true;
+
+                    break;
+                }
+
+                /*
+                 * 결과가 없거나 Success=false이면 실제 실패다.
+                 *
+                 * 제조사 Synchronizer가 일부 채널을 Pause 상태로
+                 * 남겼을 수 있으므로 전체 상태 복원이 필요하다.
+                 */
+                if (synchronizeResult == null
+                    || !synchronizeResult.Success)
+                {
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": "
+                        + (
+                            synchronizeResult == null
+                                ? "그룹 동기화 결과가 없습니다."
+                                : string.IsNullOrWhiteSpace(
+                                    synchronizeResult.Message)
+                                    ? "그룹 동기화에 실패했습니다."
+                                    : synchronizeResult.Message
+                        ));
+
+                    requiresStateRestore =
+                        true;
+
+                    break;
+                }
+
+                /*
+                 * PartialSuccess는 동기화 명령 자체는 성공한 상태다.
+                 *
+                 * 이 경우에는 Pause 또는 Resume을 다시 실행하지 않고
+                 * 경고 메시지만 사용자에게 전달한다.
+                 */
+                if (synchronizeResult.Status
+                        == NvrResultStatus.PartialSuccess
+                    && !string.IsNullOrWhiteSpace(
+                        synchronizeResult.Message))
+                {
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": "
+                        + synchronizeResult.Message);
+                }
+            }
+
+            /*
+             * 실제 동기화 실패가 발생한 경우에만
+             * 모든 그룹의 재생 상태를 변경 전 상태로 통일한다.
+             *
+             * SynchronizeAsync 실패 시 제조사 엔진이
+             * 안전을 위해 그룹을 Paused 상태로 남길 수 있다.
+             */
+            if (requiresStateRestore)
+            {
+                var allGroups =
+                    new List<PreparedPlaybackGroup>();
+
+                foreach (
+                    KeyValuePair<int, INvrPlaybackGroupSession>
+                    item in _playbackGroupSessions
+                        .OrderBy(
+                            pair => pair.Key))
+                {
+                    INvrPlaybackEngine engine;
+
+                    if (item.Value != null
+                        && _playbackEngines.TryGetValue(
+                            item.Key,
+                            out engine)
+                        && engine != null)
+                    {
+                        allGroups.Add(
+                            new PreparedPlaybackGroup
+                            {
+                                NvrNo =
+                                    item.Key,
+
+                                Engine =
+                                    engine,
+
+                                Session =
+                                    item.Value
+                            });
+                    }
+                }
+
+                bool stateRestored;
+
+                /*
+                 * 속도 변경 전 일시정지 상태였다면
+                 * 모든 그룹을 다시 Paused 상태로 맞춘다.
+                 *
+                 * 재생 중이었다면 모든 그룹을 다시 Resume한다.
+                 */
+                if (stateBeforeChange
+                    == PlaybackState.Paused)
+                {
+                    stateRestored =
+                        await PauseResumedPlaybackGroupsAsync(
+                            allGroups);
+                }
+                else
+                {
+                    stateRestored =
+                        await ResumePausedPlaybackGroupsAsync(
+                            allGroups);
+                }
+
+                if (!stateRestored)
+                {
+                    /*
+                     * 일부 그룹만 Playing 또는 Paused로 남은 상태는
+                     * 계속 사용할 수 없으므로 전체 그룹을 중지한다.
+                     */
+                    await StopCurrentPlaybackGroupsOnlyAsync();
+
+                    _currentRequest =
+                        null;
+
+                    _currentPlaybackTime =
+                        null;
+
+                    _playbackClockStartedAtUtc =
+                        null;
+
+                    _pausedFromState =
+                        PlaybackState.Playing;
+
+                    CurrentState =
+                        PlaybackState.Stopped;
+
+                    return PlayerPlaybackResult.Fail(
+                        "1배속 변경 후 그룹 동기화 실패 상태를 "
+                        + "복원하지 못해 재생을 중지했습니다."
+                        + (
+                            warningMessages.Count == 0
+                                ? string.Empty
+                                : Environment.NewLine
+                                    + string.Join(
+                                        Environment.NewLine,
+                                        warningMessages.Select(
+                                            warning =>
+                                                "- "
+                                                + warning))
+                        ),
+                        "PLAYBACK_SPEED_SYNC_STATE_RESTORE_FAILED",
+                        PlaybackFailureCategory.System);
+                }
+
+                /*
+                 * 그룹 상태 복원은 성공했다.
+                 *
+                 * 재생속도 1배속 변경은 이미 완료됐으므로
+                 * 속도 변경 자체는 성공으로 반환하고,
+                 * 자동 동기화 미완료 내용을 경고로 전달한다.
+                 */
+                return PlayerPlaybackResult.Ok(
+                    "재생속도는 1배속으로 변경됐지만 "
+                    + "일부 그룹의 자동 동기화를 완료하지 못했습니다."
+                    + (
+                        warningMessages.Count == 0
+                            ? string.Empty
+                            : Environment.NewLine
+                                + string.Join(
+                                    Environment.NewLine,
+                                    warningMessages.Select(
+                                        warning =>
+                                            "- "
+                                            + warning))
+                    ));
+            }
+
+            /*
+             * 모든 그룹이 단일 채널이라면
+             * SynchronizeAsync를 실행할 필요가 없다.
+             */
+            if (!synchronizationExecuted)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "단일 채널 재생이므로 별도의 동기화가 필요하지 않습니다.");
+            }
+
+            /*
+             * 실제 실패는 없지만 PartialSuccess 경고가 발생한 경우다.
+             *
+             * 이미 제조사 동기화는 완료됐으므로
+             * 그룹의 Pause 또는 Resume 상태를 다시 변경하지 않는다.
+             */
+            if (warningMessages.Count > 0)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "정방향 1배속 전환 후 "
+                    + "NVR 그룹 동기화를 완료했지만 "
+                    + "일부 경고가 발생했습니다."
+                    + Environment.NewLine
+                    + string.Join(
+                        Environment.NewLine,
+                        warningMessages.Select(
+                            warning =>
+                                "- "
+                                + warning)));
+            }
+
+            return PlayerPlaybackResult.Ok(
+                "정방향 1배속 전환 후 "
+                + "NVR 그룹 동기화를 완료했습니다.");
+        }
+
+        /// <summary>
+        /// Provider 실제 재생시간을 조회하지 못할 때 사용할
+        /// 추정 영상재생시간을 계산한다.
+        ///
+        /// 계산 정책:
+        /// - Playing 상태에서는 현재 속도에 따라 시간이 증가한다.
+        /// - Rewinding 상태에서는 현재 속도에 따라 시간이 감소한다.
+        /// - Paused 또는 Stopped 상태에서는 기준시간을 그대로 반환한다.
+        /// - 조회 시작·종료 범위를 벗어나지 않도록 보정한다.
         /// </summary>
         private DateTime GetEstimatedPlaybackTime()
         {
@@ -425,22 +967,50 @@ namespace CamViewer.Services
                 return DateTime.MinValue;
             }
 
+            /*
+             * 현재 서비스가 기억하고 있는 기준 영상재생시간을 사용한다.
+             *
+             * 아직 실제 시간이 저장되지 않았다면
+             * 최초 조회 시작시간을 기준값으로 사용한다.
+             */
             DateTime baseTime =
                 _currentPlaybackTime.HasValue
                     ? _currentPlaybackTime.Value
                     : _currentRequest.PlayStartTime;
 
+            /*
+             * Playing과 Rewinding 상태가 아니면
+             * 영상재생시간이 움직이면 안 된다.
+             *
+             * _playbackClockStartedAtUtc 값이 실수로 남아 있더라도
+             * Paused 또는 Stopped 상태에서는 경과시간을 계산하지 않는다.
+             */
+            if (CurrentState != PlaybackState.Playing
+                && CurrentState != PlaybackState.Rewinding)
+            {
+                return ClampPlaybackTime(
+                    baseTime);
+            }
+
+            /*
+             * 재생 중이더라도 시계 시작 기준값이 없다면
+             * 저장된 기준시간을 그대로 반환한다.
+             */
             if (!_playbackClockStartedAtUtc.HasValue)
             {
-                return ClampPlaybackTime(baseTime);
+                return ClampPlaybackTime(
+                    baseTime);
             }
 
             double elapsedSeconds =
-                (DateTime.UtcNow - _playbackClockStartedAtUtc.Value)
-                .TotalSeconds;
+                (
+                    DateTime.UtcNow
+                    - _playbackClockStartedAtUtc.Value
+                ).TotalSeconds;
 
             double speedMultiplier =
-                GetSpeedMultiplier(_currentSpeed);
+                GetSpeedMultiplier(
+                    _currentSpeed);
 
             DateTime estimatedTime;
 
@@ -448,16 +1018,19 @@ namespace CamViewer.Services
             {
                 estimatedTime =
                     baseTime.AddSeconds(
-                        -elapsedSeconds * speedMultiplier);
+                        -elapsedSeconds
+                        * speedMultiplier);
             }
             else
             {
                 estimatedTime =
                     baseTime.AddSeconds(
-                        elapsedSeconds * speedMultiplier);
+                        elapsedSeconds
+                        * speedMultiplier);
             }
 
-            return ClampPlaybackTime(estimatedTime);
+            return ClampPlaybackTime(
+                estimatedTime);
         }
 
         /// <summary>
@@ -527,102 +1100,217 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 현재 재생 중인 모든 채널을 일시정지한다.
+        /// 현재 재생 중인 모든 NVR 재생 그룹을 일시정지한다.
         ///
-        /// 좌우 채널 중 하나라도 Provider를 찾지 못하거나
-        /// Pause 명령에 실패하면 부분 일시정지 상태를 허용하지 않고
-        /// 전체 재생 세션을 정리한다.
+        /// 처리 순서:
+        /// 1. 현재 실제 또는 추정 영상재생시간 확보
+        /// 2. NVR 그룹별 PauseAsync 실행
+        /// 3. 일부 그룹 실패 시 이미 일시정지된 그룹 재개
+        /// 4. 모든 그룹 성공 후 서비스 상태를 Paused로 변경
+        ///
+        /// Playing과 Rewinding 상태 모두 지원하며,
+        /// 일시정지 직전 방향은 _pausedFromState에 보관한다.
         /// </summary>
-        public async Task<PlayerPlaybackResult> PauseAsync(
-            CancellationToken cancellationToken)
+        public async Task<PlayerPlaybackResult> PauseAsync(CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
-            if (_sessions.Count == 0)
+            if (cancellationToken.IsCancellationRequested)
             {
                 return PlayerPlaybackResult.Fail(
-                    "일시정지할 재생 세션이 없습니다.",
-                    "PLAYBACK_NOT_STARTED");
+                    "재생 일시정지 요청이 취소되었습니다.",
+                    "PLAYBACK_PAUSE_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            if (_playbackGroupSessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "일시정지할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
             /*
-             * Pause 명령을 보내기 전에 현재 영상재생시간을 고정한다.
-             *
-             * 모든 Provider Pause가 끝난 뒤 시간을 계산하면
-             * 좌우 채널 처리 시간만큼 재생시간이 더 증가할 수 있으므로
-             * 명령 시작 시점의 시간을 기준으로 보관한다.
+             * 이미 일시정지 상태이면
+             * 중복 Pause 명령을 보내지 않는다.
              */
-            DateTime pauseTime =
-                GetEstimatedPlaybackTime();
+            if (CurrentState == PlaybackState.Paused)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "이미 일시정지 상태입니다.");
+            }
+
+            if (CurrentState != PlaybackState.Playing
+                && CurrentState != PlaybackState.Rewinding)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 상태에서는 일시정지할 수 없습니다. "
+                    + "State="
+                    + CurrentState,
+                    "PLAYBACK_PAUSE_INVALID_STATE",
+                    PlaybackFailureCategory.System);
+            }
 
             PlaybackState stateBeforePause =
                 CurrentState;
 
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
+            /*
+             * Provider의 실제 OSD 시간이 확인되면 해당 시간을 사용하고,
+             * 확인할 수 없으면 서비스 추정 시간을 사용한다.
+             */
+            DateTime pauseTime =
+                GetEstimatedPlaybackTime();
+
+            DateTime? actualPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
             {
-                INvrPlaybackSession session =
+                return PlayerPlaybackResult.Fail(
+                    "재생 일시정지 요청이 취소되었습니다.",
+                    "PLAYBACK_PAUSE_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            if (actualPlaybackTime.HasValue)
+            {
+                pauseTime =
+                    actualPlaybackTime.Value;
+            }
+
+            var pausedGroups =
+                new List<PreparedPlaybackGroup>();
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    bool restored =
+                        await ResumePausedPlaybackGroupsAsync(
+                            pausedGroups);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "일시정지 취소 후 일부 NVR 그룹을 "
+                            + "재생 상태로 복원하지 못했습니다.",
+                            "PLAYBACK_PAUSE_ROLLBACK_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "재생 일시정지 요청이 취소되었습니다.",
+                        "PLAYBACK_PAUSE_CANCELLED",
+                        PlaybackFailureCategory.Cancelled);
+                }
+
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
                     item.Value;
 
-                if (session == null)
+                if (groupSession == null)
                 {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "재생 세션 정보가 없습니다.",
-                            "PLAYBACK_SESSION_INVALID");
+                    bool restored =
+                        await ResumePausedPlaybackGroupsAsync(
+                            pausedGroups);
 
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 일시정지",
-                        failureResult,
-                        "PLAYBACK_PAUSE_FAILED");
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "일시정지할 NVR 그룹 세션 정보가 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_GROUP_SESSION_INVALID",
+                        PlaybackFailureCategory.System);
                 }
 
-                INvrProvider provider =
-                    GetProviderByNvrNo(
-                        session.NvrNo);
+                INvrPlaybackEngine engine;
 
-                /*
-                 * 기존에는 Provider가 없으면 continue 처리했지만,
-                 * 이 경우 일부 채널만 일시정지될 수 있다.
-                 *
-                 * 좌우 영상 상태가 달라지는 것을 막기 위해
-                 * 전체 재생 실패로 처리한다.
-                 */
-                if (provider == null)
+                if (!_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
                 {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "NVR Provider를 찾을 수 없습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo,
-                            "NVR_PROVIDER_NOT_FOUND");
+                    bool restored =
+                        await ResumePausedPlaybackGroupsAsync(
+                            pausedGroups);
 
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 일시정지",
-                        failureResult,
-                        "PLAYBACK_PAUSE_FAILED");
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "일시정지할 NVR 재생 엔진이 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_ENGINE_NOT_FOUND",
+                        PlaybackFailureCategory.System);
                 }
 
-                NvrResult result =
-                    await provider.PauseAsync(
-                        session,
+                NvrResult pauseResult =
+                    await engine.PauseAsync(
+                        groupSession,
                         cancellationToken);
 
-                if (result == null || !result.Success)
+                if (pauseResult == null
+                    || !pauseResult.Success)
                 {
-                    PlayerPlaybackResult failureResult =
-                        ToPlayerResult(result);
+                    bool restored =
+                        await ResumePausedPlaybackGroupsAsync(
+                            pausedGroups);
 
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 일시정지",
-                        failureResult,
-                        "PLAYBACK_PAUSE_FAILED");
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "일부 NVR 그룹의 일시정지 실패 후 "
+                            + "기존 재생 상태를 복원하지 못했습니다.",
+                            "PLAYBACK_PAUSE_ROLLBACK_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    return pauseResult == null
+                        ? PlayerPlaybackResult.Fail(
+                            "NVR 그룹 일시정지 결과가 없습니다. "
+                            + "NvrNo="
+                            + nvrNo,
+                            "PLAYBACK_GROUP_PAUSE_RESULT_EMPTY",
+                            PlaybackFailureCategory.System)
+                        : ToPlayerResult(
+                            pauseResult);
                 }
+
+                pausedGroups.Add(
+                     new PreparedPlaybackGroup
+                     {
+                         NvrNo =
+                                item.Key,
+
+                         Engine =
+                                engine,
+
+                         Session =
+                                item.Value
+                     });
             }
 
             /*
-             * 모든 채널 Pause 성공 후에만 서비스 상태를 Paused로 변경한다.
+             * 모든 NVR 그룹이 정상적으로 일시정지된 뒤에만
+             * 공통 서비스 상태를 Paused로 변경한다.
              */
             _currentPlaybackTime =
                 ClampPlaybackTime(
@@ -631,112 +1319,216 @@ namespace CamViewer.Services
             _playbackClockStartedAtUtc =
                 null;
 
-            if (stateBeforePause == PlaybackState.Rewinding)
-            {
-                _pausedFromState =
-                    PlaybackState.Rewinding;
-            }
-            else
-            {
-                _pausedFromState =
-                    PlaybackState.Playing;
-            }
+            _pausedFromState =
+                stateBeforePause == PlaybackState.Rewinding
+                    ? PlaybackState.Rewinding
+                    : PlaybackState.Playing;
 
             CurrentState =
                 PlaybackState.Paused;
 
             return PlayerPlaybackResult.Ok(
-                "일시정지했습니다.");
+                stateBeforePause == PlaybackState.Rewinding
+                    ? "역재생을 일시정지했습니다."
+                    : "재생을 일시정지했습니다.");
         }
 
         /// <summary>
-        /// 일시정지 상태의 모든 재생 채널을 재개한다.
+        /// 일시정지된 모든 NVR 재생 그룹을 재개한다.
         ///
-        /// 좌우 채널 중 하나라도 Provider 누락 또는 Resume 실패가 발생하면
-        /// 일부 채널만 재생되는 상태를 허용하지 않고 전체 세션을 정리한다.
+        /// 처리 순서:
+        /// 1. 일시정지 상태 검증
+        /// 2. 현재 실제 영상재생시간 확인
+        /// 3. NVR 그룹별 ResumeAsync 실행
+        /// 4. 일부 그룹 실패 시 이미 재개된 그룹 다시 Pause
+        /// 5. 이전 방향에 따라 Playing 또는 Rewinding 복원
         /// </summary>
         public async Task<PlayerPlaybackResult> ResumeAsync(
             CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
-            if (_sessions.Count == 0)
+            if (cancellationToken.IsCancellationRequested)
             {
                 return PlayerPlaybackResult.Fail(
-                    "재개할 재생 세션이 없습니다.",
-                    "PLAYBACK_NOT_STARTED");
+                    "재생 재개 요청이 취소되었습니다.",
+                    "PLAYBACK_RESUME_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            if (_playbackGroupSessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재개할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
             if (CurrentState != PlaybackState.Paused)
             {
                 return PlayerPlaybackResult.Fail(
-                    "현재 재생 상태에서는 재생을 재개할 수 없습니다.",
-                    "PLAYBACK_NOT_PAUSED");
-            }
-
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
-            {
-                INvrPlaybackSession session =
-                    item.Value;
-
-                if (session == null)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "재생 세션 정보가 없습니다.",
-                            "PLAYBACK_SESSION_INVALID");
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 재개",
-                        failureResult,
-                        "PLAYBACK_RESUME_FAILED");
-                }
-
-                INvrProvider provider =
-                    GetProviderByNvrNo(
-                        session.NvrNo);
-
-                if (provider == null)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "NVR Provider를 찾을 수 없습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo,
-                            "NVR_PROVIDER_NOT_FOUND");
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 재개",
-                        failureResult,
-                        "PLAYBACK_RESUME_FAILED");
-                }
-
-                NvrResult result =
-                    await provider.ResumeAsync(
-                        session,
-                        cancellationToken);
-
-                if (result == null || !result.Success)
-                {
-                    PlayerPlaybackResult failureResult =
-                        ToPlayerResult(result);
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 재개",
-                        failureResult,
-                        "PLAYBACK_RESUME_FAILED");
-                }
+                    "현재 재생 상태에서는 재생을 재개할 수 없습니다. "
+                    + "State="
+                    + CurrentState,
+                    "PLAYBACK_NOT_PAUSED",
+                    PlaybackFailureCategory.System);
             }
 
             /*
-             * 모든 채널 Resume 성공 후에만 재생시간 기준 시계를 다시 시작한다.
+             * 일시정지 중 Seek 또는 방향 전환이 수행됐을 수 있으므로
+             * Resume 직전 제조사 그룹의 실제 시간을 다시 확인한다.
+             */
+            DateTime? actualPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생 재개 요청이 취소되었습니다.",
+                    "PLAYBACK_RESUME_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            if (actualPlaybackTime.HasValue)
+            {
+                _currentPlaybackTime =
+                    ClampPlaybackTime(
+                        actualPlaybackTime.Value);
+            }
+
+            var resumedGroups =
+                new List<PreparedPlaybackGroup>();
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    bool restored =
+                        await PauseResumedPlaybackGroupsAsync(
+                            resumedGroups);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "재생 재개 취소 후 일부 NVR 그룹을 "
+                            + "일시정지 상태로 복원하지 못했습니다.",
+                            "PLAYBACK_RESUME_ROLLBACK_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "재생 재개 요청이 취소되었습니다.",
+                        "PLAYBACK_RESUME_CANCELLED",
+                        PlaybackFailureCategory.Cancelled);
+                }
+
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null)
+                {
+                    bool restored =
+                        await PauseResumedPlaybackGroupsAsync(
+                            resumedGroups);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "재개할 NVR 그룹 세션 정보가 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_GROUP_SESSION_INVALID",
+                        PlaybackFailureCategory.System);
+                }
+
+                INvrPlaybackEngine engine;
+
+                if (!_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
+                {
+                    bool restored =
+                        await PauseResumedPlaybackGroupsAsync(
+                            resumedGroups);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "재개할 NVR 재생 엔진이 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_ENGINE_NOT_FOUND",
+                        PlaybackFailureCategory.System);
+                }
+
+                NvrResult resumeResult =
+                    await engine.ResumeAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (resumeResult == null
+                    || !resumeResult.Success)
+                {
+                    bool restored =
+                        await PauseResumedPlaybackGroupsAsync(
+                            resumedGroups);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "일부 NVR 그룹의 재생 재개 실패 후 "
+                            + "일시정지 상태를 복원하지 못했습니다.",
+                            "PLAYBACK_RESUME_ROLLBACK_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    return resumeResult == null
+                        ? PlayerPlaybackResult.Fail(
+                            "NVR 그룹 재생 재개 결과가 없습니다. "
+                            + "NvrNo="
+                            + nvrNo,
+                            "PLAYBACK_GROUP_RESUME_RESULT_EMPTY",
+                            PlaybackFailureCategory.System)
+                        : ToPlayerResult(
+                            resumeResult);
+                }
+
+                resumedGroups.Add(
+                     new PreparedPlaybackGroup
+                     {
+                         NvrNo = item.Key,
+                         Engine = engine,
+                         Session = item.Value
+                     });
+            }
+
+            /*
+             * 모든 NVR 그룹이 정상적으로 재개된 후에만
+             * 서비스 기준 시계를 다시 시작한다.
              */
             _playbackClockStartedAtUtc =
                 DateTime.UtcNow;
 
-            if (_pausedFromState == PlaybackState.Rewinding)
+            if (_pausedFromState
+                == PlaybackState.Rewinding)
             {
                 CurrentState =
                     PlaybackState.Rewinding;
@@ -753,7 +1545,10 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 현재 재생 위치를 지정 초만큼 이동한다.
+        /// 현재 영상재생시간을 기준으로 지정 초만큼 이동한다.
+        ///
+        /// 실제 제조사 OSD 시간이 확인되면 해당 시간을 기준으로 하고,
+        /// 확인할 수 없으면 서비스 추정 시간을 사용한다.
         /// </summary>
         public async Task<PlayerPlaybackResult> SeekSecondsAsync(
             int seconds,
@@ -761,24 +1556,61 @@ namespace CamViewer.Services
         {
             EnsureNotDisposed();
 
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "영상 이동 요청이 취소되었습니다.",
+                    "PLAYBACK_SEEK_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
             if (_currentRequest == null)
             {
                 return PlayerPlaybackResult.Fail(
                     "현재 재생 요청 정보가 없습니다.",
-                    "PLAYBACK_REQUEST_EMPTY");
+                    "PLAYBACK_REQUEST_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
-            DateTime? syncedTime =
-                await SyncPlaybackTimeAsync(
+            if (_playbackGroupSessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "이동할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
+            }
+
+            if (seconds == 0)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "영상재생시간을 변경하지 않았습니다.");
+            }
+
+            /*
+             * 기준 NVR 그룹에서 실제 OSD 시간을 조회한다.
+             *
+             * 조회에 실패하면 서비스의 경과시간 기준 추정값을 사용한다.
+             */
+            DateTime? actualPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
                     cancellationToken);
 
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "영상 이동 요청이 취소되었습니다.",
+                    "PLAYBACK_SEEK_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
             DateTime currentTime =
-                syncedTime.HasValue
-                    ? syncedTime.Value
+                actualPlaybackTime.HasValue
+                    ? actualPlaybackTime.Value
                     : GetEstimatedPlaybackTime();
 
             DateTime targetTime =
-                currentTime.AddSeconds(seconds);
+                currentTime.AddSeconds(
+                    seconds);
 
             return await SeekToTimeAsync(
                 targetTime,
@@ -786,189 +1618,251 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 빠른재생을 요청한다.
-        /// 현재 Dahua Provider 공통 구현 전 단계에서는 미지원으로 처리한다.
-        /// </summary>
-        //public Task<PlayerPlaybackResult> FastForwardAsync(
-        //    CancellationToken cancellationToken)
-        //{
-        //    EnsureNotDisposed();
-
-        //    if (_sessions.Count == 0)
-        //    {
-        //        return Task.FromResult(
-        //            PlayerPlaybackResult.Fail(
-        //                "빠른재생할 재생 세션이 없습니다.",
-        //                "PLAYBACK_NOT_STARTED"));
-        //    }
-
-        //    return Task.FromResult(
-        //        PlayerPlaybackResult.Fail(
-        //            "빠른재생 기능은 아직 지원되지 않습니다.",
-        //            "FAST_FORWARD_NOT_SUPPORTED"));
-        //}
-
-
-
-        /// <summary>
-        /// 현재 재생을 중지하고 모든 재생 세션과 Provider 리소스를 정리한다.
-        ///
-        /// 정리 과정에서 일부 작업이 실패해도 나머지 세션과 Provider 정리를
-        /// 계속 수행하며, 발생한 모든 정리 경고를 수집하여 반환한다.
+        /// 현재 재생을 중지하고
+        /// 재생 그룹, 재생 엔진 및 Provider 리소스를 모두 정리한다.
         ///
         /// 처리 순서:
-        /// 1. 모든 재생 세션에 Stop 요청
-        /// 2. 모든 재생 세션 Dispose
-        /// 3. 모든 Provider Logout
-        /// 4. 모든 Provider Dispose
-        /// 5. 내부 세션/Provider Dictionary 초기화
-        /// 6. 현재 재생 요청과 재생시간 상태 초기화
+        /// 1. 서비스 영상재생시간 정지
+        /// 2. 제조사별 재생 그룹 중지
+        /// 3. 재생 엔진 해제
+        /// 4. Provider 로그아웃 및 해제
+        /// 5. 서비스 내부 상태 초기화
+        ///
+        /// 정리 도중 일부 작업이 실패하더라도
+        /// 나머지 리소스 정리는 계속 수행한다.
         /// </summary>
-        public async Task<PlayerPlaybackResult> StopAsync(CancellationToken cancellationToken)
+        public async Task<PlayerPlaybackResult> StopAsync(
+            CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
+            var cleanupWarnings =
+                new List<string>();
+
             /*
-             * 정리 중 발생한 모든 경고를 수집한다.
+             * Stop은 리소스 정리 명령이다.
              *
-             * 기존에는 마지막 예외 메시지 하나만 보관했기 때문에
-             * 여러 채널에서 동시에 오류가 발생하면 앞선 오류 정보가 사라졌다.
+             * 전달된 CancellationToken이 이미 취소되었더라도
+             * 반드시 끝까지 실행해야 하므로 실제 정리 호출에는
+             * CancellationToken.None을 사용한다.
              */
-            List<string> cleanupWarnings = new List<string>();
 
             /*
-             * StopAsync 실행 도중 Dictionary가 변경될 가능성을 막기 위해
-             * 복사본을 순회한다.
+             * 실제 정리가 진행되는 동안에도
+             * 서비스 영상재생시간이 계속 움직이지 않도록
+             * 먼저 논리적인 재생 시계를 정지한다.
              */
-            List<KeyValuePair<int, INvrPlaybackSession>> sessionItems = _sessions.ToList();
-
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in sessionItems)
+            if (_currentRequest != null)
             {
-                int sessionKey = item.Key;
+                try
+                {
+                    _currentPlaybackTime =
+                        ClampPlaybackTime(
+                            GetEstimatedPlaybackTime());
+                }
+                catch
+                {
+                    /*
+                     * 종료 정리 중 시간 계산 실패는
+                     * 실제 NVR 리소스 정리를 막지 않는다.
+                     */
+                }
+            }
 
-                INvrPlaybackSession session = item.Value;
+            _playbackClockStartedAtUtc =
+                null;
 
-                if (session == null)
+            CurrentState =
+                PlaybackState.Stopped;
+
+            /*
+             * 1. 현재 제조사별 재생 그룹을 정리한다.
+             */
+            List<KeyValuePair<int, INvrPlaybackGroupSession>>
+                groupItems =
+                    _playbackGroupSessions
+                        .ToList();
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in groupItems)
+            {
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null)
                 {
                     cleanupWarnings.Add(
-                        "재생 세션 정보가 없습니다. "
-                        + "SessionKey="
-                        + sessionKey);
+                        "NVR 재생 그룹 세션 정보가 없습니다. "
+                        + "NvrNo="
+                        + nvrNo);
 
                     continue;
                 }
 
-                INvrProvider provider = GetProviderByNvrNo(session.NvrNo);
+                INvrPlaybackEngine engine;
 
-                /*
-                 * Provider Stop 실패와 세션 Dispose 실패를 분리한다.
-                 *
-                 * Provider Stop에서 예외가 발생하더라도
-                 * session.Dispose는 반드시 별도로 시도해야 한다.
-                 */
-                if (provider == null)
+                if (!_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
                 {
                     cleanupWarnings.Add(
-                        "재생 세션을 중지할 NVR Provider를 찾을 수 없습니다. "
+                        "NVR 재생 그룹을 정리할 재생 엔진이 없습니다. "
                         + "NvrNo="
-                        + session.NvrNo
-                        + ", ChannelNo="
-                        + session.ChannelNo
-                        + ", ScreenPosition="
-                        + session.ScreenPosition);
-                }
-                else
-                {
-                    try
-                    {
-                        /*
-                         * 재생 정리는 요청 취소 여부와 관계없이 끝까지 수행해야 한다.
-                         *
-                         * 오류 복구 중 전달된 CancellationToken이 이미 취소됐을 수 있으므로
-                         * Provider 정리에는 CancellationToken.None을 사용한다.
-                         */
-                        NvrResult stopResult = await provider.StopAsync(session, CancellationToken.None);
+                        + nvrNo);
 
-                        if (stopResult == null)
-                        {
-                            cleanupWarnings.Add(
-                                "NVR 재생 중지 결과가 없습니다. "
-                                + "NvrNo="
-                                + session.NvrNo
-                                + ", ChannelNo="
-                                + session.ChannelNo
-                                + ", ScreenPosition="
-                                + session.ScreenPosition);
-                        }
-                        else if (!stopResult.Success)
-                        {
-                            cleanupWarnings.Add(
-                                "NVR 재생 세션 중지에 실패했습니다. "
-                                + "NvrNo="
-                                + session.NvrNo
-                                + ", ChannelNo="
-                                + session.ChannelNo
-                                + ", ScreenPosition="
-                                + session.ScreenPosition
-                                + ", Message="
-                                + (
-                                    string.IsNullOrWhiteSpace(stopResult.Message)
-                                        ? stopResult.Status.ToString()
-                                        : stopResult.Message));
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        cleanupWarnings.Add(
-                            "NVR 재생 세션 중지 중 예외가 발생했습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo
-                            + ", ScreenPosition="
-                            + session.ScreenPosition
-                            + ", Error="
-                            + ex.Message);
-                    }
+                    continue;
                 }
 
-                /*
-                 * Provider Stop의 성공 여부와 관계없이
-                 * 세션 객체의 로컬 리소스는 반드시 해제한다.
-                 */
                 try
                 {
-                    session.Dispose();
+                    NvrResult stopResult =
+                        await engine.StopAsync(
+                            groupSession,
+                            CancellationToken.None);
+
+                    if (stopResult == null)
+                    {
+                        cleanupWarnings.Add(
+                            "NVR 재생 그룹 중지 결과가 없습니다. "
+                            + "NvrNo="
+                            + nvrNo);
+                    }
+                    else if (!stopResult.Success)
+                    {
+                        cleanupWarnings.Add(
+                            "NVR 재생 그룹 중지에 실패했습니다. "
+                            + "NvrNo="
+                            + nvrNo
+                            + ", Status="
+                            + stopResult.Status
+                            + ", Message="
+                            + (
+                                string.IsNullOrWhiteSpace(
+                                    stopResult.Message)
+                                    ? "-"
+                                    : stopResult.Message
+                            ));
+                    }
+                    else if (
+                        stopResult.Status
+                        == NvrResultStatus.PartialSuccess)
+                    {
+                        cleanupWarnings.Add(
+                            "NVR 재생 그룹 중지 중 일부 경고가 발생했습니다. "
+                            + "NvrNo="
+                            + nvrNo
+                            + ", Message="
+                            + (
+                                string.IsNullOrWhiteSpace(
+                                    stopResult.Message)
+                                    ? "-"
+                                    : stopResult.Message
+                            ));
+                    }
                 }
                 catch (Exception ex)
                 {
+                    /*
+                     * 하나의 NVR 그룹 정리 실패가
+                     * 다른 NVR 그룹 정리를 막지 않게 한다.
+                     */
                     cleanupWarnings.Add(
-                        "재생 세션 리소스 해제 중 예외가 발생했습니다. "
+                        "NVR 재생 그룹 중지 중 예외가 발생했습니다. "
                         + "NvrNo="
-                        + session.NvrNo
-                        + ", ChannelNo="
-                        + session.ChannelNo
-                        + ", ScreenPosition="
-                        + session.ScreenPosition
+                        + nvrNo
                         + ", Error="
                         + ex.Message);
                 }
             }
 
             /*
-             * 모든 세션 정리 시도가 끝났으므로
-             * 세션 Dictionary와 보정값을 초기화한다.
+             * 그룹 Stop 성공 여부와 관계없이
+             * 공통 서비스가 가진 세션 참조는 모두 제거한다.
              */
-            _sessions.Clear();
-            _sessionTimeOffsets.Clear();
+            _playbackGroupSessions.Clear();
 
-            List<KeyValuePair<int, INvrProvider>> providerItems = _providers.ToList();
+            
 
-            foreach (KeyValuePair<int, INvrProvider> item in providerItems)
+            /*
+             * 2.재생 엔진이 IDisposable을 구현했다면 해제한다.
+             *
+             * INvrPlaybackEngine 자체는 IDisposable을 요구하지 않으므로
+             * 선택적으로 구현된 경우에만 Dispose를 호출한다.
+             */
+            List<KeyValuePair<int, INvrPlaybackEngine>>
+                engineItems =
+                    _playbackEngines
+                        .ToList();
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackEngine>
+                item in engineItems)
             {
-                int nvrNo = item.Key;
+                int nvrNo =
+                    item.Key;
 
-                INvrProvider provider = item.Value;
+                INvrPlaybackEngine engine =
+                    item.Value;
+
+                if (engine == null)
+                {
+                    continue;
+                }
+
+                IDisposable disposableEngine =
+                    engine as IDisposable;
+
+                if (disposableEngine == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    disposableEngine.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    cleanupWarnings.Add(
+                        "NVR 재생 엔진 해제 중 예외가 발생했습니다. "
+                        + "NvrNo="
+                        + nvrNo
+                        + ", Error="
+                        + ex.Message);
+                }
+            }
+
+            /*
+             * 재생 엔진은 로그인된 Provider에 연결되어 있으므로
+             * Provider를 해제하기 전에 엔진 참조를 제거한다.
+             */
+            _playbackEngines.Clear();
+
+            /*
+             * 3. 모든 Provider를 로그아웃하고 해제한다.
+             *
+             * 영상 원본 정보 조회만 수행한 Provider도
+             * _providers에 남아 있을 수 있으므로 전체를 정리한다.
+             */
+            List<KeyValuePair<int, INvrProvider>>
+                providerItems =
+                    _providers
+                        .ToList();
+
+            foreach (
+                KeyValuePair<int, INvrProvider>
+                item in providerItems)
+            {
+                int nvrNo =
+                    item.Key;
+
+                INvrProvider provider =
+                    item.Value;
 
                 if (provider == null)
                 {
@@ -981,14 +1875,14 @@ namespace CamViewer.Services
                 }
 
                 /*
-                 * Provider Logout과 Dispose를 별도의 try 블록으로 처리한다.
-                 *
-                 * Logout 실패가 발생해도 SDK 및 네이티브 리소스 해제를 위해
-                 * Dispose는 반드시 계속 수행한다.
+                 * Logout 실패 여부와 관계없이
+                 * Dispose는 반드시 별도로 실행한다.
                  */
                 try
                 {
-                    NvrResult logoutResult = await provider.LogoutAsync(CancellationToken.None);
+                    NvrResult logoutResult =
+                        await provider.LogoutAsync(
+                            CancellationToken.None);
 
                     if (logoutResult == null)
                     {
@@ -1003,11 +1897,31 @@ namespace CamViewer.Services
                             "NVR 로그아웃에 실패했습니다. "
                             + "NvrNo="
                             + nvrNo
+                            + ", Status="
+                            + logoutResult.Status
                             + ", Message="
                             + (
-                                string.IsNullOrWhiteSpace(logoutResult.Message)
-                                    ? logoutResult.Status.ToString()
-                                    : logoutResult.Message));
+                                string.IsNullOrWhiteSpace(
+                                    logoutResult.Message)
+                                    ? "-"
+                                    : logoutResult.Message
+                            ));
+                    }
+                    else if (
+                        logoutResult.Status
+                        == NvrResultStatus.PartialSuccess)
+                    {
+                        cleanupWarnings.Add(
+                            "NVR 로그아웃 중 일부 경고가 발생했습니다. "
+                            + "NvrNo="
+                            + nvrNo
+                            + ", Message="
+                            + (
+                                string.IsNullOrWhiteSpace(
+                                    logoutResult.Message)
+                                    ? "-"
+                                    : logoutResult.Message
+                            ));
                     }
                 }
                 catch (Exception ex)
@@ -1027,7 +1941,8 @@ namespace CamViewer.Services
                 catch (Exception ex)
                 {
                     cleanupWarnings.Add(
-                        "NVR Provider 리소스 해제 중 예외가 발생했습니다. "
+                        "NVR Provider 리소스 해제 중 "
+                        + "예외가 발생했습니다. "
                         + "NvrNo="
                         + nvrNo
                         + ", Error="
@@ -1035,14 +1950,10 @@ namespace CamViewer.Services
                 }
             }
 
-            /*
-             * 모든 Provider 정리 시도가 끝났으므로 Dictionary를 초기화한다.
-             */
             _providers.Clear();
 
             /*
-             * 실제 Provider 정리 결과와 관계없이
-             * 서비스 내부의 논리적인 재생 상태는 반드시 정지 상태로 되돌린다.
+             * 4. 서비스 내부의 논리 상태를 초기화한다.
              */
             _currentRequest =
                 null;
@@ -1059,112 +1970,344 @@ namespace CamViewer.Services
             CurrentState =
                 PlaybackState.Stopped;
 
+            /*
+             * 사용자가 선택한 재생속도는 초기화하지 않는다.
+             *
+             * 정지 후 다시 재생하더라도
+             * 기존에 선택한 속도를 유지하는 정책이다.
+             */
+
             if (cleanupWarnings.Count > 0)
             {
                 return PlayerPlaybackResult.Ok(
-                    "재생은 중지되었지만 일부 리소스 정리 중 경고가 발생했습니다."
+                    "재생은 중지되었지만 "
+                    + "일부 리소스 정리 중 경고가 발생했습니다."
                     + Environment.NewLine
                     + string.Join(
                         Environment.NewLine,
                         cleanupWarnings.Select(
-                            warning => "- " + warning)));
+                            warning =>
+                                "- "
+                                + warning)));
             }
 
             return PlayerPlaybackResult.Ok(
-                "재생을 중지했습니다.");
+                "재생을 중지하고 NVR 리소스를 정리했습니다.");
         }
 
         /// <summary>
-        /// 현재 재생 중인 채널들의 시간 동기화 상태를 조회한다.
-        /// Provider가 실제 재생시간을 지원하면 실제 시간을 사용하고,
-        /// 지원하지 않으면 추정 시간을 사용한다.
+        /// 현재 NVR 재생 그룹들의 영상 동기화 상태를 조회한다.
+        ///
+        /// 제조사 그룹별 상태에서 다음 값을 사용한다.
+        /// - 공통 영상재생시간
+        /// - 실제 채널 간 최대 시간차
+        /// - 동기화 가능 여부
+        ///
+        /// 여러 NVR 그룹이 존재하면
+        /// 각 그룹 기준시각 간 차이도 함께 계산한다.
         /// </summary>
-        public async Task<PlaybackSyncStatus> GetPlaybackSyncStatusAsync(
-            CancellationToken cancellationToken)
+        public async Task<PlaybackSyncStatus>
+            GetPlaybackSyncStatusAsync(
+                CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
-            var channelStatuses =
-                new List<PlaybackChannelTimeStatus>();
+            var result =
+                new PlaybackSyncStatus();
 
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
+            if (_currentRequest == null
+                || _currentRequest.Channels == null
+                || _currentRequest.Channels.Count == 0)
             {
-                int sessionKey = item.Key;
-                INvrPlaybackSession session = item.Value;
-                if (session == null)
+                return result;
+            }
+
+            bool usesProviderTime =
+                false;
+
+            bool hasMeasuredDifference =
+                false;
+
+            double maximumDifferenceSeconds =
+                0d;
+
+            var groupPlaybackTimes =
+                new List<DateTime>();
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                List<PlayerChannelTarget> groupChannels =
+                    _currentRequest.Channels
+                        .Where(
+                            channel =>
+                                channel != null
+                                && channel.NvrNo == nvrNo)
+                        .OrderBy(
+                            channel =>
+                                (int)channel.ScreenPosition)
+                        .ToList();
+
+                INvrPlaybackEngine engine;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
+                {
+                    /*
+                     * 그룹 상태를 확인하지 못했더라도
+                     * UI에서 채널 자체가 사라지지 않도록
+                     * 시간 미확인 상태로 목록에 포함한다.
+                     */
+                    foreach (PlayerChannelTarget channel
+                        in groupChannels)
+                    {
+                        result.Channels.Add(
+                            new PlaybackChannelTimeStatus
+                            {
+                                ScreenPosition =
+                                    GetScreenPositionText(
+                                        (int)channel.ScreenPosition),
+
+                                NvrNo =
+                                    channel.NvrNo,
+
+                                ChannelNo =
+                                    channel.ChannelNo,
+
+                                PlaybackTime =
+                                    null,
+
+                                IsProviderTime =
+                                    false,
+
+                                TimeOffsetSeconds =
+                                    channel.TimeOffsetSeconds
+                            });
+                    }
+
+                    continue;
+                }
+
+                NvrResult<NvrPlaybackGroupStatus>
+                    statusResult =
+                        null;
+
+                try
+                {
+                    statusResult =
+                        await engine.GetStatusAsync(
+                            groupSession,
+                            cancellationToken);
+                }
+                catch
+                {
+                    /*
+                     * 상태 조회 예외가 전체 상태 화면 조회를
+                     * 중단시키지 않게 한다.
+                     */
+                }
+
+                NvrPlaybackGroupStatus groupStatus =
+                    statusResult != null
+                    && statusResult.Success
+                        ? statusResult.Data
+                        : null;
+
+                DateTime? groupPlaybackTime =
+                    groupStatus == null
+                        ? (DateTime?)null
+                        : groupStatus.CurrentPlaybackTime;
+
+                if (groupPlaybackTime.HasValue)
+                {
+                    DateTime normalizedTime =
+                        ClampPlaybackTime(
+                            groupPlaybackTime.Value);
+
+                    groupPlaybackTime =
+                        normalizedTime;
+
+                    groupPlaybackTimes.Add(
+                        normalizedTime);
+
+                    usesProviderTime =
+                        true;
+                }
+
+                /*
+                 * 제조사 엔진이 그룹 내부 실제 최대 시간차를
+                 * 측정한 경우 최종 차이에 반영한다.
+                 */
+                if (groupStatus != null
+                    && groupStatus.MaximumDriftSeconds.HasValue)
+                {
+                    double groupDriftSeconds =
+                        Math.Abs(
+                            groupStatus.MaximumDriftSeconds.Value);
+
+                    if (groupDriftSeconds
+                        > maximumDifferenceSeconds)
+                    {
+                        maximumDifferenceSeconds =
+                            groupDriftSeconds;
+                    }
+
+                    hasMeasuredDifference =
+                        true;
+                }
+
+                foreach (PlayerChannelTarget channel
+                    in groupChannels)
+                {
+                    result.Channels.Add(
+                        new PlaybackChannelTimeStatus
+                        {
+                            ScreenPosition =
+                                GetScreenPositionText(
+                                    (int)channel.ScreenPosition),
+
+                            NvrNo =
+                                channel.NvrNo,
+
+                            ChannelNo =
+                                channel.ChannelNo,
+
+                            /*
+                             * 제조사 엔진이 보정값을 적용해 계산한
+                             * 공통 그룹 시각을 표시한다.
+                             */
+                            PlaybackTime =
+                                groupPlaybackTime,
+
+                            IsProviderTime =
+                                groupPlaybackTime.HasValue,
+
+                            TimeOffsetSeconds =
+                                channel.TimeOffsetSeconds
+                        });
+                }
+            }
+
+            /*
+             * 그룹 엔진이 만들어지기 전의 채널이나
+             * 그룹에 포함되지 않은 채널도 상태 목록에 포함한다.
+             */
+            foreach (PlayerChannelTarget channel
+                in _currentRequest.Channels)
+            {
+                if (channel == null)
                 {
                     continue;
                 }
-                int offsetSeconds =
-                    GetSessionTimeOffset(sessionKey);
 
-                DateTime? providerTime =
-                    await TryGetProviderPlaybackTimeAsync(
-                        session,
-                        cancellationToken);
+                bool alreadyAdded =
+                    result.Channels.Any(
+                        status =>
+                            status.NvrNo == channel.NvrNo
+                            && status.ChannelNo
+                                == channel.ChannelNo
+                            && status.ScreenPosition
+                                == GetScreenPositionText(
+                                    (int)channel.ScreenPosition));
 
-                bool isProviderTime =
-                    providerTime.HasValue;
-
-                DateTime? displayBaseTime = null;
-
-                DateTime normalizedTime;
-
-                if (providerTime.HasValue
-                    && TryNormalizeProviderPlaybackTime(
-                        providerTime.Value,
-                        offsetSeconds,
-                        out normalizedTime))
+                if (alreadyAdded)
                 {
-                    displayBaseTime =
-                        normalizedTime;
-
-                    isProviderTime =
-                        true;
-                }
-                else
-                {
-                    /*
-                     * 비정상적인 Provider 시간을 추정시간으로 위장하지 않는다.
-                     * 해당 채널은 시간 측정 실패 상태로 둔다.
-                     */
-                    displayBaseTime =
-                        null;
-
-                    isProviderTime =
-                        false;
+                    continue;
                 }
 
-                channelStatuses.Add(
+                result.Channels.Add(
                     new PlaybackChannelTimeStatus
                     {
                         ScreenPosition =
-                            GetScreenPositionText(session.ScreenPosition),
-                        NvrNo = session.NvrNo,
-                        ChannelNo = session.ChannelNo,
-                        PlaybackTime = displayBaseTime,
-                        IsProviderTime = isProviderTime,
-                        TimeOffsetSeconds = offsetSeconds
+                            GetScreenPositionText(
+                                (int)channel.ScreenPosition),
+
+                        NvrNo =
+                            channel.NvrNo,
+
+                        ChannelNo =
+                            channel.ChannelNo,
+
+                        PlaybackTime =
+                            null,
+
+                        IsProviderTime =
+                            false,
+
+                        TimeOffsetSeconds =
+                            channel.TimeOffsetSeconds
                     });
             }
 
-            return PlaybackSyncStatus.FromChannels(channelStatuses);
+            /*
+             * 서로 다른 NVR 그룹의 기준시간 차이도 계산한다.
+             *
+             * 한 그룹 내부 시간차는 MaximumDriftSeconds로,
+             * 그룹 사이 시간차는 그룹별 CurrentPlaybackTime으로 계산한다.
+             */
+            if (groupPlaybackTimes.Count >= 2)
+            {
+                DateTime minimumTime =
+                    groupPlaybackTimes.Min();
+
+                DateTime maximumTime =
+                    groupPlaybackTimes.Max();
+
+                double groupDifferenceSeconds =
+                    Math.Abs(
+                        (
+                            maximumTime
+                            - minimumTime
+                        ).TotalSeconds);
+
+                if (groupDifferenceSeconds
+                    > maximumDifferenceSeconds)
+                {
+                    maximumDifferenceSeconds =
+                        groupDifferenceSeconds;
+                }
+
+                hasMeasuredDifference =
+                    true;
+            }
+
+            result.UsesProviderTime =
+                usesProviderTime;
+
+            if (hasMeasuredDifference)
+            {
+                result.MaxDifference =
+                    TimeSpan.FromSeconds(
+                        maximumDifferenceSeconds);
+            }
+
+            return result;
         }
 
         /// <summary>
-        /// 현재 재생 중인 좌우 채널을 동일한 영상 시각으로 동기화한다.
+        /// 현재 재생 중인 제조사별 NVR 그룹을 수동 동기화한다.
         ///
-        /// 처리 순서:
-        /// 1. 재생 상태와 배속 검증
-        /// 2. 현재 채널별 실제 재생시간 조회
-        /// 3. 좌측 화면 기준 시각 결정
-        /// 4. 단일 채널이면 시간만 갱신
-        /// 5. 역재생이면 기존 역재생 동기화 방식 사용
-        /// 6. 정방향이면 모든 채널 Pause
-        /// 7. Pause 완료 후 고정된 실제 시각을 다시 확인
-        /// 8. 공통 정렬 메서드에 실제 정렬·검증·재개 위임
+        /// 정책:
+        /// - 정방향 1배속에서만 실행한다.
+        /// - Playing 또는 Paused 상태에서만 실행한다.
+        /// - 단일 채널 그룹은 동기화 대상에서 제외한다.
+        /// - 제조사별 Pause·Seek·검증 순서는 Engine이 처리한다.
+        /// - 일부 그룹 실패 시 전체 그룹의 재생 상태를 통일한다.
         /// </summary>
-        public async Task<PlayerPlaybackResult> ResyncPlaybackSessionsAsync(CancellationToken cancellationToken)
+        public async Task<PlayerPlaybackResult>
+            ResyncPlaybackSessionsAsync(
+                CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
@@ -1172,21 +2315,20 @@ namespace CamViewer.Services
             {
                 return PlayerPlaybackResult.Fail(
                     "영상 동기화 요청이 취소되었습니다.",
-                    "PLAYBACK_SYNC_CANCELLED");
+                    "PLAYBACK_SYNC_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
             }
 
-            if (_sessions.Count == 0)
+            if (_playbackGroupSessions.Count == 0)
             {
                 return PlayerPlaybackResult.Fail(
-                    "동기화할 재생 세션이 없습니다.",
-                    "PLAYBACK_SESSION_EMPTY");
+                    "동기화할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
-            /*
-             * 확정된 운영 정책:
-             * 자동 동기화 및 수동 동기화는 1배속에서만 실행한다.
-             */
-            if (_currentSpeed != PlaybackSpeed.Normal)
+            if (_currentSpeed
+                != PlaybackSpeed.Normal)
             {
                 return PlayerPlaybackResult.Fail(
                     "영상 동기화는 1배속에서만 실행할 수 있습니다.",
@@ -1194,329 +2336,286 @@ namespace CamViewer.Services
                     PlaybackFailureCategory.NotSupported);
             }
 
-            const double allowedDifferenceSeconds =
-                1.0;
+            bool isReverseDirection =
+                CurrentState == PlaybackState.Rewinding
+                || (
+                    CurrentState == PlaybackState.Paused
+                    && _pausedFromState
+                        == PlaybackState.Rewinding
+                );
 
-            /*
-             * 현재 재생 중인 각 채널의 실제 OSD 시간을 조회한다.
-             *
-             * GetPlaybackTimeSnapshotsAsync에서
-             * 채널별 TimeOffsetSeconds가 제거된 NormalizedTime을 반환한다.
-             */
-            List<PlaybackTimeSnapshot> snapshots =
-                await GetPlaybackTimeSnapshotsAsync(
-                    cancellationToken);
-
-            if (cancellationToken.IsCancellationRequested)
+            if (isReverseDirection)
             {
                 return PlayerPlaybackResult.Fail(
-                    "영상 동기화 시간 조회가 취소되었습니다.",
-                    "PLAYBACK_SYNC_TIME_CANCELLED");
+                    "현재 자동 영상 동기화는 정방향 재생만 지원합니다.",
+                    "PLAYBACK_SYNC_FORWARD_ONLY",
+                    PlaybackFailureCategory.NotSupported);
             }
-
-            if (snapshots == null
-                || snapshots.Count == 0)
-            {
-                return PlayerPlaybackResult.Fail(
-                    "재생 중인 채널의 실제 영상재생시간을 확인하지 못했습니다. "
-                    + "잠시 후 다시 시도해 주세요.",
-                    "PLAYBACK_SYNC_TIME_UNAVAILABLE",
-                    PlaybackFailureCategory.Retryable);
-            }
-
-            /*
-             * 좌측 화면을 기준 채널로 선택한다.
-             *
-             * ScreenPosition.Left의 내부값은 0이다.
-             * 기존 코드에서 1을 사용했다면 우측 화면을 의미하므로 수정해야 한다.
-             */
-            PlaybackTimeSnapshot master =
-                snapshots.FirstOrDefault(
-                    snapshot =>
-                        snapshot.Session != null
-                        && snapshot.Session.ScreenPosition
-                            == (int)ScreenPosition.Left);
-
-            /*
-             * 좌측 채널 시간이 아직 준비되지 않은 예외 상황에서는
-             * 현재 확인된 첫 번째 채널 시간을 임시 기준으로 사용한다.
-             */
-            if (master == null)
-            {
-                master =
-                    snapshots[0];
-            }
-
-            /*
-             * 모든 채널의 실제 시간이 확인됐고 이미 허용 범위 안이면
-             * Provider Seek와 재정렬을 다시 실행하지 않는다.
-             *
-             * 수동 동기화 버튼을 눌렀다는 이유만으로 정상 세션을
-             * 다시 Seek하면 오히려 SDK 상태가 불안정해질 수 있다.
-             */
-            bool allSessionTimesAvailable =
-                snapshots.Count >= _sessions.Count;
-
-            double maximumDifferenceSeconds =
-                snapshots.Max(
-                    snapshot =>
-                        Math.Abs(
-                            (
-                                snapshot.NormalizedTime
-                                - master.NormalizedTime
-                            ).TotalSeconds));
-
-            if (allSessionTimesAvailable
-                && maximumDifferenceSeconds
-                    <= allowedDifferenceSeconds)
-            {
-                _currentPlaybackTime =
-                    ClampPlaybackTime(
-                        master.NormalizedTime);
-
-                if (CurrentState == PlaybackState.Playing
-                    || CurrentState == PlaybackState.Rewinding)
-                {
-                    _playbackClockStartedAtUtc =
-                        DateTime.UtcNow;
-                }
-                else
-                {
-                    _playbackClockStartedAtUtc =
-                        null;
-                }
-
-                return PlayerPlaybackResult.Ok(
-                    "좌우 영상 동기화 상태가 이미 정상입니다. "
-                    + "최대 시간차 "
-                    + maximumDifferenceSeconds.ToString("0.0")
-                    + "초");
-            }
-
-            /*
-             * 단일 채널 재생은 다른 채널과 비교할 필요가 없다.
-             * 현재 실제 재생시간만 서비스 기준시간으로 반영한다.
-             */
-            if (_sessions.Count == 1)
-            {
-                _currentPlaybackTime =
-                    ClampPlaybackTime(
-                        master.NormalizedTime);
-
-                if (CurrentState == PlaybackState.Playing
-                    || CurrentState == PlaybackState.Rewinding)
-                {
-                    _playbackClockStartedAtUtc =
-                        DateTime.UtcNow;
-                }
-                else
-                {
-                    _playbackClockStartedAtUtc =
-                        null;
-                }
-
-                return PlayerPlaybackResult.Ok(
-                    "단일 채널의 실제 영상재생시간을 확인했습니다.");
-            }
-
-            /*
-             * 역재생은 아직 공통 Alignment Provider 경로로 변경하지 않는다.
-             *
-             * 현재 Dahua AlignPlaybackAsync는 정방향 정렬만 보장하므로,
-             * 역재생은 기존 SeekReverseToTimeAsync 방식으로 유지한다.
-             */
-            if (IsReversePlaybackDirection())
-            {
-                bool allReverseTimesAvailable =
-                    snapshots.Count >= _sessions.Count;
-
-                double reverseMaxDifferenceSeconds =
-                    snapshots.Max(
-                        snapshot =>
-                            Math.Abs(
-                                (
-                                    snapshot.NormalizedTime
-                                    - master.NormalizedTime
-                                ).TotalSeconds));
-
-                /*
-                 * 모든 역재생 채널이 이미 허용 범위 안이면
-                 * 세션을 다시 생성하지 않고 서비스 기준시간만 갱신한다.
-                 */
-                if (allReverseTimesAvailable
-                    && reverseMaxDifferenceSeconds
-                        <= allowedDifferenceSeconds)
-                {
-                    _currentPlaybackTime =
-                        ClampPlaybackTime(
-                            master.NormalizedTime);
-
-                    if (CurrentState
-                        == PlaybackState.Rewinding)
-                    {
-                        _playbackClockStartedAtUtc =
-                            DateTime.UtcNow;
-                    }
-                    else
-                    {
-                        _playbackClockStartedAtUtc =
-                            null;
-                    }
-
-                    return PlayerPlaybackResult.Ok(
-                        "역재생 좌우 영상 동기화 상태가 정상입니다.");
-                }
-
-                bool keepReversePaused =
-                    CurrentState == PlaybackState.Paused;
-
-                DateTime reverseTargetTime =
-                    ClampPlaybackTime(
-                        master.NormalizedTime);
-
-                PlayerPlaybackResult reverseResult =
-                    await SeekReverseToTimeAsync(
-                        reverseTargetTime,
-                        keepReversePaused,
-                        cancellationToken);
-
-                if (reverseResult == null)
-                {
-                    return PlayerPlaybackResult.Fail(
-                        "역재생 동기화 처리 결과가 없습니다.",
-                        "REVERSE_PLAYBACK_SYNC_RESULT_EMPTY");
-                }
-
-                return reverseResult;
-            }
-
-            /*
-             * 여기부터는 정방향 또는 정방향 일시정지 상태만 처리한다.
-             */
-            bool keepPaused =
-                CurrentState == PlaybackState.Paused;
 
             if (CurrentState != PlaybackState.Playing
                 && CurrentState != PlaybackState.Paused)
             {
                 return PlayerPlaybackResult.Fail(
-                    "현재 재생 상태에서는 좌우 영상 동기화를 실행할 수 없습니다.",
-                    "PLAYBACK_SYNC_INVALID_STATE");
+                    "현재 재생 상태에서는 영상 동기화를 실행할 수 없습니다. "
+                    + "State="
+                    + CurrentState,
+                    "PLAYBACK_SYNC_INVALID_STATE",
+                    PlaybackFailureCategory.System);
             }
 
-            /*
-             * 재생 중이었다면 모든 채널을 먼저 일시정지한다.
-             *
-             * 기준 채널이 움직이는 상태에서 다른 채널을 맞추면
-             * 정렬 처리 시간만큼 다시 차이가 발생하므로,
-             * 반드시 모든 채널을 고정한 뒤 목표 시각을 확정한다.
-             */
-            if (!keepPaused)
+            PlaybackState stateBeforeSynchronization =
+                CurrentState;
+
+            bool synchronizationExecuted =
+                false;
+
+            var warningMessages =
+                new List<string>();
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
             {
-                PlayerPlaybackResult pauseResult =
-                    await PauseAsync(
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                /*
+                 * 단일 채널 그룹은 비교 대상이 없으므로
+                 * 제조사 동기화 명령을 보내지 않는다.
+                 */
+                if (groupSession != null
+                    && groupSession.ChannelCount <= 1)
+                {
+                    continue;
+                }
+
+                INvrPlaybackEngine engine;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
+                {
+                    bool stateRestored =
+                        await RestorePlaybackGroupStateAfterSyncFailureAsync(
+                            stateBeforeSynchronization);
+
+                    if (!stateRestored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "영상 동기화 실패 후 그룹 상태를 복원하지 못해 "
+                            + "재생을 중지했습니다.",
+                            "PLAYBACK_SYNC_STATE_RESTORE_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "동기화할 NVR 그룹 또는 재생 엔진이 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_SYNC_GROUP_INVALID",
+                        PlaybackFailureCategory.System);
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    bool stateRestored =
+                        await RestorePlaybackGroupStateAfterSyncFailureAsync(
+                            stateBeforeSynchronization);
+
+                    if (!stateRestored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "영상 동기화 취소 후 그룹 상태를 복원하지 못해 "
+                            + "재생을 중지했습니다.",
+                            "PLAYBACK_SYNC_STATE_RESTORE_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "영상 동기화 요청이 취소되었습니다.",
+                        "PLAYBACK_SYNC_CANCELLED",
+                        PlaybackFailureCategory.Cancelled);
+                }
+
+                synchronizationExecuted =
+                    true;
+
+                NvrResult synchronizeResult =
+                    await engine.SynchronizeAsync(
+                        groupSession,
                         cancellationToken);
 
-                if (pauseResult == null)
+                if (synchronizeResult == null
+                    || !synchronizeResult.Success)
                 {
-                    return PlayerPlaybackResult.Fail(
-                        "영상 동기화 전 일시정지 처리 결과가 없습니다.",
-                        "PLAYBACK_SYNC_PAUSE_RESULT_EMPTY");
+                    /*
+                     * 제조사 Synchronizer는 실패 시
+                     * 안전을 위해 그룹을 Paused로 둘 수 있다.
+                     *
+                     * 서비스 전체 그룹을 동기화 전 상태로 다시 통일한다.
+                     */
+                    bool stateRestored =
+                        await RestorePlaybackGroupStateAfterSyncFailureAsync(
+                            stateBeforeSynchronization);
+
+                    if (!stateRestored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "영상 동기화 실패 후 그룹 상태를 복원하지 못해 "
+                            + "재생을 중지했습니다.",
+                            "PLAYBACK_SYNC_STATE_RESTORE_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    return synchronizeResult == null
+                        ? PlayerPlaybackResult.Fail(
+                            "NVR 그룹 동기화 결과가 없습니다. "
+                            + "NvrNo="
+                            + nvrNo,
+                            "PLAYBACK_GROUP_SYNC_RESULT_EMPTY",
+                            PlaybackFailureCategory.System)
+                        : ToPlayerResult(
+                            synchronizeResult);
                 }
 
-                if (!pauseResult.Success)
+                if (synchronizeResult.Status
+                        == NvrResultStatus.PartialSuccess
+                    && !string.IsNullOrWhiteSpace(
+                        synchronizeResult.Message))
                 {
-                    return pauseResult;
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": "
+                        + synchronizeResult.Message);
                 }
             }
 
-            /*
-             * 모든 채널이 Pause된 뒤 실제 OSD 시간을 다시 읽는다.
-             *
-             * Pause 명령은 채널별로 순차 실행되므로,
-             * Pause 이전에 읽은 master 시간보다 이 값이 더 정확한 고정 기준이다.
-             */
-            List<PlaybackTimeSnapshot> pausedSnapshots =
-                await GetPlaybackTimeSnapshotsAsync(
-                    cancellationToken);
+            DateTime? synchronizedPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    CancellationToken.None);
 
-            if (cancellationToken.IsCancellationRequested)
+            if (synchronizedPlaybackTime.HasValue)
             {
-                PlayerPlaybackResult cancelledResult =
-                    PlayerPlaybackResult.Fail(
-                        "일시정지된 영상의 재생시간 확인이 취소되었습니다.",
-                        "PLAYBACK_SYNC_PAUSED_TIME_CANCELLED");
-
-                return await RecoverFromPlaybackFailureAsync(
-                    "좌우 영상 동기화",
-                    cancelledResult,
-                    "PLAYBACK_SYNC_FAILED");
-            }
-
-            DateTime synchronizationTargetTime =
-                ClampPlaybackTime(
-                    master.NormalizedTime);
-
-            /*
-             * Pause 후 좌측 실제 시간이 정상 조회되면
-             * 해당 시간을 최종 정렬 목표로 사용한다.
-             */
-            if (pausedSnapshots != null
-                && pausedSnapshots.Count > 0)
-            {
-                PlaybackTimeSnapshot pausedMaster =
-                    pausedSnapshots.FirstOrDefault(
-                        snapshot =>
-                            snapshot.Session != null
-                            && snapshot.Session.ScreenPosition
-                                == (int)ScreenPosition.Left);
-
-                if (pausedMaster == null)
-                {
-                    pausedMaster =
-                        pausedSnapshots[0];
-                }
-
-                synchronizationTargetTime =
+                _currentPlaybackTime =
                     ClampPlaybackTime(
-                        pausedMaster.NormalizedTime);
+                        synchronizedPlaybackTime.Value);
             }
 
-            /*
-             * 실제 채널 정렬, OSD 검증, 재정렬 재시도 및 Resume는
-             * AlignPlaybackSessionsToTimeAsync에 전부 위임한다.
-             *
-             * 이 메서드 아래에서 별도의 Align 반복문,
-             * WaitForPlaybackAlignmentAsync 또는 ResumeAsync를 다시 호출하면 안 된다.
-             */
-            PlayerPlaybackResult alignmentResult =
-                await AlignPlaybackSessionsToTimeAsync(
-                    synchronizationTargetTime,
-                    keepPaused,
-                    cancellationToken);
+            CurrentState =
+                stateBeforeSynchronization;
 
-            if (alignmentResult == null)
+            _playbackClockStartedAtUtc =
+                stateBeforeSynchronization
+                    == PlaybackState.Playing
+                        ? (DateTime?)DateTime.UtcNow
+                        : null;
+
+            if (!synchronizationExecuted)
             {
-                PlayerPlaybackResult emptyResult =
-                    PlayerPlaybackResult.Fail(
-                        "좌우 영상 정렬 처리 결과가 없습니다.",
-                        "PLAYBACK_ALIGNMENT_RESULT_EMPTY");
-
-                return await RecoverFromPlaybackFailureAsync(
-                    "좌우 영상 동기화",
-                    emptyResult,
-                    "PLAYBACK_SYNC_FAILED");
+                return PlayerPlaybackResult.Ok(
+                    "단일 채널 재생이므로 별도의 영상 동기화가 필요하지 않습니다.");
             }
 
-            if (!alignmentResult.Success)
+            if (warningMessages.Count > 0)
             {
-                return await RecoverFromPlaybackFailureAsync(
-                    "좌우 영상 동기화",
-                    alignmentResult,
-                    "PLAYBACK_SYNC_FAILED");
+                return PlayerPlaybackResult.Ok(
+                    "NVR 그룹 동기화를 완료했지만 "
+                    + "일부 경고가 발생했습니다."
+                    + Environment.NewLine
+                    + string.Join(
+                        Environment.NewLine,
+                        warningMessages.Select(
+                            warning =>
+                                "- "
+                                + warning)));
             }
 
-            return alignmentResult;
+            return PlayerPlaybackResult.Ok(
+                "NVR 재생 그룹의 영상 동기화를 완료했습니다.");
+        }
+
+        /// <summary>
+        /// 제조사 그룹 동기화 실패 후
+        /// 전체 NVR 그룹을 동기화 전 Playing 또는 Paused 상태로 통일한다.
+        /// </summary>
+        private async Task<bool>
+            RestorePlaybackGroupStateAfterSyncFailureAsync(
+                PlaybackState originalState)
+        {
+            bool allSucceeded =
+                true;
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                INvrPlaybackEngine engine;
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        item.Key,
+                        out engine)
+                    || engine == null)
+                {
+                    allSucceeded =
+                        false;
+
+                    continue;
+                }
+
+                try
+                {
+                    NvrResult stateResult =
+                        originalState == PlaybackState.Playing
+                            ? await engine.ResumeAsync(
+                                groupSession,
+                                CancellationToken.None)
+                            : await engine.PauseAsync(
+                                groupSession,
+                                CancellationToken.None);
+
+                    if (stateResult == null
+                        || !stateResult.Success)
+                    {
+                        allSucceeded =
+                            false;
+                    }
+                }
+                catch
+                {
+                    allSucceeded =
+                        false;
+                }
+            }
+
+            if (allSucceeded)
+            {
+                CurrentState =
+                    originalState;
+
+                _playbackClockStartedAtUtc =
+                    originalState == PlaybackState.Playing
+                        ? (DateTime?)DateTime.UtcNow
+                        : null;
+            }
+
+            return allSucceeded;
         }
 
         /// <summary>
@@ -1597,201 +2696,74 @@ namespace CamViewer.Services
 
 
         /// <summary>
-        /// 현재 재생 위치를 기준으로 역재생을 시작한다.
+        /// 현재 영상재생시간을 기준으로 역재생 방향으로 전환한다.
+        ///
+        /// 정책:
+        /// - 정방향 재생 중이면 역재생을 계속 실행한다.
+        /// - 일시정지 중이면 역방향으로만 변경하고 Paused를 유지한다.
+        /// - 사용자가 선택한 재생속도는 유지한다.
+        /// - 이미 역방향이면 중복 명령으로 처리한다.
         /// </summary>
         public async Task<PlayerPlaybackResult> RewindAsync(
             CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "역재생 요청이 취소되었습니다.",
+                    "REVERSE_PLAYBACK_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
             if (_currentRequest == null)
             {
                 return PlayerPlaybackResult.Fail(
                     "현재 재생 요청 정보가 없습니다.",
-                    "PLAYBACK_REQUEST_EMPTY");
+                    "PLAYBACK_REQUEST_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
-            if (_sessions.Count == 0)
+            if (_playbackGroupSessions.Count == 0)
             {
                 return PlayerPlaybackResult.Fail(
-                    "역재생할 재생 세션이 없습니다. 먼저 영상을 재생해 주세요.",
-                    "PLAYBACK_SESSION_EMPTY");
+                    "역재생할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
-            DateTime? syncedTime =
-                await SyncPlaybackTimeAsync(
-                    cancellationToken);
+            bool isAlreadyReverse =
+                CurrentState == PlaybackState.Rewinding
+                || (
+                    CurrentState == PlaybackState.Paused
+                    && _pausedFromState
+                        == PlaybackState.Rewinding
+                );
 
-            DateTime reverseStartTime =
-                syncedTime.HasValue
-                    ? syncedTime.Value
-                    : GetEstimatedPlaybackTime();
-
-            if (reverseStartTime <= _currentRequest.PlayStartTime)
+            if (isAlreadyReverse)
             {
-                return PlayerPlaybackResult.Fail(
-                    "조회 시작시간보다 이전으로 역재생할 수 없습니다.",
-                    "REWIND_BEFORE_START");
+                return PlayerPlaybackResult.Ok(
+                    CurrentState == PlaybackState.Paused
+                        ? "이미 역재생 방향으로 일시정지되어 있습니다."
+                        : "이미 역재생 중입니다.");
             }
 
-            /*
-             * 현재 정방향 재생 세션만 정리한다.
-             * Provider 로그인과 현재 재생 요청은 유지한다.
-             */
-            PlayerPlaybackResult stopResult =
-                await StopCurrentPlaybackSessionsOnlyAsync(
-                    CancellationToken.None);
-
-            if (!stopResult.Success)
-            {
-                return stopResult;
-            }
-
-            foreach (PlayerChannelTarget channel
-                in _currentRequest.Channels)
-            {
-                NvrResult<INvrProvider> providerResult =await GetOrCreateLoggedInProviderAsync(channel.NvrConfig, cancellationToken);
-
-                if (providerResult == null || !providerResult.Success || providerResult.Data == null)
-                {
-                    await StopCurrentPlaybackSessionsOnlyAsync(CancellationToken.None);
-
-                    return ToPlayerResult(providerResult);
-                }
-
-                INvrProvider provider =providerResult.Data;
-
-                ProviderCapabilities capabilities =provider.GetCapabilities();
-
-                if (capabilities == null || !capabilities.CanReversePlayback)
-                {
-                    await StopCurrentPlaybackSessionsOnlyAsync(CancellationToken.None);
-
-                    return PlayerPlaybackResult.Fail(
-                        "현재 NVR Provider는 역재생을 지원하지 않습니다.",
-                        "REVERSE_PLAYBACK_NOT_SUPPORTED");
-                }
-
-                INvrReversePlaybackProvider reverseProvider = provider as INvrReversePlaybackProvider;
-
-                if (reverseProvider == null)
-                {
-                    await StopCurrentPlaybackSessionsOnlyAsync(
-                        CancellationToken.None);
-
-                    return PlayerPlaybackResult.Fail(
-                        "현재 NVR Provider는 역재생 인터페이스를 구현하지 않았습니다.",
-                        "REVERSE_PROVIDER_NOT_IMPLEMENTED");
-                }
-
-                NvrPlaybackRequest nvrRequest =
-                    ToNvrPlaybackRequest(
-                        _currentRequest,
-                        channel,
-                        _currentRequest.PlayStartTime,
-                        _currentRequest.PlayEndTime);
-
-                int offsetSeconds =
-                    channel.TimeOffsetSeconds;
-
-                DateTime providerReverseStartTime =
-                    reverseStartTime.AddSeconds(
-                        offsetSeconds);
-
-                NvrResult<INvrPlaybackSession> reverseResult =
-                    await reverseProvider.PlayReverseByTimeAsync(
-                        nvrRequest,
-                        providerReverseStartTime,
-                        cancellationToken);
-
-                if (reverseResult == null || !reverseResult.Success || reverseResult.Data == null)
-                {
-                    PlayerPlaybackResult failureResult = ToPlayerResult(reverseResult);
-
-                    /*
-                     * 세션 정리 전에 실패 정보를 기록한다.
-                     * 정리 후에는 Provider 또는 요청 정보가 사라질 수 있다.
-                     */
-                    WriteNvrFailureLog(
-                        "역재생 시작",
-                        channel.NvrConfig,
-                        channel,
-                        null,
-                        provider,
-                        reverseResult,
-                        failureResult,
-                        "ReverseStartTime="
-                        + providerReverseStartTime.ToString(
-                            "yyyy-MM-dd HH:mm:ss"));
-
-                    await StopCurrentPlaybackSessionsOnlyAsync(CancellationToken.None);
-
-                    return failureResult;
-                }
-
-                int sessionKey =
-                    BuildSessionKey(
-                        channel.NvrNo,
-                        channel.ChannelNo,
-                        (int)channel.ScreenPosition);
-
-                _sessions[sessionKey] =
-                    reverseResult.Data;
-
-                _sessionTimeOffsets[sessionKey] =
-                    offsetSeconds;
-            }
-
-            /*
-             * 모든 채널 역재생 세션이 정상 생성된 뒤
-             * 서비스 상태를 역재생으로 확정한다.
-             */
-            _currentPlaybackTime =
-                reverseStartTime;
-
-            _playbackClockStartedAtUtc =
-                DateTime.UtcNow;
-
-            CurrentState =
-                PlaybackState.Rewinding;
-
-            /*
-             * 사용자가 선택한 속도가 1배속이 아니면
-             * 새로 생성된 역재생 세션에도 적용한다.
-             */
-            if (_currentSpeed != PlaybackSpeed.Normal)
-            {
-                PlayerPlaybackResult speedResult =
-                    await ApplyCurrentSpeedToSessionsAsync(
-                        cancellationToken);
-
-                if (speedResult == null || !speedResult.Success)
-                {
-                    _currentSpeed =
-                        PlaybackSpeed.Normal;
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "역재생 시작 후 배속 적용",
-                        speedResult,
-                        "REVERSE_SPEED_APPLY_FAILED");
-                }
-            }
-
-            return PlayerPlaybackResult.Ok(
-                "역재생을 시작했습니다.");
+            return await ChangePlaybackGroupDirectionAsync(
+                NvrPlaybackDirection.Reverse,
+                cancellationToken);
         }
 
         /// <summary>
         /// 현재 영상재생시간을 기준으로 정방향 재생으로 전환한다.
         ///
-        /// 중요 정책:
-        /// - 방향 전환 후에도 재생 세션의 범위는 최초 조회 범위를 유지한다.
-        /// - 현재 전환 위치는 forwardTargetTime으로 별도 관리한다.
-        /// - 위치 정렬이 완료된 후 사용자가 선택한 배속을 복원한다.
+        /// 정책:
+        /// - 역재생 중이면 정방향 재생을 계속 실행한다.
+        /// - 일시정지 중이면 정방향으로만 변경하고 Paused를 유지한다.
+        /// - 사용자가 선택한 재생속도는 유지한다.
+        /// - 최초 조회 시작·종료 범위는 변경하지 않는다.
         /// </summary>
-        public async Task<PlayerPlaybackResult>
-            PlayForwardFromCurrentTimeAsync(
-                CancellationToken cancellationToken)
+        public async Task<PlayerPlaybackResult> PlayForwardFromCurrentTimeAsync(CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
@@ -1799,1039 +2771,405 @@ namespace CamViewer.Services
             {
                 return PlayerPlaybackResult.Fail(
                     "정방향 전환 요청이 취소되었습니다.",
-                    "FORWARD_PLAYBACK_CANCELLED");
+                    "FORWARD_PLAYBACK_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
             }
 
             if (_currentRequest == null)
             {
                 return PlayerPlaybackResult.Fail(
                     "현재 재생 요청 정보가 없습니다.",
-                    "PLAYBACK_REQUEST_EMPTY");
+                    "PLAYBACK_REQUEST_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
-            if (_sessions.Count == 0)
+            if (_playbackGroupSessions.Count == 0)
             {
                 return PlayerPlaybackResult.Fail(
-                    "정방향으로 전환할 재생 세션이 없습니다.",
-                    "PLAYBACK_SESSION_EMPTY");
+                    "정방향으로 전환할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
+            }
+
+            bool isAlreadyForward =
+                CurrentState == PlaybackState.Playing
+                || (
+                    CurrentState == PlaybackState.Paused
+                    && _pausedFromState
+                        == PlaybackState.Playing
+                );
+
+            if (isAlreadyForward)
+            {
+                return PlayerPlaybackResult.Ok(
+                    CurrentState == PlaybackState.Paused
+                        ? "이미 정방향으로 일시정지되어 있습니다."
+                        : "이미 정방향 재생 중입니다.");
+            }
+
+            return await ChangePlaybackGroupDirectionAsync(
+                NvrPlaybackDirection.Forward,
+                cancellationToken);
+        }
+
+        /// <summary>
+        /// NVR 번호별로 제조사 재생 그룹을 생성한다.
+        ///
+        /// initialTime:
+        /// - 일반 재생에서는 조회 시작시간
+        /// - 타임라인 이동에서는 사용자가 선택한 시각
+        ///
+        /// startPlayback:
+        /// - true: 그룹 준비 후 즉시 재생 시작
+        /// - false: 그룹을 Paused 상태로 준비만 수행
+        /// </summary>
+        private async Task<PlayerPlaybackResult> OpenAndStartPlaybackGroupsAsync(
+                PlayerPlaybackRequest request,
+                DateTime initialTime,
+                bool startPlayback,
+                CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "NVR 그룹 재생 요청이 취소되었습니다.",
+                    "PLAYBACK_GROUP_START_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            if (request == null)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "Player 재생 요청 정보가 없습니다.",
+                    "PLAYBACK_REQUEST_REQUIRED",
+                    PlaybackFailureCategory.Configuration);
+            }
+
+            if (request.Channels == null
+                || request.Channels.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생 그룹에 포함할 채널이 없습니다.",
+                    "PLAYBACK_GROUP_CHANNEL_REQUIRED",
+                    PlaybackFailureCategory.Configuration);
+            }
+
+            if (request.PlayStartTime
+                >= request.PlayEndTime)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "조회 시작시간은 조회 종료시간보다 이전이어야 합니다.",
+                    "INVALID_PLAYBACK_RANGE",
+                    PlaybackFailureCategory.Configuration);
             }
 
             /*
-             * 역재생 중인 실제 현재 위치를 확보한다.
+             * 최초 재생 위치는 전체 조회 범위 안에 있어야 한다.
              *
-             * 이 값은 새 세션의 시작시간이 아니라,
-             * 새 정방향 세션을 정렬할 목표 위치다.
+             * 시작시간은 포함하고 종료시간은 포함하지 않는다.
+             *
+             * 이 검증을 Provider 로그인과 엔진 생성 전에 수행하여
+             * 잘못된 시간 요청으로 불필요한 NVR 연결이 발생하지 않게 한다.
              */
-            DateTime? syncedTime =
-                await SyncPlaybackTimeAsync(
-                    cancellationToken);
-
-            DateTime forwardTargetTime =
-                syncedTime.HasValue
-                    ? syncedTime.Value
-                    : GetEstimatedPlaybackTime();
-
-            forwardTargetTime =
-                ClampPlaybackTime(
-                    forwardTargetTime);
-
-            if (forwardTargetTime
-                >= _currentRequest.PlayEndTime)
+            if (initialTime
+                < request.PlayStartTime)
             {
                 return PlayerPlaybackResult.Fail(
-                    "조회 종료시간 이후로 정방향 재생을 시작할 수 없습니다.",
-                    "FORWARD_AFTER_END");
+                    "최초 재생시간은 조회 시작시간보다 이전일 수 없습니다.",
+                    "PLAYBACK_GROUP_INITIAL_BEFORE_START",
+                    PlaybackFailureCategory.Configuration);
             }
 
-            PlaybackSpeed selectedSpeed =
-                _currentSpeed;
-
-            PlayerPlaybackRequest request =
-                _currentRequest;
-
-            /*
-             * 기존 역재생 세션만 정리한다.
-             * Provider 로그인과 최초 조회 요청 범위는 유지한다.
-             */
-            PlayerPlaybackResult stopResult =
-                await StopCurrentPlaybackSessionsOnlyAsync(
-                    CancellationToken.None);
-
-            if (stopResult == null
-                || !stopResult.Success)
+            if (initialTime
+                >= request.PlayEndTime)
             {
-                return stopResult
-                    ?? PlayerPlaybackResult.Fail(
-                        "기존 역재생 세션 정리 결과가 없습니다.",
-                        "FORWARD_CLEANUP_RESULT_EMPTY",
-                        PlaybackFailureCategory.System);
+                return PlayerPlaybackResult.Fail(
+                    "최초 재생시간은 조회 종료시간보다 이전이어야 합니다.",
+                    "PLAYBACK_GROUP_INITIAL_AFTER_END",
+                    PlaybackFailureCategory.Configuration);
             }
 
             /*
-             * 새 재생 핸들은 기본 1배속이다.
-             * 정렬이 끝날 때까지 논리 속도도 1배속으로 유지한다.
+             * 기존 그룹 세션이 남아 있다면
+             * 새로운 그룹 재생을 시작하면 안 된다.
+             *
+             * PlayAsync에서 기존 그룹을 먼저 정리한 뒤
+             * 이 메서드를 호출해야 한다.
              */
-            _currentSpeed =
-                PlaybackSpeed.Normal;
+            if (_playbackGroupSessions.Count > 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "기존 NVR 재생 그룹이 아직 정리되지 않았습니다.",
+                    "PLAYBACK_GROUP_ALREADY_EXISTS",
+                    PlaybackFailureCategory.System);
+            }
 
+            /*
+             * GroupBy를 실행하기 전에 null 채널을 검사한다.
+             *
+             * null 채널이 포함된 상태에서 channel.NvrNo에 접근하면
+             * NullReferenceException이 발생할 수 있다.
+             */
             foreach (PlayerChannelTarget channel
                 in request.Channels)
             {
-                /*
-                 * 핵심:
-                 * 현재 전환 시각부터 세션을 열지 않는다.
-                 *
-                 * 최초 조회 시작시간부터 종료시간까지 전체 범위로
-                 * 정방향 세션을 다시 생성한다.
-                 *
-                 * 이렇게 해야 방향 전환 이후에도 타임라인을 이용해
-                 * 현재 위치보다 과거로 이동할 수 있다.
-                 */
-                PlayerPlaybackResult playResult =
-                    await PlayChannelAsync(
-                        request,
-                        channel,
-                        request.PlayStartTime,
-                        request.PlayEndTime,
-                        cancellationToken);
-
-                if (playResult == null
-                    || !playResult.Success)
-                {
-                    _currentSpeed =
-                        selectedSpeed;
-
-                    await StopCurrentPlaybackSessionsOnlyAsync(
-                        CancellationToken.None);
-
-                    return playResult
-                        ?? PlayerPlaybackResult.Fail(
-                            "정방향 채널 재생 결과가 없습니다.",
-                            "FORWARD_CHANNEL_RESULT_EMPTY",
-                            PlaybackFailureCategory.System);
-                }
-            }
-
-            /*
-             * 새 세션은 최초 조회 시작시간에서 열렸으므로
-             * 준비 확인 전 서비스 시간도 같은 위치로 설정한다.
-             */
-            _currentPlaybackTime =
-                request.PlayStartTime;
-
-            _playbackClockStartedAtUtc =
-                DateTime.UtcNow;
-
-            CurrentState =
-                PlaybackState.Playing;
-
-            /*
-             * 새 정방향 세션의 실제 OSD가 준비될 때까지 기다린다.
-             */
-            bool playbackReady =
-                await WaitForPlaybackReadyAsync(
-                    cancellationToken);
-
-            if (cancellationToken.IsCancellationRequested)
-            {
-                _currentSpeed =
-                    selectedSpeed;
-
-                PlayerPlaybackResult cancelledResult =
-                    PlayerPlaybackResult.Fail(
-                        "정방향 전환 준비 확인이 취소되었습니다.",
-                        "FORWARD_READY_CANCELLED",
-                        PlaybackFailureCategory.Cancelled);
-
-                return await RecoverFromPlaybackFailureAsync(
-                    "정방향 전환 준비 확인",
-                    cancelledResult,
-                    "FORWARD_READY_CANCELLED");
-            }
-
-            if (!playbackReady)
-            {
-                _currentSpeed =
-                    selectedSpeed;
-
-                PlayerPlaybackResult notReadyResult =
-                    PlayerPlaybackResult.Fail(
-                        "정방향 재생 세션의 실제 재생시간을 확인하지 못했습니다.",
-                        "FORWARD_PLAYBACK_NOT_READY",
-                        PlaybackFailureCategory.Retryable);
-
-                return await RecoverFromPlaybackFailureAsync(
-                    "정방향 전환 준비 확인",
-                    notReadyResult,
-                    "FORWARD_READY_FAILED");
-            }
-
-            /*
-             * 움직이는 상태에서 채널별로 정렬하지 않도록
-             * 모든 세션을 먼저 일시정지한다.
-             */
-            PlayerPlaybackResult pauseResult =
-                await PauseAsync(
-                    cancellationToken);
-
-            if (pauseResult == null
-                || !pauseResult.Success)
-            {
-                _currentSpeed =
-                    selectedSpeed;
-
-                return pauseResult
-                    ?? PlayerPlaybackResult.Fail(
-                        "정방향 전환 후 일시정지 결과가 없습니다.",
-                        "FORWARD_PAUSE_RESULT_EMPTY",
-                        PlaybackFailureCategory.System);
-            }
-
-            /*
-             * 최초 조회 시작시간에서 생성된 세션을
-             * 역재생 종료 위치로 직접 이동한다.
-             *
-             * keepPaused=false이므로 정렬 성공 후 전체 재생이 재개된다.
-             */
-            PlayerPlaybackResult alignmentResult =
-                await AlignPlaybackSessionsToTimeAsync(
-                    forwardTargetTime,
-                    false,
-                    cancellationToken);
-
-            if (alignmentResult == null
-                || !alignmentResult.Success)
-            {
-                _currentSpeed =
-                    selectedSpeed;
-
-                PlayerPlaybackResult failureResult =
-                    alignmentResult
-                    ?? PlayerPlaybackResult.Fail(
-                        "정방향 전환 후 영상 정렬 결과가 없습니다.",
-                        "FORWARD_ALIGNMENT_RESULT_EMPTY",
-                        PlaybackFailureCategory.System);
-
-                return await RecoverFromPlaybackFailureAsync(
-                    "정방향 전환 후 좌우 영상 정렬",
-                    failureResult,
-                    "FORWARD_ALIGNMENT_FAILED");
-            }
-
-            /*
-             * 정방향 위치 정렬이 완료된 후
-             * 사용자가 선택했던 배속을 복원한다.
-             */
-            _currentSpeed =
-                selectedSpeed;
-
-            if (_currentSpeed
-                != PlaybackSpeed.Normal)
-            {
-                PlayerPlaybackResult speedResult =
-                    await ApplyCurrentSpeedToSessionsAsync(
-                        cancellationToken);
-
-                if (speedResult == null
-                    || !speedResult.Success)
-                {
-                    _currentSpeed =
-                        PlaybackSpeed.Normal;
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "정방향 전환 후 배속 적용",
-                        speedResult,
-                        "FORWARD_SPEED_APPLY_FAILED");
-                }
-            }
-
-            return PlayerPlaybackResult.Ok(
-                "정방향 재생으로 전환했습니다. "
-                + forwardTargetTime.ToString(
-                    "yyyy-MM-dd HH:mm:ss")
-                + " / "
-                + alignmentResult.Message);
-        }
-
-        /// <summary>
-        /// 현재 재생 세션만 정리한다.
-        /// Provider와 로그인 상태, 현재 재생 요청 정보는 유지한다.
-        ///
-        /// 처리 순서:
-        /// 1. 서비스 재생시간 즉시 정지
-        /// 2. 모든 채널을 Pause하여 화면을 먼저 고정
-        /// 3. 모든 재생 세션 Stop
-        /// 4. 세션 Dispose
-        /// 5. 세션 및 시간 보정값 초기화
-        /// </summary>
-        private async Task<PlayerPlaybackResult>
-            StopCurrentPlaybackSessionsOnlyAsync(
-                CancellationToken cancellationToken)
-        {
-            List<string> cleanupWarnings =
-                new List<string>();
-
-            List<KeyValuePair<int, INvrPlaybackSession>> sessionItems =
-                _sessions.ToList();
-
-            /*
-             * 실제 Provider 정리가 끝날 때까지
-             * 서비스 재생시간이 계속 증가하지 않도록 먼저 정지한다.
-             */
-            if (_currentRequest != null)
-            {
-                _currentPlaybackTime =
-                    ClampPlaybackTime(
-                        GetEstimatedPlaybackTime());
-            }
-
-            _playbackClockStartedAtUtc =
-                null;
-
-            CurrentState =
-                PlaybackState.Stopped;
-
-            /*
-             * 1차 처리:
-             * Stop 처리 시간이 오래 걸리더라도 기존 영상이 계속 움직이지 않도록
-             * 모든 채널을 먼저 Pause한다.
-             */
-            foreach (KeyValuePair<int, INvrPlaybackSession> item
-                in sessionItems)
-            {
-                int sessionKey =
-                    item.Key;
-
-                INvrPlaybackSession session =
-                    item.Value;
-
-                if (session == null)
-                {
-                    cleanupWarnings.Add(
-                        "재생 세션 정보가 없습니다. "
-                        + "SessionKey="
-                        + sessionKey);
-
-                    continue;
-                }
-
-                INvrProvider provider =
-                    GetProviderByNvrNo(
-                        session.NvrNo);
-
-                if (provider == null)
-                {
-                    cleanupWarnings.Add(
-                        "재생 화면을 일시정지할 Provider를 찾을 수 없습니다. "
-                        + "NvrNo="
-                        + session.NvrNo
-                        + ", ChannelNo="
-                        + session.ChannelNo
-                        + ", ScreenPosition="
-                        + session.ScreenPosition);
-
-                    continue;
-                }
-
-                try
-                {
-                    /*
-                     * 재조회 또는 방향 전환 중 취소가 발생하더라도
-                     * 기존 화면 정리는 반드시 수행한다.
-                     */
-                    NvrResult pauseResult =
-                        await provider.PauseAsync(
-                            session,
-                            CancellationToken.None);
-
-                    if (pauseResult == null)
-                    {
-                        cleanupWarnings.Add(
-                            "재생 일시정지 결과가 없습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo);
-                    }
-                    else if (!pauseResult.Success)
-                    {
-                        cleanupWarnings.Add(
-                            "기존 재생 화면 일시정지에 실패했습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo
-                            + ", Message="
-                            + (
-                                string.IsNullOrWhiteSpace(
-                                    pauseResult.Message)
-                                    ? pauseResult.Status.ToString()
-                                    : pauseResult.Message
-                            ));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    /*
-                     * Pause 실패 여부와 관계없이
-                     * 아래 Stop과 Dispose는 계속 수행한다.
-                     */
-                    cleanupWarnings.Add(
-                        "기존 재생 화면 일시정지 중 예외가 발생했습니다. "
-                        + "NvrNo="
-                        + session.NvrNo
-                        + ", ChannelNo="
-                        + session.ChannelNo
-                        + ", Error="
-                        + ex.Message);
-                }
-            }
-
-            /*
-             * 2차 처리:
-             * 화면을 고정한 후 실제 재생 세션을 중지하고 해제한다.
-             */
-            foreach (KeyValuePair<int, INvrPlaybackSession> item
-                in sessionItems)
-            {
-                int sessionKey =
-                    item.Key;
-
-                INvrPlaybackSession session =
-                    item.Value;
-
-                if (session == null)
-                {
-                    continue;
-                }
-
-                INvrProvider provider =
-                    GetProviderByNvrNo(
-                        session.NvrNo);
-
-                if (provider == null)
-                {
-                    cleanupWarnings.Add(
-                        "재생 세션을 중지할 Provider를 찾을 수 없습니다. "
-                        + "NvrNo="
-                        + session.NvrNo
-                        + ", ChannelNo="
-                        + session.ChannelNo
-                        + ", ScreenPosition="
-                        + session.ScreenPosition);
-                }
-                else
-                {
-                    try
-                    {
-                        NvrResult stopResult =
-                            await provider.StopAsync(
-                                session,
-                                CancellationToken.None);
-
-                        if (stopResult == null)
-                        {
-                            cleanupWarnings.Add(
-                                "재생 중지 결과가 없습니다. "
-                                + "NvrNo="
-                                + session.NvrNo
-                                + ", ChannelNo="
-                                + session.ChannelNo);
-                        }
-                        else if (!stopResult.Success)
-                        {
-                            cleanupWarnings.Add(
-                                "재생 세션 중지에 실패했습니다. "
-                                + "NvrNo="
-                                + session.NvrNo
-                                + ", ChannelNo="
-                                + session.ChannelNo
-                                + ", Message="
-                                + (
-                                    string.IsNullOrWhiteSpace(
-                                        stopResult.Message)
-                                        ? stopResult.Status.ToString()
-                                        : stopResult.Message
-                                ));
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        cleanupWarnings.Add(
-                            "재생 세션 중지 중 예외가 발생했습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo
-                            + ", Error="
-                            + ex.Message);
-                    }
-                }
-
-                /*
-                 * Provider Stop 성공 여부와 관계없이
-                 * 세션의 로컬 리소스는 반드시 해제한다.
-                 */
-                try
-                {
-                    session.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    cleanupWarnings.Add(
-                        "재생 세션 리소스 해제 중 예외가 발생했습니다. "
-                        + "SessionKey="
-                        + sessionKey
-                        + ", NvrNo="
-                        + session.NvrNo
-                        + ", ChannelNo="
-                        + session.ChannelNo
-                        + ", Error="
-                        + ex.Message);
-                }
-            }
-
-            _sessions.Clear();
-            _sessionTimeOffsets.Clear();
-
-            if (cleanupWarnings.Count > 0)
-            {
-                return PlayerPlaybackResult.Ok(
-                    "기존 재생 세션은 정리되었지만 일부 경고가 발생했습니다."
-                    + Environment.NewLine
-                    + string.Join(
-                        Environment.NewLine,
-                        cleanupWarnings.Select(
-                            warning => "- " + warning)));
-            }
-
-            return PlayerPlaybackResult.Ok(
-                "기존 재생 세션을 정리했습니다.");
-        }
-
-        /// <summary>
-        /// 모든 정방향 재생 세션을 동일한 공통 영상 시각으로 정렬한다.
-        ///
-        /// 한 번의 정렬 후 채널 간 시간차가 허용 범위를 초과하면
-        /// 실제로 가장 늦게 준비된 채널의 시각을 새 목표 시각으로 사용하여
-        /// 전체 채널을 다시 정렬한다.
-        /// </summary>
-        private async Task<PlayerPlaybackResult>
-            AlignPlaybackSessionsToTimeAsync(
-                DateTime targetTime,
-                bool keepPaused,
-                CancellationToken cancellationToken)
-        {
-            const int maximumAlignmentAttempts = 3;
-            const double allowedDifferenceSeconds = 1.0;
-
-            DateTime currentTargetTime =
-                ClampPlaybackTime(
-                    targetTime);
-
-            for (int attempt = 1;
-                attempt <= maximumAlignmentAttempts;
-                attempt++)
-            {
-                if (cancellationToken.IsCancellationRequested)
+                if (channel == null)
                 {
                     return PlayerPlaybackResult.Fail(
-                        "영상 동기화 요청이 취소되었습니다.",
-                        "PLAYBACK_SYNC_CANCELLED");
-                }
-
-                /*
-                 * 각 보정 시도마다 모든 채널을 동일한 공통 시각으로 정렬한다.
-                 */
-                foreach (KeyValuePair<int, INvrPlaybackSession> item
-                    in _sessions.ToList())
-                {
-                    int sessionKey =
-                        item.Key;
-
-                    INvrPlaybackSession session =
-                        item.Value;
-
-                    if (session == null)
-                    {
-                        return PlayerPlaybackResult.Fail(
-                            "동기화할 재생 세션 정보가 없습니다.",
-                            "PLAYBACK_SYNC_SESSION_INVALID",
-                            PlaybackFailureCategory.System);
-                    }
-
-                    INvrProvider provider =
-                        GetProviderByNvrNo(
-                            session.NvrNo);
-
-                    if (provider == null)
-                    {
-                        return PlayerPlaybackResult.Fail(
-                            "동기화할 NVR Provider를 찾을 수 없습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo,
-                            "NVR_PROVIDER_NOT_FOUND",
-                            PlaybackFailureCategory.Configuration);
-                    }
-
-                    INvrPlaybackAlignmentProvider alignmentProvider =
-                        provider as INvrPlaybackAlignmentProvider;
-
-                    if (alignmentProvider == null)
-                    {
-                        return PlayerPlaybackResult.Fail(
-                            "현재 NVR Provider는 재생 정렬 기능을 "
-                            + "구현하지 않았습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo,
-                            "PLAYBACK_ALIGNMENT_PROVIDER_NOT_IMPLEMENTED",
-                            PlaybackFailureCategory.NotSupported);
-                    }
-
-                    int offsetSeconds =
-                        GetSessionTimeOffset(
-                            sessionKey);
-
-                    DateTime providerTargetTime =
-                        currentTargetTime.AddSeconds(
-                            offsetSeconds);
-
-                    var alignmentRequest =
-                        new NvrPlaybackAlignmentRequest
-                        {
-                            TargetTime =
-                                providerTargetTime,
-
-                            Direction =
-                                NvrPlaybackDirection.Forward,
-
-                            Speed =
-                                NvrPlaybackSpeed.Normal,
-
-                            RemainPaused =
-                                true
-                        };
-
-                    NvrResult<INvrPlaybackSession> alignmentResult =
-                        await alignmentProvider.AlignPlaybackAsync(
-                            session,
-                            alignmentRequest,
-                            cancellationToken);
-
-                    if (alignmentResult == null
-                        || !alignmentResult.Success
-                        || alignmentResult.Data == null)
-                    {
-                        return ToPlayerResult(
-                            alignmentResult);
-                    }
-
-                    _sessions[sessionKey] =
-                        alignmentResult.Data;
-                }
-
-                /*
-                 * 모든 채널 정렬이 끝난 뒤 실제 OSD 시간을 한 번 읽는다.
-                 */
-                List<PlaybackTimeSnapshot> snapshots =
-                    await GetPlaybackTimeSnapshotsAsync(
-                        cancellationToken);
-
-                if (snapshots.Count < _sessions.Count)
-                {
-                    /*
-                     * 아직 모든 OSD가 준비되지 않은 경우에는
-                     * 잠시 기다린 뒤 같은 목표 시각으로 다시 정렬한다.
-                     */
-                    if (attempt < maximumAlignmentAttempts)
-                    {
-                        await Task.Delay(
-                            200,
-                            cancellationToken);
-
-                        continue;
-                    }
-
-                    return PlayerPlaybackResult.Fail(
-                        "일부 채널의 실제 재생시간을 확인하지 못했습니다.",
-                        "PLAYBACK_SYNC_TIME_UNAVAILABLE",
-                        PlaybackFailureCategory.Retryable);
-                }
-
-                DateTime minimumTime =
-                    snapshots.Min(
-                        snapshot =>
-                            snapshot.NormalizedTime);
-
-                DateTime maximumTime =
-                    snapshots.Max(
-                        snapshot =>
-                            snapshot.NormalizedTime);
-
-                double differenceSeconds =
-                    Math.Abs(
-                        (
-                            maximumTime
-                            - minimumTime
-                        ).TotalSeconds);
-
-                if (differenceSeconds
-                    <= allowedDifferenceSeconds)
-                {
-                    PlaybackTimeSnapshot master =
-                        snapshots.FirstOrDefault(
-                            snapshot =>
-                                snapshot.Session != null
-                                && snapshot.Session.ScreenPosition
-                                    == (int)ScreenPosition.Left);
-
-                    if (master == null)
-                    {
-                        master =
-                            snapshots[0];
-                    }
-
-                    _currentPlaybackTime =
-                        ClampPlaybackTime(
-                            master.NormalizedTime);
-
-                    _playbackClockStartedAtUtc =
-                        null;
-
-                    CurrentState =
-                        PlaybackState.Paused;
-
-                    if (keepPaused)
-                    {
-                        return PlayerPlaybackResult.Ok(
-                            "일시정지 상태를 유지하면서 좌우 영상을 동기화했습니다. "
-                            + "기준시간 "
-                            + _currentPlaybackTime.Value.ToString(
-                                "yyyy-MM-dd HH:mm:ss"));
-                    }
-
-                    PlayerPlaybackResult resumeResult =
-                        await ResumeAsync(
-                            cancellationToken);
-
-                    if (resumeResult == null
-                        || !resumeResult.Success)
-                    {
-                        return resumeResult
-                            ?? PlayerPlaybackResult.Fail(
-                                "영상 동기화 후 재생 재개 결과가 없습니다.",
-                                "PLAYBACK_SYNC_RESUME_RESULT_EMPTY");
-                    }
-
-                    return PlayerPlaybackResult.Ok(
-                        "좌우 영상을 동기화했습니다. "
-                        + "기준시간 "
-                        + _currentPlaybackTime.Value.ToString(
-                            "yyyy-MM-dd HH:mm:ss")
-                        + ", 시간차 "
-                        + differenceSeconds.ToString("0.0")
-                        + "초");
-                }
-
-                /*
-                 * 기다려도 Pause된 채널 간 차이는 줄어들지 않는다.
-                 *
-                 * 현재 가장 늦은 실제 시각을 다음 정렬 목표로 사용하여
-                 * 모든 채널을 한 번 더 맞춘다.
-                 */
-                currentTargetTime =
-                    ClampPlaybackTime(
-                        maximumTime);
-            }
-
-            return PlayerPlaybackResult.Fail(
-                "재생시간을 반복 보정했지만 좌우 채널을 "
-                + "허용 범위 안으로 맞추지 못했습니다.",
-                "PLAYBACK_SYNC_ALIGNMENT_RETRY_EXCEEDED",
-                PlaybackFailureCategory.Retryable);
-        }
-
-        /// <summary>
-        /// 모든 재생 세션의 실제 정규화 시간이
-        /// 서로 허용 범위 안으로 맞춰졌는지 확인한다.
-        ///
-        /// 동기화 성공 여부는 최초 요청한 targetTime과의 차이가 아니라
-        /// 채널 간 실제 재생시간 차이를 기준으로 판단한다.
-        /// </summary>
-        private async Task<DateTime?> WaitForPlaybackAlignmentAsync(
-            double allowedDifferenceSeconds,
-            CancellationToken cancellationToken)
-        {
-            const int maximumWaitMilliseconds =
-                3000;
-
-            const int pollingIntervalMilliseconds =
-                200;
-
-            Stopwatch stopwatch =
-                Stopwatch.StartNew();
-
-            while (stopwatch.ElapsedMilliseconds
-                < maximumWaitMilliseconds)
-            {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return null;
-                }
-
-                List<PlaybackTimeSnapshot> snapshots =
-                    await GetPlaybackTimeSnapshotsAsync(
-                        cancellationToken);
-
-                bool allTimesAvailable =
-                    snapshots.Count >= _sessions.Count;
-
-                if (allTimesAvailable
-                    && snapshots.Count > 0)
-                {
-                    DateTime minimumTime =
-                        snapshots.Min(
-                            snapshot =>
-                                snapshot.NormalizedTime);
-
-                    DateTime maximumTime =
-                        snapshots.Max(
-                            snapshot =>
-                                snapshot.NormalizedTime);
-
-                    double channelDifferenceSeconds =
-                        Math.Abs(
-                            (
-                                maximumTime
-                                - minimumTime
-                            ).TotalSeconds);
-
-                    /*
-                     * 목표 시각과의 오차가 아니라
-                     * 가장 빠른 채널과 가장 느린 채널의 차이를 확인한다.
-                     */
-                    if (channelDifferenceSeconds
-                        <= allowedDifferenceSeconds)
-                    {
-                        /*
-                         * 서비스 표시시간은 좌측 화면 시간을 우선 사용한다.
-                         *
-                         * ScreenPosition.Left의 내부값은 0이다.
-                         */
-                        PlaybackTimeSnapshot master =
-                            snapshots.FirstOrDefault(
-                                snapshot =>
-                                    snapshot.Session != null
-                                    && snapshot.Session.ScreenPosition
-                                        == (int)ScreenPosition.Left);
-
-                        if (master == null)
-                        {
-                            master =
-                                snapshots[0];
-                        }
-
-                        return master.NormalizedTime;
-                    }
-                }
-
-                int remainingMilliseconds =
-                    maximumWaitMilliseconds
-                    - Convert.ToInt32(
-                        stopwatch.ElapsedMilliseconds);
-
-                if (remainingMilliseconds <= 0)
-                {
-                    break;
-                }
-
-                int delayMilliseconds =
-                    Math.Min(
-                        pollingIntervalMilliseconds,
-                        remainingMilliseconds);
-
-                try
-                {
-                    await Task.Delay(
-                        delayMilliseconds,
-                        cancellationToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    return null;
-                }
-            }
-
-            return null;
-        }
-
-        /// <summary>
-        /// 현재 선택된 재생속도를 모든 재생 세션에 적용한다.
-        ///
-        /// 한 채널이라도 세션, Provider 또는 속도 적용에 문제가 있으면
-        /// 성공으로 처리하지 않는다.
-        /// </summary>
-        private async Task<PlayerPlaybackResult> ApplyCurrentSpeedToSessionsAsync(
-            CancellationToken cancellationToken)
-        {
-            if (_currentSpeed == PlaybackSpeed.Normal)
-            {
-                return PlayerPlaybackResult.Ok(
-                    "1배속 상태입니다.");
-            }
-
-            foreach (KeyValuePair<int, INvrPlaybackSession> item
-                in _sessions.ToList())
-            {
-                INvrPlaybackSession session =
-                    item.Value;
-
-                if (session == null)
-                {
-                    return PlayerPlaybackResult.Fail(
-                        "재생속도를 적용할 세션 정보가 없습니다.",
-                        "PLAYBACK_SESSION_INVALID",
-                        PlaybackFailureCategory.System);
-                }
-
-                INvrProvider provider =
-                    GetProviderByNvrNo(
-                        session.NvrNo);
-
-                if (provider == null)
-                {
-                    return PlayerPlaybackResult.Fail(
-                        "재생속도를 적용할 NVR Provider를 찾을 수 없습니다. "
-                        + "NvrNo="
-                        + session.NvrNo
-                        + ", ChannelNo="
-                        + session.ChannelNo
-                        + ", ScreenPosition="
-                        + session.ScreenPosition,
-                        "NVR_PROVIDER_NOT_FOUND",
+                        "재생 요청에 null 채널이 포함되어 있습니다.",
+                        "PLAYBACK_GROUP_CHANNEL_NULL",
                         PlaybackFailureCategory.Configuration);
                 }
 
-                ProviderCapabilities capabilities =
-                    provider.GetCapabilities();
-
-                if (capabilities == null
-                    || !capabilities.CanChangeSpeed)
+                if (channel.NvrConfig == null)
                 {
                     return PlayerPlaybackResult.Fail(
-                        "현재 NVR Provider는 재생속도 변경을 지원하지 않습니다. "
+                        "채널에 연결된 NVR 설정이 없습니다. "
                         + "NvrNo="
-                        + session.NvrNo
+                        + channel.NvrNo
                         + ", ChannelNo="
-                        + session.ChannelNo,
-                        "PLAYBACK_SPEED_NOT_SUPPORTED",
-                        PlaybackFailureCategory.NotSupported);
+                        + channel.ChannelNo,
+                        "NVR_CONFIG_REQUIRED",
+                        PlaybackFailureCategory.Configuration);
                 }
+            }
 
-                NvrResult speedResult =
-                    await provider.SetPlaybackSpeedAsync(
-                        session,
-                        ToNvrPlaybackSpeed(
-                            _currentSpeed),
-                        cancellationToken);
+            /*
+             * 모든 NVR 그룹이 성공하기 전까지는
+             * 전역 _playbackGroupSessions에 바로 등록하지 않는다.
+             *
+             * 중간 실패 시 이미 생성된 그룹을 정리하기 위해
+             * 임시 목록에 보관한다.
+             */
+            var preparedGroups =
+                new List<PreparedPlaybackGroup>();
 
-                if (speedResult == null
-                    || !speedResult.Success)
+            try
+            {
+                IEnumerable<IGrouping<int, PlayerChannelTarget>>
+                    channelGroups =
+                        request.Channels
+                            .GroupBy(
+                                channel => channel.NvrNo)
+                            .OrderBy(
+                                group => group.Key);
+
+                foreach (IGrouping<int, PlayerChannelTarget>
+                    channelGroup in channelGroups)
                 {
-                    return ToPlayerResult(
-                        speedResult);
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        await CleanupPreparedPlaybackGroupsAsync(
+                            preparedGroups);
+
+                        return PlayerPlaybackResult.Fail(
+                            "NVR 그룹 재생 요청이 취소되었습니다.",
+                            "PLAYBACK_GROUP_START_CANCELLED",
+                            PlaybackFailureCategory.Cancelled);
+                    }
+
+                    int nvrNo =
+                        channelGroup.Key;
+
+                    List<PlayerChannelTarget> groupChannels =
+                        channelGroup.ToList();
+
+                    PlayerChannelTarget firstChannel =
+                        groupChannels.FirstOrDefault();
+
+                    if (firstChannel == null
+                        || firstChannel.NvrConfig == null)
+                    {
+                        await CleanupPreparedPlaybackGroupsAsync(
+                            preparedGroups);
+
+                        return PlayerPlaybackResult.Fail(
+                            "NVR 그룹의 기준 채널 설정이 없습니다. "
+                            + "NvrNo="
+                            + nvrNo,
+                            "PLAYBACK_GROUP_CONFIG_REQUIRED",
+                            PlaybackFailureCategory.Configuration);
+                    }
+
+                    NvrConfig nvrConfig =
+                        firstChannel.NvrConfig;
+
+                    /*
+                     * 로그인된 Provider를 확보하고
+                     * 해당 Provider가 제공하는 제조사별 재생 엔진을 준비한다.
+                     */
+                    NvrResult<INvrPlaybackEngine> engineResult =
+                        await GetOrCreatePlaybackEngineAsync(
+                            nvrConfig,
+                            cancellationToken);
+
+                    if (engineResult == null
+                        || !engineResult.Success
+                        || engineResult.Data == null)
+                    {
+                        await CleanupPreparedPlaybackGroupsAsync(
+                            preparedGroups);
+
+                        return ToPlayerResult(
+                            engineResult);
+                    }
+
+                    INvrPlaybackEngine engine =
+                        engineResult.Data;
+
+                    /*
+                     * Player 재생 요청을 제조사 엔진이 받을
+                     * 공통 그룹 재생 요청으로 변환한다.
+                     */
+                    NvrResult<NvrPlaybackGroupRequest>
+                        groupRequestResult =
+                            ToNvrPlaybackGroupRequest(
+                                request,
+                                nvrNo,
+                                groupChannels,
+                                initialTime);
+
+                    if (groupRequestResult == null || !groupRequestResult.Success || groupRequestResult.Data == null)
+                    {
+                        await CleanupPreparedPlaybackGroupsAsync(preparedGroups);
+
+                        return ToPlayerResult(groupRequestResult);
+                    }
+
+                    /*
+                     * OpenAsync는 채널별 재생 핸들을 생성하고,
+                     * 최초 재생 위치로 정렬한 뒤 Paused 상태로 반환한다.
+                     */
+                    NvrResult<INvrPlaybackGroupSession> openResult = 
+                        await engine.OpenAsync(
+                            groupRequestResult.Data,
+                            cancellationToken);
+
+                    if (openResult == null
+                        || !openResult.Success
+                        || openResult.Data == null)
+                    {
+                        /*
+                         * 앞에서 이미 준비된 다른 NVR 그룹이 있다면
+                         * 모두 중지하여 부분 준비 상태를 남기지 않는다.
+                         */
+                        await CleanupPreparedPlaybackGroupsAsync(
+                            preparedGroups);
+
+                        return openResult == null
+                            ? PlayerPlaybackResult.Fail(
+                                "NVR 재생 그룹 준비 결과가 없습니다. "
+                                + "NvrNo="
+                                + nvrNo,
+                                "PLAYBACK_GROUP_OPEN_RESULT_EMPTY",
+                                PlaybackFailureCategory.System)
+                            : ToPlayerResult(
+                                openResult);
+                    }
+
+                    INvrPlaybackGroupSession groupSession =
+                        openResult.Data;
+
+                    /*
+                     * OpenAsync 직후 preparedGroups에 먼저 등록한다.
+                     *
+                     * 이후 StartAsync가 실패하더라도
+                     * 현재 그룹까지 Cleanup 대상에 포함돼야 한다.
+                     */
+                    var preparedGroup =
+                        new PreparedPlaybackGroup
+                        {
+                            NvrNo =
+                                nvrNo,
+
+                            Engine =
+                                engine,
+
+                            Session =
+                                groupSession
+                        };
+
+                    preparedGroups.Add(
+                        preparedGroup);
+
+                    /*
+                     * 일반 재생 요청인 경우에만 재생을 시작한다.
+                     *
+                     * startPlayback=false인 타임라인 이동에서는
+                     * OpenAsync가 만든 Paused 상태를 그대로 유지한다.
+                     */
+                    if (startPlayback)
+                    {
+                        NvrResult startResult =
+                            await engine.StartAsync(
+                                groupSession,
+                                cancellationToken);
+
+                        if (startResult == null
+                            || !startResult.Success)
+                        {
+                            await CleanupPreparedPlaybackGroupsAsync(
+                                preparedGroups);
+
+                            return startResult == null
+                                ? PlayerPlaybackResult.Fail(
+                                    "NVR 재생 그룹 시작 결과가 없습니다. "
+                                    + "NvrNo="
+                                    + nvrNo,
+                                    "PLAYBACK_GROUP_START_RESULT_EMPTY",
+                                    PlaybackFailureCategory.System)
+                                : ToPlayerResult(
+                                    startResult);
+                        }
+                    }
                 }
-            }
 
-            return PlayerPlaybackResult.Ok(
-                GetPlaybackSpeedText(
-                    _currentSpeed)
-                + "을 모든 재생 채널에 적용했습니다.");
-        }
-        /// <summary>
-        /// 단일 좌/우 채널 재생을 지정된 시간 구간으로 시작한다.
-        /// </summary>
-        private async Task<PlayerPlaybackResult> PlayChannelAsync(
-            PlayerPlaybackRequest request,
-            PlayerChannelTarget channel,
-            DateTime playStartTime,
-            DateTime playEndTime,
-            CancellationToken cancellationToken)
-        {
-            if (channel == null || channel.NvrConfig == null)
+                /*
+                 * 모든 NVR 그룹의 Open과 Start가 성공한 경우에만
+                 * 전역 그룹 세션 Dictionary에 등록한다.
+                 */
+                foreach (PreparedPlaybackGroup preparedGroup
+                    in preparedGroups)
+                {
+                    _playbackGroupSessions[
+                        preparedGroup.NvrNo] =
+                            preparedGroup.Session;
+                }
+
+                return PlayerPlaybackResult.Ok(
+                    startPlayback
+                        ? "모든 NVR 재생 그룹을 시작했습니다."
+                        : "모든 NVR 재생 그룹을 일시정지 상태로 준비했습니다.");
+            }
+            catch (OperationCanceledException)
             {
+                await CleanupPreparedPlaybackGroupsAsync(
+                    preparedGroups);
+
                 return PlayerPlaybackResult.Fail(
-                    "채널에 연결된 NVR 설정이 없습니다.",
-                    "NVR_CONFIG_REQUIRED");
+                    "NVR 그룹 재생 요청이 취소되었습니다.",
+                    "PLAYBACK_GROUP_START_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
             }
-
-            NvrResult<INvrProvider> providerResult =
-                await GetOrCreateLoggedInProviderAsync(
-                    channel.NvrConfig,
-                    cancellationToken);
-
-            if (providerResult == null
-                || !providerResult.Success
-                || providerResult.Data == null)
+            catch (Exception ex)
             {
-                return ToPlayerResult(
-                    providerResult);
+                /*
+                 * 예외 발생 시 이미 생성된 모든 그룹을 정리한다.
+                 *
+                 * 정리 과정의 예외는 원래 예외 메시지를
+                 * 덮어쓰지 않도록 내부에서 처리한다.
+                 */
+                await CleanupPreparedPlaybackGroupsAsync(
+                    preparedGroups);
+
+                return PlayerPlaybackResult.Fail(
+                    "NVR 그룹 재생 시작 중 오류가 발생했습니다. "
+                    + ex.Message,
+                    "PLAYBACK_GROUP_START_EXCEPTION",
+                    PlaybackFailureCategory.System);
             }
-
-            INvrProvider provider =
-                providerResult.Data;
-
-            NvrPlaybackRequest nvrRequest =
-                ToNvrPlaybackRequest(
-                    request, channel, playStartTime, playEndTime);
-
-            NvrResult<INvrPlaybackSession> playResult =
-                await provider.PlayByTimeAsync(
-                    nvrRequest,
-                    cancellationToken);
-
-            if (playResult == null  || !playResult.Success || playResult.Data == null)
-            {
-                PlayerPlaybackResult failureResult = ToPlayerResult(playResult);
-
-                WriteNvrFailureLog
-                    (
-                    "채널 재생 시작",
-                    channel.NvrConfig,
-                    channel,
-                    null,
-                    provider,
-                    playResult,
-                    failureResult,
-                    "StartTime="
-                    + playStartTime.ToString("yyyy-MM-dd HH:mm:ss")
-                    + ", EndTime="
-                    + playEndTime.ToString("yyyy-MM-dd HH:mm:ss")
-                    );
-
-                return failureResult;
-
-            }
-
-            int sessionKey =
-                BuildSessionKey(
-                    channel.NvrNo,
-                    channel.ChannelNo,
-                    (int)channel.ScreenPosition);
-
-            _sessions[sessionKey] =
-                playResult.Data;
-
-            _sessionTimeOffsets[sessionKey] =
-                channel.TimeOffsetSeconds;
-
-            return PlayerPlaybackResult.Ok(
-                "채널 재생을 시작했습니다.");
         }
+
 
         /// <summary>
         /// NVR번호 기준으로 Provider를 생성하고 로그인한다.
@@ -2840,10 +3178,7 @@ namespace CamViewer.Services
         /// 연결, 로그인, 초기화 실패는 예외를 던지지 않고
         /// NvrResult로 반환한다.
         /// </summary>
-        private async Task<NvrResult<INvrProvider>>
-            GetOrCreateLoggedInProviderAsync(
-                NvrConfig nvrConfig,
-                CancellationToken cancellationToken)
+        private async Task<NvrResult<INvrProvider>> GetOrCreateLoggedInProviderAsync(NvrConfig nvrConfig, CancellationToken cancellationToken)
         {
             if (nvrConfig == null)
             {
@@ -2925,7 +3260,6 @@ namespace CamViewer.Services
                         nvrConfig,
                         null,
                         null,
-                        null,
                         failureResult,
                         ToPlayerResult(failureResult));
 
@@ -2964,7 +3298,6 @@ namespace CamViewer.Services
                     WriteNvrFailureLog(
                         "NVR Provider 초기화",
                         nvrConfig,
-                        null,
                         null,
                         provider,
                         initializeResult,
@@ -3016,7 +3349,6 @@ namespace CamViewer.Services
                     WriteNvrFailureLog(
                         "NVR 로그인",
                         nvrConfig,
-                        null,
                         null,
                         provider,
                         loginResult,
@@ -3103,11 +3435,349 @@ namespace CamViewer.Services
                     nvrConfig,
                     null,
                     null,
-                    null,
                     failureResult,
                     ToPlayerResult(failureResult));
 
                 return failureResult;
+            }
+        }
+
+        /// <summary>
+        /// NVR 설정을 기준으로 로그인된 Provider와
+        /// 제조사 전용 고수준 재생 엔진을 준비한다.
+        ///
+        /// 처리 순서:
+        /// 1. NVR 설정 검증
+        /// 2. 로그인된 Provider 확보
+        /// 3. 기존 엔진 재사용 가능 여부 확인
+        /// 4. Provider의 INvrPlaybackEngineProvider 구현 확인
+        /// 5. 제조사별 재생 엔진 생성
+        /// 6. NVR 번호별 엔진 캐시에 저장
+        ///
+        /// 공통 서비스는 DahuaPlaybackEngine 등의 실제 구현 타입을
+        /// 직접 참조하지 않고 INvrPlaybackEngine만 보관한다.
+        /// </summary>
+        private async Task<NvrResult<INvrPlaybackEngine>> GetOrCreatePlaybackEngineAsync(NvrConfig nvrConfig, CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.Cancelled,
+                    "NVR 재생 엔진 준비 요청이 취소되었습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "NVR_PLAYBACK_ENGINE_CANCELLED",
+
+                        ErrorMessage =
+                            "NVR 재생 엔진 준비 요청이 취소되었습니다.",
+
+                        Operation =
+                            "GetOrCreatePlaybackEngine"
+                    });
+            }
+
+            if (nvrConfig == null)
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.Failed,
+                    "NVR 설정 정보가 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "NVR_CONFIG_REQUIRED",
+
+                        ErrorMessage =
+                            "NVR 설정 정보가 없습니다.",
+
+                        Operation =
+                            "GetOrCreatePlaybackEngine"
+                    });
+            }
+
+            if (nvrConfig.NvrNo <= 0)
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.Failed,
+                    "NVR 번호가 올바르지 않습니다. "
+                    + "NvrNo="
+                    + nvrConfig.NvrNo,
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "INVALID_NVR_NO",
+
+                        ErrorMessage =
+                            "NVR 번호가 올바르지 않습니다.",
+
+                        Operation =
+                            "GetOrCreatePlaybackEngine"
+                    });
+            }
+
+            if (string.IsNullOrWhiteSpace(
+                    nvrConfig.ProviderKey))
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.ProviderNotFound,
+                    "NVR ProviderKey가 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "NVR_PROVIDER_KEY_REQUIRED",
+
+                        ErrorMessage =
+                            "NVR ProviderKey가 없습니다.",
+
+                        Operation =
+                            "GetOrCreatePlaybackEngine"
+                    });
+            }
+
+            /*
+             * GetOrCreateLoggedInProviderAsync를 호출하기 전에
+             * 현재 캐시에 저장된 Provider를 보관한다.
+             *
+             * 로그인 처리 과정에서 기존 Provider가 폐기되고
+             * 새로운 Provider가 생성될 수 있으므로,
+             * 호출 후 인스턴스가 변경되었는지 확인해야 한다.
+             */
+            INvrProvider previousProvider =
+                null;
+
+            _providers.TryGetValue(
+                nvrConfig.NvrNo,
+                out previousProvider);
+
+            NvrResult<INvrProvider> providerResult =
+                await GetOrCreateLoggedInProviderAsync(
+                    nvrConfig,
+                    cancellationToken);
+
+            if (providerResult == null
+                || !providerResult.Success
+                || providerResult.Data == null)
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    providerResult == null
+                        ? NvrResultStatus.Failed
+                        : providerResult.Status,
+
+                    providerResult == null
+                        ? "로그인된 NVR Provider 준비 결과가 없습니다."
+                        : providerResult.Message,
+
+                    providerResult == null
+                        ? new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "NVR_PROVIDER_RESULT_EMPTY",
+
+                            ErrorMessage =
+                                "로그인된 NVR Provider 준비 결과가 없습니다.",
+
+                            Operation =
+                                "GetOrCreatePlaybackEngine"
+                        }
+                        : providerResult.Error);
+            }
+
+            INvrProvider provider =
+                providerResult.Data;
+
+            /*
+             * 이전 Provider와 현재 로그인된 Provider가 같은 인스턴스인지 확인한다.
+             *
+             * previousProvider가 null인데 재생 엔진만 남아 있는 경우도
+             * 기존 엔진을 안전하게 재사용할 수 없는 상태로 본다.
+             */
+            bool providerChanged =
+                !object.ReferenceEquals(
+                    previousProvider,
+                    provider);
+
+            if (providerChanged)
+            {
+                /*
+                 * 기존 엔진은 이전 Provider 또는 이미 해제된 Provider에
+                 * 연결되어 있을 수 있으므로 새 Provider에서 재사용하면 안 된다.
+                 *
+                 * Dictionary에서 참조만 제거하기 전에
+                 * IDisposable을 구현한 엔진은 먼저 해제한다.
+                 */
+                INvrPlaybackEngine previousEngine;
+
+                if (_playbackEngines.TryGetValue(
+                        nvrConfig.NvrNo,
+                        out previousEngine)
+                    && previousEngine != null)
+                {
+                    IDisposable disposableEngine =
+                        previousEngine as IDisposable;
+
+                    if (disposableEngine != null)
+                    {
+                        try
+                        {
+                            disposableEngine.Dispose();
+                        }
+                        catch
+                        {
+                            /*
+                             * 이전 엔진 정리 실패가
+                             * 새 Provider와 새 엔진 준비를 막지는 않는다.
+                             *
+                             * 정상 정리 경로는 StopAsync이며,
+                             * 이 구간은 비정상 캐시 교체를 위한 방어 처리다.
+                             */
+                        }
+                    }
+                }
+
+                /*
+                 * 이전 Provider에 연결됐을 수 있는 엔진과
+                 * 그룹 세션 참조를 모두 제거한다.
+                 *
+                 * 그룹 세션의 실제 네이티브 리소스는
+                 * 이전 엔진 또는 Provider Dispose 과정에서 정리돼야 한다.
+                 */
+                _playbackEngines.Remove(
+                    nvrConfig.NvrNo);
+
+                _playbackGroupSessions.Remove(
+                    nvrConfig.NvrNo);
+            }
+
+            /*
+             * 동일한 로그인 Provider에 연결된 기존 엔진이 있으면
+             * 새로 생성하지 않고 재사용한다.
+             */
+            INvrPlaybackEngine existingEngine;
+
+            if (_playbackEngines.TryGetValue(
+                    nvrConfig.NvrNo,
+                    out existingEngine))
+            {
+                if (existingEngine != null)
+                {
+                    return NvrResult<INvrPlaybackEngine>.Ok(
+                        existingEngine,
+                        "기존 NVR 재생 엔진을 재사용합니다.");
+                }
+
+                /*
+                 * null 엔진이 Dictionary에 남아 있으면 제거한다.
+                 */
+                _playbackEngines.Remove(
+                    nvrConfig.NvrNo);
+            }
+
+            /*
+             * 모든 Provider가 고수준 그룹 재생 엔진을
+             * 지원하는 것은 아니다.
+             *
+             * INvrPlaybackEngineProvider를 구현한 Provider만
+             * 새로운 그룹 재생 구조를 사용할 수 있다.
+             */
+            INvrPlaybackEngineProvider engineProvider =
+                provider as INvrPlaybackEngineProvider;
+
+            if (engineProvider == null)
+            {
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.NotSupported,
+                    "현재 NVR Provider는 고수준 그룹 재생 엔진을 "
+                    + "지원하지 않습니다. "
+                    + "ProviderKey="
+                    + nvrConfig.ProviderKey,
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "NVR_PLAYBACK_ENGINE_PROVIDER_NOT_IMPLEMENTED",
+
+                        ErrorMessage =
+                            "현재 NVR Provider가 "
+                            + "INvrPlaybackEngineProvider를 "
+                            + "구현하지 않았습니다.",
+
+                        Operation =
+                            "GetOrCreatePlaybackEngine"
+                    });
+            }
+
+            try
+            {
+                NvrResult<INvrPlaybackEngine> engineResult =
+                    engineProvider.CreatePlaybackEngine();
+
+                if (engineResult == null)
+                {
+                    return NvrResult<INvrPlaybackEngine>.Fail(
+                        NvrResultStatus.Failed,
+                        "NVR 재생 엔진 생성 결과가 없습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "NVR_PLAYBACK_ENGINE_RESULT_EMPTY",
+
+                            ErrorMessage =
+                                "NVR 재생 엔진 생성 결과가 없습니다.",
+
+                            Operation =
+                                "CreatePlaybackEngine"
+                        });
+                }
+
+                if (!engineResult.Success
+                    || engineResult.Data == null)
+                {
+                    return NvrResult<INvrPlaybackEngine>.Fail(
+                        engineResult.Status,
+                        string.IsNullOrWhiteSpace(
+                            engineResult.Message)
+                            ? "NVR 재생 엔진 생성에 실패했습니다."
+                            : engineResult.Message,
+                        engineResult.Error);
+                }
+
+                INvrPlaybackEngine engine =
+                    engineResult.Data;
+
+                /*
+                 * 엔진 생성이 완전히 성공한 경우에만
+                 * NVR 번호별 재사용 Dictionary에 등록한다.
+                 */
+                _playbackEngines[nvrConfig.NvrNo] =
+                    engine;
+
+                return NvrResult<INvrPlaybackEngine>.Ok(
+                    engine,
+                    string.IsNullOrWhiteSpace(
+                        engineResult.Message)
+                        ? "NVR 재생 엔진을 생성했습니다."
+                        : engineResult.Message);
+            }
+            catch (Exception ex)
+            {
+                /*
+                 * 제조사 Provider 내부 엔진 생성 중 발생한 예외를
+                 * 공통 NvrResult 실패 형식으로 변환한다.
+                 */
+                return NvrResult<INvrPlaybackEngine>.Fail(
+                    NvrResultStatus.UnknownError,
+                    "NVR 재생 엔진 생성 중 오류가 발생했습니다. "
+                    + ex.Message,
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "NVR_PLAYBACK_ENGINE_CREATE_EXCEPTION",
+
+                        ErrorMessage =
+                            ex.Message,
+
+                        Operation =
+                            "GetOrCreatePlaybackEngine"
+                    });
             }
         }
 
@@ -3152,176 +3822,508 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// Player 재생 요청을 NVR Core 재생 요청으로 변환한다.
+        /// Player 재생 요청과 동일 NVR에 속한 채널 목록을
+        /// NVR Core 다중채널 재생 그룹 요청으로 변환한다.
+        ///
+        /// 처리 원칙:
+        /// - 하나의 그룹에는 동일한 NVR 번호의 채널만 포함한다.
+        /// - 하나의 그룹에는 동일한 ProviderKey의 채널만 포함한다.
+        /// - 공통 조회시간에는 채널별 보정값을 적용하지 않는다.
+        /// - 채널별 TimeOffsetSeconds는 제조사 엔진에 그대로 전달한다.
+        /// - 최초 그룹 준비는 정방향 1배속으로 수행한다.
         /// </summary>
-        private static NvrPlaybackRequest ToNvrPlaybackRequest(
+        private static NvrResult<NvrPlaybackGroupRequest> ToNvrPlaybackGroupRequest(
                 PlayerPlaybackRequest request,
-                PlayerChannelTarget channel,
-                DateTime playStartTime,
-                DateTime playEndTime)
+                int nvrNo,
+                IList<PlayerChannelTarget> channels,
+                DateTime initialTime)
         {
-            return new NvrPlaybackRequest
+            if (request == null)
             {
-                CounterNo = request.CounterNo,
-                NvrNo = channel.NvrNo,
-                ChannelNo = channel.ChannelNo,
-                ScreenPosition = (int)channel.ScreenPosition,
-                SearchDateTime = request.SearchDateTime,
-                StartTime = playStartTime,
-                EndTime = playEndTime,
-                RenderTargetHandle = channel.OutputHandle,
-                AutoPlay = true
-            };
-        }
+                return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                    NvrResultStatus.Failed,
+                    "Player 재생 요청 정보가 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "PLAYER_PLAYBACK_REQUEST_REQUIRED",
 
-        /// <summary>
-        /// 세션 Dictionary Key를 생성한다.
-        /// </summary>
-        private static int BuildSessionKey(
-            int nvrNo,
-            int channelNo,
-            int screenPosition)
-        {
-            return (nvrNo * 10000)
-                + (channelNo * 10)
-                + screenPosition;
-        }
+                        ErrorMessage = "Player 재생 요청 정보가 없습니다.",
 
-        /// <summary>
-        /// 세션의 NVR번호에 해당하는 Provider를 반환한다.
-        /// </summary>
-        private INvrProvider GetProviderByNvrNo(
-            int nvrNo)
-        {
-            INvrProvider provider;
-
-            return _providers.TryGetValue(nvrNo, out provider)
-                ? provider
-                : null;
-        }
-
-        /// <summary>
-        /// NVR 공통 처리 상태를 CamViewer 사용자 대응 유형으로 변환한다.
-        /// </summary>
-        private static PlaybackFailureCategory ClassifyNvrFailure(
-            NvrResultStatus status)
-        {
-            switch (status)
-            {
-                /*
-                 * 연결 실패와 일반적인 장비 처리 실패는
-                 * 네트워크 또는 장비 상태가 복구된 뒤 다시 시도할 수 있다.
-                 */
-                case NvrResultStatus.ConnectionFailed:
-                case NvrResultStatus.ApiError:
-                case NvrResultStatus.Failed:
-                case NvrResultStatus.PartialSuccess:
-                case NvrResultStatus.UnknownError:
-                    return PlaybackFailureCategory.Retryable;
-
-                /*
-                 * 로그인, 채널번호, Provider 선택 오류는
-                 * 설정 확인이 선행돼야 한다.
-                 */
-                case NvrResultStatus.LoginFailed:
-                case NvrResultStatus.InvalidChannel:
-                case NvrResultStatus.ProviderNotFound:
-                    return PlaybackFailureCategory.Configuration;
-
-                case NvrResultStatus.NoRecordFound:
-                    return PlaybackFailureCategory.NoRecord;
-
-                case NvrResultStatus.NotSupported:
-                    return PlaybackFailureCategory.NotSupported;
-
-                case NvrResultStatus.Cancelled:
-                    return PlaybackFailureCategory.Cancelled;
-
-                /*
-                 * SDK 초기화 또는 DLL 문제는
-                 * 단순 재시도보다는 프로그램 구성을 확인해야 한다.
-                 */
-                case NvrResultStatus.SdkError:
-                    return PlaybackFailureCategory.System;
-
-                default:
-                    return PlaybackFailureCategory.System;
-            }
-        }
-
-        /// <summary>
-        /// 현재 세션에 해당하는 재생 채널 설정을 찾는다.
-        /// </summary>
-        private PlayerChannelTarget FindChannelTarget(
-            INvrPlaybackSession session)
-        {
-            if (session == null
-                || _currentRequest == null
-                || _currentRequest.Channels == null)
-            {
-                return null;
+                        Operation = "ToNvrPlaybackGroupRequest"
+                    });
             }
 
-            return _currentRequest.Channels
-                .FirstOrDefault(
-                    channel =>
-                        channel != null
-                        && channel.NvrNo == session.NvrNo
-                        && channel.ChannelNo == session.ChannelNo
-                        && (int)channel.ScreenPosition
-                            == session.ScreenPosition);
+            if (nvrNo <= 0)
+            {
+                return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                    NvrResultStatus.Failed,
+                    "NVR 번호가 올바르지 않습니다. "
+                    + "NvrNo="
+                    + nvrNo,
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "INVALID_NVR_NO",
+
+                        ErrorMessage =
+                            "NVR 번호가 올바르지 않습니다.",
+
+                        Operation =
+                            "ToNvrPlaybackGroupRequest"
+                    });
+            }
+
+            if (request.PlayStartTime
+                >= request.PlayEndTime)
+            {
+                return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                    NvrResultStatus.Failed,
+                    "조회 시작시간은 조회 종료시간보다 이전이어야 합니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "INVALID_PLAYBACK_RANGE",
+
+                        ErrorMessage =
+                            "조회 시작시간은 조회 종료시간보다 이전이어야 합니다.",
+
+                        Operation =
+                            "ToNvrPlaybackGroupRequest"
+                    });
+            }
+
+            /*
+             * 최초 준비 위치는 조회 범위 안이어야 한다. 
+             * 시작시간은 포함하고 종료시간은 포함하지 않는다.
+             */
+            if (initialTime
+                < request.PlayStartTime)
+            {
+                return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                    NvrResultStatus.Failed,
+                    "최초 재생시간은 조회 시작시간보다 이전일 수 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "PLAYBACK_GROUP_INITIAL_BEFORE_START",
+
+                        ErrorMessage =
+                            "최초 재생시간은 조회 시작시간보다 이전일 수 없습니다.",
+
+                        Operation =
+                            "ToNvrPlaybackGroupRequest"
+                    });
+            }
+
+            if (initialTime
+                >= request.PlayEndTime)
+            {
+                return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                    NvrResultStatus.Failed,
+                    "최초 재생시간은 조회 종료시간보다 이전이어야 합니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "PLAYBACK_GROUP_INITIAL_AFTER_END",
+
+                        ErrorMessage =
+                            "최초 재생시간은 조회 종료시간보다 이전이어야 합니다.",
+
+                        Operation =
+                            "ToNvrPlaybackGroupRequest"
+                    });
+            }
+
+            if (channels == null
+                || channels.Count == 0)
+            {
+                return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                    NvrResultStatus.Failed,
+                    "재생 그룹에 포함할 채널이 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "PLAYBACK_GROUP_CHANNEL_REQUIRED",
+
+                        ErrorMessage =
+                            "재생 그룹에 포함할 채널이 없습니다.",
+
+                        Operation =
+                            "ToNvrPlaybackGroupRequest"
+                    });
+            }
+
+            PlayerChannelTarget firstChannel =
+                null;
+
+            foreach (PlayerChannelTarget channel in channels)
+            {
+                if (channel != null)
+                {
+                    firstChannel =
+                        channel;
+
+                    break;
+                }
+            }
+
+            if (firstChannel == null || firstChannel.NvrConfig == null)
+    {
+                return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                    NvrResultStatus.Failed,
+                    "재생 그룹의 기준 NVR 설정 정보가 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "PLAYBACK_GROUP_NVR_CONFIG_REQUIRED",
+
+                        ErrorMessage =
+                            "재생 그룹의 기준 NVR 설정 정보가 없습니다.",
+
+                        Operation =
+                            "ToNvrPlaybackGroupRequest"
+                    });
+            }
+
+            string providerKey =
+                firstChannel.NvrConfig.ProviderKey;
+
+            if (string.IsNullOrWhiteSpace(
+                    providerKey))
+            {
+                return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                    NvrResultStatus.ProviderNotFound,
+                    "재생 그룹의 ProviderKey가 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "PLAYBACK_GROUP_PROVIDER_KEY_REQUIRED",
+
+                        ErrorMessage =
+                            "재생 그룹의 ProviderKey가 없습니다.",
+
+                        Operation =
+                            "ToNvrPlaybackGroupRequest"
+                    });
+            }
+
+            var screenPositions =
+                new HashSet<int>();
+
+            var channelNumbers =
+                new HashSet<int>();
+
+            var groupRequest =
+                new NvrPlaybackGroupRequest
+                {
+                    CounterNo =
+                        request.CounterNo,
+
+                    NvrNo =
+                        nvrNo,
+
+                    ProviderKey =
+                        providerKey,
+
+                    SearchDateTime =
+                        request.SearchDateTime,
+
+                    /*
+                     * 그룹 전체의 공통 조회 범위다.
+                     *
+                     * 여기에는 채널별 TimeOffsetSeconds를 적용하지 않는다.
+                     * 제조사 엔진이 각 채널의 원본 시각으로 변환한다.
+                     */
+                    StartTime =
+                        request.PlayStartTime,
+
+                    EndTime =
+                        request.PlayEndTime,
+
+                    /* 
+                     * 그룹 재생 핸들은 전체 조회 구간으로 생성하지만, 
+                     * 최초 화면은 호출부에서 전달한 시각으로 준비한다.  
+                     * 일반 재생: 
+                     * initialTime = request.PlayStartTime 
+                     * 타임라인 이동: 
+                     * initialTime = 사용자가 선택한 시각 
+                     */
+                    InitialTime = initialTime,
+
+                    /*
+                     * 최초 준비와 채널 동기화는
+                     * 정방향 1배속을 기준으로 수행한다.
+                     */
+                    InitialDirection =
+                        NvrPlaybackDirection.Forward,
+
+                    InitialSpeed =
+                        NvrPlaybackSpeed.Normal
+                };
+
+            foreach (PlayerChannelTarget channel
+                in channels)
+            {
+                if (channel == null)
+                {
+                    return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                        NvrResultStatus.Failed,
+                        "재생 그룹에 null 채널이 포함되어 있습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "PLAYBACK_GROUP_CHANNEL_NULL",
+
+                            ErrorMessage =
+                                "재생 그룹에 null 채널이 포함되어 있습니다.",
+
+                            Operation =
+                                "ToNvrPlaybackGroupRequest"
+                        });
+                }
+
+                if (channel.NvrConfig == null)
+                {
+                    return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                        NvrResultStatus.Failed,
+                        "채널의 NVR 설정 정보가 없습니다. "
+                        + "ChannelNo="
+                        + channel.ChannelNo,
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "PLAYBACK_GROUP_CHANNEL_CONFIG_REQUIRED",
+
+                            ErrorMessage =
+                                "채널의 NVR 설정 정보가 없습니다.",
+
+                            Operation =
+                                "ToNvrPlaybackGroupRequest"
+                        });
+                }
+
+                /*
+                 * 호출부에서 NVR 번호별로 그룹화하더라도
+                 * 잘못된 채널이 섞이는 상황을 방어적으로 검사한다.
+                 */
+                if (channel.NvrNo != nvrNo
+                    || channel.NvrConfig.NvrNo != nvrNo)
+                {
+                    return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                        NvrResultStatus.Failed,
+                        "서로 다른 NVR의 채널을 하나의 그룹에 "
+                        + "포함할 수 없습니다. "
+                        + "GroupNvrNo="
+                        + nvrNo
+                        + ", ChannelNvrNo="
+                        + channel.NvrNo
+                        + ", ConfigNvrNo="
+                        + channel.NvrConfig.NvrNo,
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "PLAYBACK_GROUP_NVR_MISMATCH",
+
+                            ErrorMessage =
+                                "서로 다른 NVR의 채널이 "
+                                + "하나의 그룹에 포함되었습니다.",
+
+                            Operation =
+                                "ToNvrPlaybackGroupRequest"
+                        });
+                }
+
+                if (!string.Equals(
+                        providerKey,
+                        channel.NvrConfig.ProviderKey,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                        NvrResultStatus.ProviderNotFound,
+                        "서로 다른 Provider의 채널을 하나의 그룹에 "
+                        + "포함할 수 없습니다. "
+                        + "ExpectedProviderKey="
+                        + providerKey
+                        + ", ActualProviderKey="
+                        + channel.NvrConfig.ProviderKey,
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "PLAYBACK_GROUP_PROVIDER_MISMATCH",
+
+                            ErrorMessage =
+                                "서로 다른 Provider의 채널이 "
+                                + "하나의 그룹에 포함되었습니다.",
+
+                            Operation =
+                                "ToNvrPlaybackGroupRequest"
+                        });
+                }
+
+                if (channel.ChannelNo <= 0)
+                {
+                    return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                        NvrResultStatus.InvalidChannel,
+                        "NVR 채널번호가 올바르지 않습니다. "
+                        + "ChannelNo="
+                        + channel.ChannelNo,
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "INVALID_PLAYBACK_GROUP_CHANNEL",
+
+                            ErrorMessage =
+                                "NVR 채널번호가 올바르지 않습니다.",
+
+                            Operation =
+                                "ToNvrPlaybackGroupRequest"
+                        });
+                }
+
+                int screenPosition =
+                    (int)channel.ScreenPosition;
+
+                if (!screenPositions.Add(
+                        screenPosition))
+                {
+                    return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                        NvrResultStatus.Failed,
+                        "같은 화면 위치의 채널이 중복되었습니다. "
+                        + "ScreenPosition="
+                        + screenPosition,
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "DUPLICATE_PLAYBACK_SCREEN_POSITION",
+
+                            ErrorMessage =
+                                "같은 화면 위치의 채널이 중복되었습니다.",
+
+                            Operation =
+                                "ToNvrPlaybackGroupRequest"
+                        });
+                }
+
+                if (!channelNumbers.Add(
+                        channel.ChannelNo))
+                {
+                    return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                        NvrResultStatus.InvalidChannel,
+                        "같은 NVR 채널번호가 중복되었습니다. "
+                        + "ChannelNo="
+                        + channel.ChannelNo,
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "DUPLICATE_PLAYBACK_CHANNEL",
+
+                            ErrorMessage =
+                                "같은 NVR 채널번호가 중복되었습니다.",
+
+                            Operation =
+                                "ToNvrPlaybackGroupRequest"
+                        });
+                }
+
+                if (channel.OutputHandle
+                    == IntPtr.Zero)
+                {
+                    return NvrResult<NvrPlaybackGroupRequest>.Fail(
+                        NvrResultStatus.Failed,
+                        "영상 출력 대상 Handle이 없습니다. "
+                        + "ChannelNo="
+                        + channel.ChannelNo,
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "PLAYBACK_RENDER_HANDLE_REQUIRED",
+
+                            ErrorMessage =
+                                "영상 출력 대상 Handle이 없습니다.",
+
+                            Operation =
+                                "ToNvrPlaybackGroupRequest"
+                        });
+                }
+
+                groupRequest.Channels.Add(
+                    new NvrPlaybackGroupChannelRequest
+                    {
+                        ChannelNo =
+                            channel.ChannelNo,
+
+                        ScreenPosition =
+                            screenPosition,
+
+                        RenderTargetHandle =
+                            channel.OutputHandle,
+
+                        /*
+                         * 시간 보정값은 여기서 계산하거나 적용하지 않는다.
+                         * 제조사 엔진이 공통 시각과 Provider 원본 시각을
+                         * 상호 변환할 때 사용한다.
+                         */
+                        TimeOffsetSeconds =
+                            channel.TimeOffsetSeconds
+                    });
+            }
+
+            return NvrResult<NvrPlaybackGroupRequest>.Ok(groupRequest, "NVR 다중채널 재생 그룹 요청을 생성했습니다.");
         }
+
 
         /// <summary>
         /// NVR 실패 로그에 기록할 진단 정보를 생성한다.
         ///
         /// 비밀번호, 사용자 ID, 인증 토큰은 기록하지 않는다.
+        ///
+        /// 그룹 재생 구조에서는 기존 INvrPlaybackSession을 사용하지 않고
+        /// 전달받은 NVR 설정과 채널 설정만으로 진단 정보를 구성한다.
         /// </summary>
         private string BuildNvrLogDetails(
             NvrConfig nvrConfig,
             PlayerChannelTarget channel,
-            INvrPlaybackSession session,
             INvrProvider provider,
             NvrResult nvrResult,
             string additionalDetails)
         {
-            PlayerChannelTarget resolvedChannel = channel;
+            /*
+             * 호출부에서 NVR 설정을 직접 전달하지 않았더라도
+             * 채널에 연결된 NVR 설정을 사용할 수 있다.
+             */
+            NvrConfig resolvedConfig =
+                nvrConfig;
 
-            if (resolvedChannel == null && session != null)
+            if (resolvedConfig == null
+                && channel != null)
             {
-                resolvedChannel = FindChannelTarget(session);
+                resolvedConfig =
+                    channel.NvrConfig;
             }
 
-            NvrConfig resolvedConfig = nvrConfig;
+            var details =
+                new List<string>();
 
-            if (resolvedConfig == null && resolvedChannel != null)
-            {
-                resolvedConfig = resolvedChannel.NvrConfig;
-            }
-
-            var details = new List<string>();
-
-            int? nvrNo = resolvedChannel != null
-                    ? (int?)resolvedChannel.NvrNo
-                    : session != null
-                        ? (int?)session.NvrNo
-                        : resolvedConfig != null
-                            ? (int?)resolvedConfig.NvrNo
-                            : null;
+            /*
+             * 채널 정보가 있으면 채널 값을 우선 사용하고,
+             * 채널 정보가 없으면 NVR 설정의 NvrNo를 사용한다.
+             */
+            int? nvrNo =
+                channel != null
+                    ? (int?)channel.NvrNo
+                    : resolvedConfig != null
+                        ? (int?)resolvedConfig.NvrNo
+                        : null;
 
             int? channelNo =
-                resolvedChannel != null
-                    ? (int?)resolvedChannel.ChannelNo
-                    : session != null
-                        ? (int?)session.ChannelNo
-                        : null;
+                channel != null
+                    ? (int?)channel.ChannelNo
+                    : null;
 
             int? screenPosition =
-                resolvedChannel != null
-                    ? (int?)resolvedChannel.ScreenPosition
-                    : session != null
-                        ? (int?)session.ScreenPosition
-                        : null;
+                channel != null
+                    ? (int?)channel.ScreenPosition
+                    : null;
 
             details.Add(
                 "NvrNo="
@@ -3357,7 +4359,8 @@ namespace CamViewer.Services
              * 설정의 ProviderKey가 없으면
              * 실제 생성된 Provider 메타데이터를 사용한다.
              */
-            if (string.IsNullOrWhiteSpace(providerKey)
+            if (string.IsNullOrWhiteSpace(
+                    providerKey)
                 && provider != null
                 && provider.Metadata != null)
             {
@@ -3368,7 +4371,8 @@ namespace CamViewer.Services
             details.Add(
                 "ProviderKey="
                 + (
-                    string.IsNullOrWhiteSpace(providerKey)
+                    string.IsNullOrWhiteSpace(
+                        providerKey)
                         ? "-"
                         : providerKey
                 ));
@@ -3457,9 +4461,11 @@ namespace CamViewer.Services
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(additionalDetails))
+            if (!string.IsNullOrWhiteSpace(
+                    additionalDetails))
             {
-                details.Add(additionalDetails);
+                details.Add(
+                    additionalDetails);
             }
 
             return string.Join(
@@ -3468,13 +4474,15 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// Provider 또는 NVR 명령 실패를 상세 정보와 함께 기록한다.
+        /// Provider 또는 NVR 명령 실패를
+        /// 상세 진단 정보와 함께 로그에 기록한다.
+        ///
+        /// 그룹 재생 구조에서는 개별 재생 세션을 전달하지 않는다.
         /// </summary>
         private void WriteNvrFailureLog(
             string operationName,
             NvrConfig nvrConfig,
             PlayerChannelTarget channel,
-            INvrPlaybackSession session,
             INvrProvider provider,
             NvrResult nvrResult,
             PlayerPlaybackResult playerResult,
@@ -3489,7 +4497,6 @@ namespace CamViewer.Services
                 BuildNvrLogDetails(
                     nvrConfig,
                     channel,
-                    session,
                     provider,
                     nvrResult,
                     additionalDetails);
@@ -3552,15 +4559,20 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 재생속도를 변경한다.
+        /// 현재 선택된 재생속도를 변경한다.
         ///
-        /// 운영 정책:
-        /// - 재생 전이면 선택값만 저장한다.
-        /// - 재생 중이면 모든 채널에 동일한 속도를 적용한다.
-        /// - 1배속이 아닌 경우 자동 동기화와 Seek를 실행하지 않는다.
-        /// - 1배속으로 변경한 경우에만 좌우 영상 동기화를 실행한다.
+        /// 정책:
+        /// - 재생 그룹이 없으면 선택값만 저장한다.
+        /// - Playing 상태에서 변경하면 Playing을 유지한다.
+        /// - Rewinding 상태에서 변경하면 Rewinding을 유지한다.
+        /// - Paused 상태에서 변경하면 Paused를 유지한다.
+        /// - 속도 변경만으로 재생 방향이나 상태를 변경하지 않는다.
+        /// - 일부 NVR 그룹 실패 시 전체 그룹을 이전 속도로 복원한다.
+        /// - 정방향 1배속으로 변경한 경우에만 그룹 동기화를 실행한다.
         /// </summary>
-        public async Task<PlayerPlaybackResult> SetPlaybackSpeedAsync(PlaybackSpeed speed, CancellationToken cancellationToken)
+        public async Task<PlayerPlaybackResult> SetPlaybackSpeedAsync(
+            PlaybackSpeed speed,
+            CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
@@ -3568,172 +4580,275 @@ namespace CamViewer.Services
             {
                 return PlayerPlaybackResult.Fail(
                     "재생속도 변경 요청이 취소되었습니다.",
-                    "PLAYBACK_SPEED_CANCELLED");
+                    "PLAYBACK_SPEED_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            if (!Enum.IsDefined(
+                    typeof(PlaybackSpeed),
+                    speed))
+            {
+                return PlayerPlaybackResult.Fail(
+                    "지원하지 않는 재생속도입니다. "
+                    + "Speed="
+                    + speed,
+                    "PLAYBACK_SPEED_INVALID",
+                    PlaybackFailureCategory.Configuration);
             }
 
             /*
-             * 아직 재생 세션이 없으면 선택값만 저장한다.
-             * 이후 재생 시작 시 PlayAsync에서 적용한다.
+             * 아직 재생 그룹이 없으면 실제 NVR 명령을 보내지 않고
+             * 다음 재생에 사용할 선택값만 저장한다.
              */
-            if (_sessions.Count == 0)
+            if (_playbackGroupSessions.Count == 0)
             {
-                _currentSpeed = speed;
+                _currentSpeed =
+                    speed;
 
                 return PlayerPlaybackResult.Ok(
-                    GetPlaybackSpeedText(speed)
-                    + "으로 설정되었습니다. 다음 재생부터 적용됩니다.");
+                    GetPlaybackSpeedText(
+                        speed)
+                    + "으로 설정되었습니다. "
+                    + "다음 재생부터 적용됩니다.");
             }
 
-            PlaybackState stateBeforeChange = CurrentState;
+            if (CurrentState != PlaybackState.Playing
+                && CurrentState != PlaybackState.Rewinding
+                && CurrentState != PlaybackState.Paused)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 상태에서는 속도를 변경할 수 없습니다. "
+                    + "State="
+                    + CurrentState,
+                    "PLAYBACK_SPEED_INVALID_STATE",
+                    PlaybackFailureCategory.System);
+            }
 
             /*
-             * 속도를 변경하기 전에 현재 재생 위치를 고정한다.
+             * 동일한 속도라면 제조사 SDK 명령을 다시 호출하지 않는다.
              */
-            DateTime? syncedPlaybackTime = await SyncPlaybackTimeAsync(cancellationToken);
+            if (_currentSpeed == speed)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "이미 "
+                    + GetPlaybackSpeedText(
+                        speed)
+                    + "으로 설정되어 있습니다.");
+            }
 
-            DateTime currentPlaybackTimeBeforeChange =
-                syncedPlaybackTime.HasValue
-                    ? syncedPlaybackTime.Value
+            PlaybackSpeed previousSpeed =
+                _currentSpeed;
+
+            PlaybackState stateBeforeChange =
+                CurrentState;
+
+            /*
+             * 기존 속도가 적용된 상태에서 실제 영상재생시간을 먼저 확보한다.
+             *
+             * 속도 변경 후 기존 경과시간 기준을 그대로 사용하면
+             * 이전 속도와 새 속도의 계산 구간이 섞일 수 있다.
+             */
+            DateTime? actualPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생속도 변경 요청이 취소되었습니다.",
+                    "PLAYBACK_SPEED_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            DateTime playbackTimeBeforeChange =
+                actualPlaybackTime.HasValue
+                    ? actualPlaybackTime.Value
                     : GetEstimatedPlaybackTime();
 
+            playbackTimeBeforeChange =
+                ClampPlaybackTime(
+                    playbackTimeBeforeChange);
+
             /*
-             * 한 채널이라도 속도 변경에 실패하면
-             * 좌우 속도가 서로 달라질 수 있으므로 전체 재생을 정리한다.
+             * 모든 NVR 그룹에 새 속도를 적용한다.
+             *
+             * ApplyPlaybackSpeedToGroupsAsync는
+             * 제조사 엔진의 SetSpeedAsync를 호출한다.
              */
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions.ToList())
+            PlayerPlaybackResult applyResult =
+                await ApplyPlaybackSpeedToGroupsAsync(
+                    speed,
+                    cancellationToken);
+
+            if (applyResult == null
+                || !applyResult.Success)
             {
-                INvrPlaybackSession session =item.Value;
+                /*
+                 * 일부 NVR 그룹만 새 속도로 변경됐을 수 있으므로
+                 * 모든 그룹에 이전 속도를 다시 적용한다.
+                 */
+                PlayerPlaybackResult rollbackResult =
+                    await ApplyPlaybackSpeedToGroupsAsync(
+                        previousSpeed,
+                        CancellationToken.None);
 
-                if (session == null)
+                if (rollbackResult == null
+                    || !rollbackResult.Success)
                 {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "재생 세션 정보가 없습니다.",
-                            "PLAYBACK_SESSION_INVALID");
+                    /*
+                     * NVR 그룹별 속도가 서로 달라진 상태를
+                     * 계속 재생하도록 두지 않는다.
+                     */
+                    await StopCurrentPlaybackGroupsOnlyAsync();
 
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생속도 변경",
-                        failureResult,
-                        "PLAYBACK_SPEED_CHANGE_FAILED");
+                    _currentRequest =
+                        null;
+
+                    _currentPlaybackTime =
+                        null;
+
+                    _playbackClockStartedAtUtc =
+                        null;
+
+                    _currentSpeed =
+                        previousSpeed;
+
+                    CurrentState =
+                        PlaybackState.Stopped;
+
+                    return PlayerPlaybackResult.Fail(
+                        "일부 NVR 그룹의 재생속도 변경 실패 후 "
+                        + "이전 속도를 복원하지 못해 재생을 중지했습니다.",
+                        "PLAYBACK_SPEED_ROLLBACK_FAILED",
+                        PlaybackFailureCategory.System);
                 }
 
-                INvrProvider provider = GetProviderByNvrNo(session.NvrNo);
+                /*
+                 * 실제 NVR 속도가 이전 값으로 복원됐으므로
+                 * 서비스 시간과 상태도 변경 전 기준으로 되돌린다.
+                 */
+                _currentSpeed =
+                    previousSpeed;
 
-                if (provider == null)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "NVR Provider를 찾을 수 없습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo
-                            + ", ScreenPosition="
-                            + session.ScreenPosition,
-                            "NVR_PROVIDER_NOT_FOUND");
+                _currentPlaybackTime =
+                    playbackTimeBeforeChange;
 
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생속도 변경",
-                        failureResult,
-                        "PLAYBACK_SPEED_CHANGE_FAILED");
-                }
+                CurrentState =
+                    stateBeforeChange;
 
-                ProviderCapabilities capabilities =
-                    provider.GetCapabilities();
+                _playbackClockStartedAtUtc =
+                    stateBeforeChange == PlaybackState.Playing
+                    || stateBeforeChange == PlaybackState.Rewinding
+                        ? (DateTime?)DateTime.UtcNow
+                        : null;
 
-                if (capabilities == null
-                    || !capabilities.CanChangeSpeed)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "현재 NVR Provider는 재생속도 변경을 지원하지 않습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo,
-                            "PLAYBACK_SPEED_NOT_SUPPORTED");
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생속도 변경",
-                        failureResult,
-                        "PLAYBACK_SPEED_CHANGE_FAILED");
-                }
-
-                NvrResult result =
-                    await provider.SetPlaybackSpeedAsync(session, ToNvrPlaybackSpeed(speed), cancellationToken);
-
-                if (result == null
-                    || !result.Success)
-                {
-                    PlayerPlaybackResult failureResult = ToPlayerResult(result);
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생속도 변경",
-                        failureResult,
-                        "PLAYBACK_SPEED_CHANGE_FAILED");
-                }
+                return applyResult
+                    ?? PlayerPlaybackResult.Fail(
+                        "NVR 그룹 재생속도 변경 결과가 없습니다.",
+                        "PLAYBACK_GROUP_SPEED_RESULT_EMPTY",
+                        PlaybackFailureCategory.System);
             }
 
             /*
-             * 모든 채널에 속도가 정상 적용된 뒤
-             * 서비스 상태를 갱신한다.
+             * 모든 제조사 그룹에 새 속도가 적용된 이후에만
+             * 공통 서비스의 속도와 시간 기준을 변경한다.
              */
-            _currentPlaybackTime = ClampPlaybackTime(currentPlaybackTimeBeforeChange);
+            _currentSpeed =
+                speed;
 
-            _currentSpeed =speed;
+            _currentPlaybackTime =
+                playbackTimeBeforeChange;
 
-            if (stateBeforeChange == PlaybackState.Playing || stateBeforeChange == PlaybackState.Rewinding)
-            {
-                _playbackClockStartedAtUtc =DateTime.UtcNow;
+            CurrentState =
+                stateBeforeChange;
 
-                CurrentState = stateBeforeChange;
-            }
-            else if (stateBeforeChange == PlaybackState.Paused)
-            {
-                _playbackClockStartedAtUtc = null;
-
-                CurrentState = PlaybackState.Paused;
-            }
-            else
-            {
-                _playbackClockStartedAtUtc = null;
-
-                CurrentState = stateBeforeChange;
-            }
+            _playbackClockStartedAtUtc =
+                stateBeforeChange == PlaybackState.Playing
+                || stateBeforeChange == PlaybackState.Rewinding
+                    ? (DateTime?)DateTime.UtcNow
+                    : null;
 
             /*
-             * 확정된 운영 정책:
-             * 0.5·2·4·8배속에서는 자동 동기화와 Seek를 실행하지 않는다.
+             * 0.5·2·4·8배속에서는 자동 동기화를 실행하지 않는다.
              */
             if (speed != PlaybackSpeed.Normal)
             {
                 return PlayerPlaybackResult.Ok(
-                    GetPlaybackSpeedText(speed)
+                    GetPlaybackSpeedText(
+                        speed)
                     + "으로 재생속도를 변경했습니다. "
                     + "배속 재생 중에는 자동 영상 동기화를 실행하지 않습니다.");
             }
 
             /*
-             * 1배속으로 변경했을 때만 좌우 시간을 동기화한다.
+             * 역방향 1배속으로 변경한 경우에도
+             * 현재 Synchronizer는 정방향만 지원하므로 동기화하지 않는다.
              */
-            PlayerPlaybackResult syncResult = await ResyncPlaybackSessionsAsync(cancellationToken);
+            bool isForwardDirection =
+                stateBeforeChange == PlaybackState.Playing
+                || (
+                    stateBeforeChange == PlaybackState.Paused
+                    && _pausedFromState
+                        == PlaybackState.Playing
+                );
 
-            if (syncResult == null || !syncResult.Success)
+            if (!isForwardDirection)
             {
-                return await RecoverFromPlaybackFailureAsync(
-                    "1배속 변경 후 좌우 영상 동기화",
-                    syncResult,
-                    "PLAYBACK_SPEED_SYNC_FAILED");
+                return PlayerPlaybackResult.Ok(
+                    "1배속으로 재생속도를 변경했습니다. "
+                    + "역재생 상태에서는 자동 영상 동기화를 실행하지 않습니다.");
             }
+
+            /*
+             * 정방향 1배속으로 복귀한 경우
+             * 제조사별 그룹 동기화를 실행한다.
+             */
+            PlayerPlaybackResult synchronizeResult =
+                await SynchronizePlaybackGroupsAfterNormalSpeedAsync(
+                    stateBeforeChange,
+                    cancellationToken);
+
+            if (synchronizeResult == null)
+            {
+                synchronizeResult =
+                    PlayerPlaybackResult.Ok(
+                        "재생속도는 1배속으로 변경됐지만 "
+                        + "그룹 동기화 결과가 없습니다.");
+            }
+
+            /*
+             * 동기화 과정에서 실제 재생 위치가 조금 변경될 수 있으므로
+             * 완료 후 기준 그룹의 OSD 시간을 다시 확인한다.
+             */
+            DateTime? synchronizedPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    CancellationToken.None);
+
+            if (synchronizedPlaybackTime.HasValue)
+            {
+                _currentPlaybackTime =
+                    ClampPlaybackTime(
+                        synchronizedPlaybackTime.Value);
+            }
+
+            CurrentState =
+                stateBeforeChange;
+
+            _playbackClockStartedAtUtc =
+                stateBeforeChange == PlaybackState.Playing
+                    ? (DateTime?)DateTime.UtcNow
+                    : null;
 
             return PlayerPlaybackResult.Ok(
                 "1배속으로 재생속도를 변경했습니다. "
-                + syncResult.Message);
+                + synchronizeResult.Message);
         }
 
         /// <summary>
-        /// Provider가 실제 재생시간 조회를 지원하면 실제 시간을 동기화한다.
-        /// 지원하지 않거나 실패하면 추정 시간을 반환한다.
+        /// 기준 NVR 그룹의 실제 영상재생시간을 서비스 시간에 반영한다.
+        ///
+        /// 실제 그룹 재생시간을 확인하지 못하면
+        /// 서비스의 경과시간 기준 추정값을 반환한다.
         /// </summary>
         public async Task<DateTime?> SyncPlaybackTimeAsync(
             CancellationToken cancellationToken)
@@ -3745,47 +4860,76 @@ namespace CamViewer.Services
                 return null;
             }
 
-            if (CurrentState == PlaybackState.Stopped)
+            if (cancellationToken.IsCancellationRequested)
             {
                 return null;
             }
 
-            DateTime? providerPlaybackTime =
-                await TryGetAnyProviderPlaybackTimeAsync(
-                    cancellationToken);
-
-            if (providerPlaybackTime.HasValue)
+            /*
+             * 그룹 재생이 아직 준비되지 않았다면
+             * Provider 조회 없이 서비스 추정시간을 반환한다.
+             */
+            if (_playbackGroupSessions.Count == 0)
             {
-                _currentPlaybackTime = providerPlaybackTime.Value;
-
-                if (CurrentState == PlaybackState.Playing
-                    || CurrentState == PlaybackState.Rewinding)
-                {
-                    _playbackClockStartedAtUtc = DateTime.UtcNow;
-                }
-                else
-                {
-                    _playbackClockStartedAtUtc = null;
-                }
-
-                return _currentPlaybackTime;
+                return GetEstimatedPlaybackTime();
             }
 
-            return GetEstimatedPlaybackTime();
+            DateTime? actualPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+
+            if (!actualPlaybackTime.HasValue)
+            {
+                return GetEstimatedPlaybackTime();
+            }
+
+            DateTime synchronizedTime =
+                ClampPlaybackTime(
+                    actualPlaybackTime.Value);
+
+            /*
+             * 실제 시간을 새 시간 기준점으로 저장한다.
+             *
+             * 이후 UI에서 CurrentPlaybackTime을 조회하면
+             * 이 시각과 현재 속도, 경과시간을 기준으로 계산한다.
+             */
+            _currentPlaybackTime =
+                synchronizedTime;
+
+            if (CurrentState == PlaybackState.Playing
+                || CurrentState == PlaybackState.Rewinding)
+            {
+                _playbackClockStartedAtUtc =
+                    DateTime.UtcNow;
+            }
+            else
+            {
+                _playbackClockStartedAtUtc =
+                    null;
+            }
+
+            return synchronizedTime;
         }
 
         /// <summary>
-        /// 타임라인에서 선택한 절대 시각으로 이동한다.
+        /// 타임라인에서 선택한 절대 영상 시각으로 이동한다.
         ///
         /// 운영 정책:
         /// - 타임라인은 모든 배속에서 사용할 수 있다.
-        /// - 1배속이 아닌 상태에서 이동하면 이동 결과는 1배속으로 통일한다.
-        /// - 기존 세션에 1배속 변경 명령과 동기화를 먼저 실행하지 않는다.
-        /// - Seek 과정에서 새로 생성되는 재생 핸들의 기본 속도를 사용한다.
+        /// - 이동 후 재생속도는 1배속으로 통일한다.
+        /// - 전체 조회 시작·종료 범위는 변경하지 않는다.
+        /// - 새 그룹은 선택한 시각에서 Paused 상태로 준비한다.
+        /// - 이동 전 방향과 재생 상태는 복원한다.
         /// </summary>
-        public async Task<PlayerPlaybackResult> SeekTimelineToTimeAsync(
-            DateTime targetTime,
-            CancellationToken cancellationToken)
+        public async Task<PlayerPlaybackResult>
+            SeekTimelineToTimeAsync(
+                DateTime targetTime,
+                CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
@@ -3793,495 +4937,660 @@ namespace CamViewer.Services
             {
                 return PlayerPlaybackResult.Fail(
                     "타임라인 이동 요청이 취소되었습니다.",
-                    "TIMELINE_SEEK_CANCELLED");
-            }
-
-            if (_sessions.Count == 0)
-            {
-                return PlayerPlaybackResult.Fail(
-                    "이동할 재생 세션이 없습니다.",
-                    "PLAYBACK_NOT_STARTED");
+                    "TIMELINE_SEEK_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
             }
 
             if (_currentRequest == null)
             {
                 return PlayerPlaybackResult.Fail(
                     "현재 재생 요청 정보가 없습니다.",
-                    "PLAYBACK_REQUEST_EMPTY");
+                    "PLAYBACK_REQUEST_EMPTY",
+                    PlaybackFailureCategory.System);
+            }
+
+            if (_playbackGroupSessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "타임라인에서 이동할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
             /*
-             * 유효하지 않은 위치를 클릭한 경우에는
-             * 기존 재생속도를 변경하지 않는다.
+             * 조회 시작시간은 포함한다.
              */
-            if (targetTime < _currentRequest.PlayStartTime)
+            if (targetTime
+                < _currentRequest.PlayStartTime)
             {
                 return PlayerPlaybackResult.Fail(
                     "조회 시작시간보다 이전으로 이동할 수 없습니다.",
-                    "SEEK_BEFORE_START");
+                    "SEEK_BEFORE_START",
+                    PlaybackFailureCategory.Configuration);
             }
 
-            if (targetTime >= _currentRequest.PlayEndTime)
+            /*
+             * 조회 종료시간은 재생 범위에 포함하지 않는다.
+             */
+            if (targetTime
+                >= _currentRequest.PlayEndTime)
             {
                 return PlayerPlaybackResult.Fail(
                     "조회 종료시간 이후로 이동할 수 없습니다.",
-                    "SEEK_AFTER_END");
+                    "SEEK_AFTER_END",
+                    PlaybackFailureCategory.Configuration);
             }
+
+            PlaybackState stateBeforeSeek =
+                CurrentState;
+
+            if (stateBeforeSeek != PlaybackState.Playing
+                && stateBeforeSeek != PlaybackState.Rewinding
+                && stateBeforeSeek != PlaybackState.Paused)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 상태에서는 타임라인 이동을 실행할 수 없습니다. "
+                    + "State="
+                    + stateBeforeSeek,
+                    "TIMELINE_SEEK_INVALID_STATE",
+                    PlaybackFailureCategory.System);
+            }
+
+            /*
+             * 일시정지 상태에서는 _pausedFromState를 기준으로
+             * 실제 재생 방향을 판단한다.
+             */
+            bool wasReverse =
+                stateBeforeSeek == PlaybackState.Rewinding
+                || (
+                    stateBeforeSeek == PlaybackState.Paused
+                    && _pausedFromState
+                        == PlaybackState.Rewinding
+                );
+
+            bool keepPaused =
+                stateBeforeSeek == PlaybackState.Paused;
 
             bool changedToNormalSpeed =
                 _currentSpeed != PlaybackSpeed.Normal;
 
+            PlayerPlaybackRequest currentRequest =
+                _currentRequest;
+
             /*
-             * 기존 8배속 세션에 Normal 명령을 먼저 보내지 않는다.
+             * 역방향 상태에서 조회 시작시간으로 이동하면
+             * 더 이전으로 재생할 시간이 없으므로 실행하지 않는다.
              *
-             * SeekToTimeAsync가 좌우 채널의 새 재생 핸들을 생성하므로,
-             * 새 핸들이 생성될 때 사용할 논리 속도만 1배속으로 변경한다.
+             * 기존 그룹을 정리하기 전에 검사해야 한다.
+             */
+            if (wasReverse
+                && targetTime
+                    <= currentRequest.PlayStartTime)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "조회 시작시간에서는 역재생을 시작할 수 없습니다.",
+                    "REWIND_BEFORE_START",
+                    PlaybackFailureCategory.NotSupported);
+            }
+
+            /*
+             * 타임라인 이동은 기존 배속 그룹에
+             * 1배속 명령과 Seek 명령을 순차적으로 보내지 않는다.
+             *
+             * 기존 그룹을 완전히 정리하고,
+             * 선택 시각에서 새 정방향 1배속 그룹을 준비한다.
+             *
+             * Provider 로그인과 재생 엔진은 유지한다.
+             */
+            PlayerPlaybackResult stopResult =
+                await StopCurrentPlaybackGroupsOnlyAsync();
+
+            if (stopResult == null
+                || !stopResult.Success)
+            {
+                return stopResult
+                    ?? PlayerPlaybackResult.Fail(
+                        "기존 NVR 재생 그룹 정리 결과가 없습니다.",
+                        "TIMELINE_SEEK_STOP_RESULT_EMPTY",
+                        PlaybackFailureCategory.System);
+            }
+
+            /*
+             * 새 그룹은 항상 1배속으로 생성된다.
              */
             _currentSpeed =
                 PlaybackSpeed.Normal;
 
-            PlayerPlaybackResult seekResult =
-                await SeekToTimeAsync(
+            _currentPlaybackTime =
+                null;
+
+            _playbackClockStartedAtUtc =
+                null;
+
+            CurrentState =
+                PlaybackState.Stopped;
+
+            /*
+             * startPlayback=false:
+             *
+             * targetTime에서 그룹을 준비하지만
+             * OpenAsync가 반환한 Paused 상태를 유지한다.
+             */
+            PlayerPlaybackResult openResult =
+                await OpenAndStartPlaybackGroupsAsync(
+                    currentRequest,
                     targetTime,
+                    false,
                     cancellationToken);
 
-            if (seekResult == null)
+            if (openResult == null
+                || !openResult.Success)
             {
-                return PlayerPlaybackResult.Fail(
-                    "타임라인 이동 처리 결과가 없습니다.",
-                    "TIMELINE_SEEK_RESULT_EMPTY");
-            }
+                await StopCurrentPlaybackGroupsOnlyAsync();
 
-            if (!seekResult.Success)
-            {
+                _currentPlaybackTime =
+                    null;
+
+                _playbackClockStartedAtUtc =
+                    null;
+
+                CurrentState =
+                    PlaybackState.Stopped;
+
                 /*
-                 * 부분 Seek 실패 시 기존 복구 정책에 따라
-                 * 전체 세션이 정리될 수 있으므로 1배속 상태를 유지한다.
+                 * 타임라인 이동 시도 이후에는
+                 * 선택 속도를 1배속으로 유지한다.
                  */
-                return seekResult;
+                _currentSpeed =
+                    PlaybackSpeed.Normal;
+
+                return openResult
+                    ?? PlayerPlaybackResult.Fail(
+                        "타임라인 위치에서 NVR 그룹을 준비한 결과가 없습니다.",
+                        "TIMELINE_SEEK_OPEN_RESULT_EMPTY",
+                        PlaybackFailureCategory.System);
             }
 
-            string message =
+            /*
+             * OpenAsync 성공 시 제조사 그룹의 실제 상태는
+             * 정방향·1배속·Paused이다.
+             */
+            _currentPlaybackTime =
+                targetTime;
+
+            _playbackClockStartedAtUtc =
+                null;
+
+            CurrentState =
+                PlaybackState.Paused;
+
+            _pausedFromState =
+                PlaybackState.Playing;
+
+            /*
+             * 이동 전 재생 방향이 역방향이었다면
+             * Paused 상태에서 방향만 Reverse로 변경한다.
+             *
+             * ChangePlaybackGroupDirectionAsync는
+             * Paused 상태를 유지하고 _pausedFromState를
+             * Rewinding으로 변경한다.
+             */
+            if (wasReverse)
+            {
+                PlayerPlaybackResult directionResult =
+                    await ChangePlaybackGroupDirectionAsync(
+                        NvrPlaybackDirection.Reverse,
+                        cancellationToken);
+
+                if (directionResult == null
+                    || !directionResult.Success)
+                {
+                    await StopCurrentPlaybackGroupsOnlyAsync();
+
+                    _currentPlaybackTime =
+                        null;
+
+                    _playbackClockStartedAtUtc =
+                        null;
+
+                    CurrentState =
+                        PlaybackState.Stopped;
+
+                    _currentSpeed =
+                        PlaybackSpeed.Normal;
+
+                    return directionResult
+                        ?? PlayerPlaybackResult.Fail(
+                            "타임라인 이동 후 역방향 전환 결과가 없습니다.",
+                            "TIMELINE_REVERSE_RESULT_EMPTY",
+                            PlaybackFailureCategory.System);
+                }
+            }
+
+            /*
+             * 이동 전 상태가 Playing 또는 Rewinding이었다면
+             * 선택한 위치에서 재생을 다시 시작한다.
+             *
+             * 이동 전 상태가 Paused였다면 Resume하지 않고
+             * 일시정지 상태를 그대로 유지한다.
+             */
+            if (!keepPaused)
+            {
+                PlayerPlaybackResult resumeResult =
+                    await ResumeAsync(
+                        cancellationToken);
+
+                if (resumeResult == null
+                    || !resumeResult.Success)
+                {
+                    await StopCurrentPlaybackGroupsOnlyAsync();
+
+                    _currentPlaybackTime =
+                        null;
+
+                    _playbackClockStartedAtUtc =
+                        null;
+
+                    CurrentState =
+                        PlaybackState.Stopped;
+
+                    _currentSpeed =
+                        PlaybackSpeed.Normal;
+
+                    return resumeResult
+                        ?? PlayerPlaybackResult.Fail(
+                            "타임라인 이동 후 재생 재개 결과가 없습니다.",
+                            "TIMELINE_RESUME_RESULT_EMPTY",
+                            PlaybackFailureCategory.System);
+                }
+            }
+
+            /*
+             * 그룹 준비와 방향·상태 복원이 끝난 뒤
+             * 실제 제조사 OSD 시간을 서비스 기준시간으로 반영한다.
+             */
+            DateTime? actualPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    CancellationToken.None);
+
+            _currentPlaybackTime =
+                actualPlaybackTime.HasValue
+                    ? ClampPlaybackTime(
+                        actualPlaybackTime.Value)
+                    : targetTime;
+
+            if (CurrentState == PlaybackState.Playing
+                || CurrentState == PlaybackState.Rewinding)
+            {
+                _playbackClockStartedAtUtc =
+                    DateTime.UtcNow;
+            }
+            else
+            {
+                _playbackClockStartedAtUtc =
+                    null;
+            }
+
+            string speedMessage =
                 changedToNormalSpeed
                     ? "재생속도를 1배속으로 전환했습니다. "
-                      + seekResult.Message
-                    : seekResult.Message;
+                    : string.Empty;
+
+            string directionMessage =
+                wasReverse
+                    ? "역재생 방향을 유지했습니다. "
+                    : "정방향 재생을 유지했습니다. ";
+
+            string stateMessage =
+                keepPaused
+                    ? "일시정지 상태를 유지했습니다."
+                    : "재생을 계속합니다.";
 
             return PlayerPlaybackResult.Ok(
-                message);
+                speedMessage
+                + "영상재생시간을 "
+                + _currentPlaybackTime.Value.ToString(
+                    "yyyy-MM-dd HH:mm:ss")
+                + "으로 이동했습니다. "
+                + directionMessage
+                + stateMessage);
         }
 
         /// <summary>
-        /// 지정한 영상재생시간으로 이동한다.
+        /// 모든 NVR 재생 그룹을 지정한 공통 영상재생시간으로 이동한다.
         ///
-        /// 정방향 처리 순서:
-        /// 1. 현재 재생 상태 확인
-        /// 2. 재생 중이면 모든 채널 Pause
-        /// 3. 모든 채널을 목표 시각으로 한 번만 정렬
-        /// 4. 실제 OSD 시간 검증
-        /// 5. 기존 상태가 재생 중이면 전체 Resume
-        ///
-        /// 역방향은 기존 역재생 세션 재생성 방식을 유지한다.
+        /// 정책:
+        /// - 정방향 재생에서만 허용한다.
+        /// - 1배속에서만 허용한다.
+        /// - Playing 또는 Paused 상태에서만 허용한다.
+        /// - 이동 전 재생 상태를 유지한다.
+        /// - 일부 NVR 그룹 실패 시 전체 그룹을 이전 시각으로 복원한다.
         /// </summary>
-        public async Task<PlayerPlaybackResult> SeekToTimeAsync(DateTime targetTime, CancellationToken cancellationToken)
+        public async Task<PlayerPlaybackResult> SeekToTimeAsync(
+            DateTime targetTime,
+            CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
             if (cancellationToken.IsCancellationRequested)
             {
                 return PlayerPlaybackResult.Fail(
-                    "재생 위치 이동 요청이 취소되었습니다.",
+                    "영상 이동 요청이 취소되었습니다.",
                     "PLAYBACK_SEEK_CANCELLED",
                     PlaybackFailureCategory.Cancelled);
             }
 
-            if (_sessions.Count == 0)
-            {
-                return PlayerPlaybackResult.Fail(
-                    "이동할 재생 세션이 없습니다.",
-                    "PLAYBACK_NOT_STARTED");
-            }
-
             if (_currentRequest == null)
             {
                 return PlayerPlaybackResult.Fail(
                     "현재 재생 요청 정보가 없습니다.",
-                    "PLAYBACK_REQUEST_EMPTY");
+                    "PLAYBACK_REQUEST_EMPTY",
+                    PlaybackFailureCategory.System);
             }
 
-            if (targetTime < _currentRequest.PlayStartTime)
+            if (_playbackGroupSessions.Count == 0)
             {
                 return PlayerPlaybackResult.Fail(
-                    "조회 시작시간보다 이전으로 이동할 수 없습니다.",
-                    "SEEK_BEFORE_START");
+                    "이동할 NVR 재생 그룹이 없습니다.",
+                    "PLAYBACK_GROUP_SESSION_EMPTY",
+                    PlaybackFailureCategory.System);
             }
-
-            if (targetTime >= _currentRequest.PlayEndTime)
-            {
-                return PlayerPlaybackResult.Fail(
-                    "조회 종료시간 이후로 이동할 수 없습니다.",
-                    "SEEK_AFTER_END");
-            }
-
-            PlaybackState stateBeforeSeek = CurrentState;
 
             /*
-             * 역재생 중이거나 역재생에서 일시정지된 상태는
-             * 정방향 Alignment Provider를 사용하지 않는다.
-             */
-            bool isReverseSeek = 
-                stateBeforeSeek == PlaybackState.Rewinding || (stateBeforeSeek == PlaybackState.Paused && _pausedFromState == PlaybackState.Rewinding);
-
-            if (isReverseSeek)
-            {
-                return await SeekReverseToTimeAsync(targetTime, stateBeforeSeek == PlaybackState.Paused, cancellationToken);
-            }
-
-            if (stateBeforeSeek != PlaybackState.Playing && stateBeforeSeek != PlaybackState.Paused)
-            {
-                return PlayerPlaybackResult.Fail(
-                    "현재 재생 상태에서는 영상 위치를 이동할 수 없습니다.",
-                    "PLAYBACK_SEEK_INVALID_STATE");
-            }
-
-            bool keepPaused = stateBeforeSeek == PlaybackState.Paused;
-
-            /*
-             * 재생 중인 상태에서 한 채널씩 Seek하면
-             * 먼저 처리된 채널은 계속 진행하여 다시 시간차가 발생한다.
+             * 현재 제조사 그룹 Seek는 정방향 재생만 지원한다.
              *
-             * 따라서 모든 채널을 먼저 Pause한 뒤 고정된 상태에서 정렬한다.
+             * 역재생 중 또는 역재생을 일시정지한 상태에서는
+             * 별도의 역방향 세션 재구성 방식이 필요하다.
              */
-            if (!keepPaused)
+            bool isReverseState =
+                CurrentState == PlaybackState.Rewinding
+                || (
+                    CurrentState == PlaybackState.Paused
+                    && _pausedFromState
+                        == PlaybackState.Rewinding
+                );
+
+            if (isReverseState)
             {
-                PlayerPlaybackResult pauseResult =
-                    await PauseAsync(
-                        cancellationToken);
-
-                if (pauseResult == null)
-                {
-                    PlayerPlaybackResult emptyPauseResult =
-                        PlayerPlaybackResult.Fail(
-                            "재생 위치 이동 전 일시정지 결과가 없습니다.",
-                            "PLAYBACK_SEEK_PAUSE_RESULT_EMPTY",
-                            PlaybackFailureCategory.System);
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 위치 이동",
-                        emptyPauseResult,
-                        "PLAYBACK_SEEK_FAILED");
-                }
-
-                if (!pauseResult.Success)
-                {
-                    return pauseResult;
-                }
+                return PlayerPlaybackResult.Fail(
+                    "역재생 상태에서는 10초 이동을 지원하지 않습니다. "
+                    + "정방향 재생으로 전환한 뒤 다시 시도해 주세요.",
+                    "REVERSE_PLAYBACK_SEEK_NOT_SUPPORTED",
+                    PlaybackFailureCategory.NotSupported);
             }
 
             /*
-             * 각 채널에 provider.SeekAsync를 직접 호출하지 않는다.
-             *
-             * 실제 정렬, OSD 도착 확인, 재정렬 보정 및 Resume는
-             * AlignPlaybackSessionsToTimeAsync 한 곳에서 처리한다.
+             * Dahua 정렬 Provider는 현재 1배속 Seek만 보장한다.
              */
-            PlayerPlaybackResult alignmentResult =
-                await AlignPlaybackSessionsToTimeAsync(
-                    targetTime,
-                    keepPaused,
+            if (_currentSpeed
+                != PlaybackSpeed.Normal)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "영상 이동은 1배속에서만 사용할 수 있습니다.",
+                    "PLAYBACK_SEEK_NORMAL_SPEED_ONLY",
+                    PlaybackFailureCategory.NotSupported);
+            }
+
+            if (CurrentState != PlaybackState.Playing
+                && CurrentState != PlaybackState.Paused)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 상태에서는 영상재생시간을 이동할 수 없습니다. "
+                    + "State="
+                    + CurrentState,
+                    "PLAYBACK_SEEK_INVALID_STATE",
+                    PlaybackFailureCategory.System);
+            }
+
+            PlaybackState stateBeforeSeek =
+                CurrentState;
+
+            /*
+             * Seek 실패 시 원래 위치로 되돌릴 수 있도록
+             * 명령 실행 전 실제 영상재생시간을 확보한다.
+             */
+            DateTime? actualPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
                     cancellationToken);
 
-            if (alignmentResult == null)
-            {
-                PlayerPlaybackResult emptyResult =
-                    PlayerPlaybackResult.Fail(
-                        "재생 위치 정렬 결과가 없습니다.",
-                        "PLAYBACK_SEEK_ALIGNMENT_RESULT_EMPTY",
-                        PlaybackFailureCategory.System);
-
-                return await RecoverFromPlaybackFailureAsync(
-                    "재생 위치 이동",
-                    emptyResult,
-                    "PLAYBACK_SEEK_FAILED");
-            }
-
-            if (!alignmentResult.Success)
-            {
-                return await RecoverFromPlaybackFailureAsync(
-                    "재생 위치 이동",
-                    alignmentResult,
-                    "PLAYBACK_SEEK_FAILED");
-            }
-
-            return PlayerPlaybackResult.Ok(
-                "재생 위치를 이동했습니다. "
-                + targetTime.ToString(
-                    "yyyy-MM-dd HH:mm:ss")
-                + " / "
-                + alignmentResult.Message);
-        }
-
-        /// <summary>
-        /// 역재생 상태에서 지정한 시각부터 역재생 세션을 다시 생성한다.
-        ///
-        /// 일반 SeekAsync는 정방향 세션을 생성할 수 있으므로 사용하지 않는다.
-        /// 기존 역재생 세션을 정리한 뒤 모든 채널을 역재생 API로 다시 연다.
-        /// </summary>
-        /// <param name="targetTime">
-        /// 사용자가 타임라인에서 선택한 화면 기준 재생시각.
-        /// </param>
-        /// <param name="keepPaused">
-        /// 역재생 일시정지 상태에서 이동한 경우 true.
-        /// 새 세션 생성 후 다시 일시정지한다.
-        /// </param>
-        private async Task<PlayerPlaybackResult> SeekReverseToTimeAsync(
-            DateTime targetTime,
-            bool keepPaused,
-            CancellationToken cancellationToken)
-        {
-            if (_currentRequest == null)
+            if (cancellationToken.IsCancellationRequested)
             {
                 return PlayerPlaybackResult.Fail(
-                    "현재 재생 요청 정보가 없습니다.",
-                    "PLAYBACK_REQUEST_EMPTY");
+                    "영상 이동 요청이 취소되었습니다.",
+                    "PLAYBACK_SEEK_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
             }
 
-            PlayerPlaybackRequest request =
-                _currentRequest;
+            DateTime playbackTimeBeforeSeek =
+                actualPlaybackTime.HasValue
+                    ? actualPlaybackTime.Value
+                    : GetEstimatedPlaybackTime();
+
+            playbackTimeBeforeSeek =
+                ClampPlaybackTime(
+                    playbackTimeBeforeSeek);
 
             /*
-             * 기존 역재생 세션만 정리한다.
-             * Provider 로그인은 재사용한다.
+             * 조회 시작시간은 포함하지만
+             * 조회 종료시간은 재생 범위에 포함되지 않는다.
+             *
+             * 기존 ClampPlaybackTime은 종료시간과 같은 값을 반환할 수 있으므로
+             * Seek 전용 상한은 종료시간 1초 전으로 제한한다.
              */
-            PlayerPlaybackResult stopResult =
-                await StopCurrentPlaybackSessionsOnlyAsync(
-                    CancellationToken.None);
+            DateTime latestSeekTime =
+                _currentRequest.PlayEndTime.AddSeconds(
+                    -1);
 
-            if (!stopResult.Success)
+            if (latestSeekTime
+                < _currentRequest.PlayStartTime)
             {
-                return await RecoverFromPlaybackFailureAsync(
-                    "역재생 위치 이동을 위한 기존 세션 정리",
-                    stopResult,
-                    "REVERSE_SEEK_CLEANUP_FAILED");
+                latestSeekTime =
+                    _currentRequest.PlayStartTime;
             }
 
-            foreach (PlayerChannelTarget channel
-                in request.Channels)
-            {
-                if (channel == null || channel.NvrConfig == null)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "역재생 채널의 NVR 설정이 없습니다.",
-                            "NVR_CONFIG_REQUIRED");
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "역재생 위치 이동",
-                        failureResult,
-                        "REVERSE_SEEK_FAILED");
-                }
-
-                NvrResult<INvrProvider> providerResult = await GetOrCreateLoggedInProviderAsync(channel.NvrConfig, cancellationToken);
-
-                if (providerResult == null || !providerResult.Success || providerResult.Data == null)
-                {
-                    PlayerPlaybackResult failureResult = ToPlayerResult(providerResult);
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "역재생 위치 이동",
-                        failureResult,
-                        "REVERSE_SEEK_PROVIDER_FAILED");
-                }
-
-                INvrProvider provider = providerResult.Data;
-
-                if (provider == null)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "역재생할 NVR Provider를 찾을 수 없습니다. "
-                            + "NvrNo="
-                            + channel.NvrNo
-                            + ", ChannelNo="
-                            + channel.ChannelNo,
-                            "NVR_PROVIDER_NOT_FOUND");
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "역재생 위치 이동",
-                        failureResult,
-                        "REVERSE_SEEK_FAILED");
-                }
-
-                INvrReversePlaybackProvider reverseProvider =
-                    provider as INvrReversePlaybackProvider;
-
-                if (reverseProvider == null)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "현재 Provider는 역재생 위치 이동을 지원하지 않습니다. "
-                            + "NvrNo="
-                            + channel.NvrNo
-                            + ", ChannelNo="
-                            + channel.ChannelNo,
-                            "REVERSE_PROVIDER_NOT_IMPLEMENTED");
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "역재생 위치 이동",
-                        failureResult,
-                        "REVERSE_SEEK_FAILED");
-                }
-
-                NvrPlaybackRequest nvrRequest =
-                    ToNvrPlaybackRequest(
-                        request,
-                        channel,
-                        request.PlayStartTime,
-                        request.PlayEndTime);
-
-                int offsetSeconds =
-                    channel.TimeOffsetSeconds;
-
-                DateTime providerTargetTime =
-                    targetTime.AddSeconds(
-                        offsetSeconds);
-
-                /*
-                 * 일반 PlayByTimeAsync가 아니라
-                 * 반드시 역재생 API로 새 세션을 생성한다.
-                 */
-                NvrResult<INvrPlaybackSession> reverseResult =
-                    await reverseProvider.PlayReverseByTimeAsync(
-                        nvrRequest,
-                        providerTargetTime,
-                        cancellationToken);
-
-                if (reverseResult == null || !reverseResult.Success || reverseResult.Data == null)
-                {
-                    PlayerPlaybackResult failureResult = ToPlayerResult(reverseResult);
-
-                    WriteNvrFailureLog(
-                        "역재생 위치 이동",
-                        channel.NvrConfig,
-                        channel,
-                        null,
-                        provider,
-                        reverseResult,
-                        failureResult,
-                        "TargetTime="
-                        + providerTargetTime.ToString(
-                            "yyyy-MM-dd HH:mm:ss"));
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "역재생 위치 이동",
-                        failureResult,
-                        "REVERSE_SEEK_FAILED");
-                }
-
-                int sessionKey =
-                    BuildSessionKey(
-                        channel.NvrNo,
-                        channel.ChannelNo,
-                        (int)channel.ScreenPosition);
-
-                _sessions[sessionKey] =
-                    reverseResult.Data;
-
-                _sessionTimeOffsets[sessionKey] =
-                    offsetSeconds;
-            }
-
-            /*
-             * 새로 생성된 역재생 세션에도 현재 선택 배속을 다시 적용한다.
-             */
-            if (_currentSpeed != PlaybackSpeed.Normal)
-            {
-                PlayerPlaybackResult speedResult =
-                    await ApplyCurrentSpeedToSessionsAsync(
-                        cancellationToken);
-
-                if (!speedResult.Success)
-                {
-                    return await RecoverFromPlaybackFailureAsync(
-                        "역재생 위치 이동 후 속도 적용",
-                        speedResult,
-                        "REVERSE_SEEK_SPEED_FAILED");
-                }
-            }
-
-            _currentPlaybackTime =
+            DateTime normalizedTargetTime =
                 targetTime;
 
-            if (keepPaused)
+            if (normalizedTargetTime
+                < _currentRequest.PlayStartTime)
             {
-                /*
-                 * 역재생 일시정지 상태에서 타임라인을 이동했다면
-                 * 새로 생성된 세션도 다시 일시정지한다.
-                 */
-                foreach (KeyValuePair<int, INvrPlaybackSession> item
-                    in _sessions.ToList())
+                normalizedTargetTime =
+                    _currentRequest.PlayStartTime;
+            }
+
+            if (normalizedTargetTime
+                >= _currentRequest.PlayEndTime)
+            {
+                normalizedTargetTime =
+                    latestSeekTime;
+            }
+
+            /*
+             * 현재 위치와 목표 위치가 같은 초라면
+             * 불필요한 SDK Seek를 실행하지 않는다.
+             */
+            if (Math.Abs(
+                    (
+                        normalizedTargetTime
+                        - playbackTimeBeforeSeek
+                    ).TotalSeconds)
+                < 1.0)
+            {
+                _currentPlaybackTime =
+                    normalizedTargetTime;
+
+                _playbackClockStartedAtUtc =
+                    stateBeforeSeek == PlaybackState.Playing
+                        ? (DateTime?)DateTime.UtcNow
+                        : null;
+
+                return PlayerPlaybackResult.Ok(
+                    "이미 선택한 영상재생시간에 위치해 있습니다.");
+            }
+
+            var warningMessages =
+                new List<string>();
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                if (cancellationToken.IsCancellationRequested)
                 {
-                    INvrPlaybackSession session =
-                        item.Value;
+                    bool restored =
+                        await RestorePlaybackGroupsAfterSeekFailureAsync(
+                            playbackTimeBeforeSeek,
+                            stateBeforeSeek);
 
-                    INvrProvider provider =
-                        session == null
-                            ? null
-                            : GetProviderByNvrNo(
-                                session.NvrNo);
-
-                    if (provider == null)
+                    if (!restored)
                     {
-                        PlayerPlaybackResult failureResult =
-                            PlayerPlaybackResult.Fail(
-                                "역재생 일시정지 상태를 복원할 Provider가 없습니다.",
-                                "NVR_PROVIDER_NOT_FOUND");
+                        await StopCurrentPlaybackGroupsOnlyAsync();
 
-                        return await RecoverFromPlaybackFailureAsync(
-                            "역재생 위치 이동 후 일시정지 복원",
-                            failureResult,
-                            "REVERSE_SEEK_PAUSE_FAILED");
+                        return PlayerPlaybackResult.Fail(
+                            "영상 이동 취소 후 기존 재생 위치를 "
+                            + "복원하지 못해 재생을 중지했습니다.",
+                            "PLAYBACK_SEEK_ROLLBACK_FAILED",
+                            PlaybackFailureCategory.System);
                     }
 
-                    NvrResult pauseResult =
-                        await provider.PauseAsync(
-                            session,
-                            cancellationToken);
+                    RestoreServiceStateAfterSeek(
+                        playbackTimeBeforeSeek,
+                        stateBeforeSeek);
 
-                    if (pauseResult == null ||
-                        !pauseResult.Success)
-                    {
-                        PlayerPlaybackResult failureResult =
-                            ToPlayerResult(
-                                pauseResult);
-
-                        return await RecoverFromPlaybackFailureAsync(
-                            "역재생 위치 이동 후 일시정지 복원",
-                            failureResult,
-                            "REVERSE_SEEK_PAUSE_FAILED");
-                    }
+                    return PlayerPlaybackResult.Fail(
+                        "영상 이동 요청이 취소되었습니다.",
+                        "PLAYBACK_SEEK_CANCELLED",
+                        PlaybackFailureCategory.Cancelled);
                 }
 
-                _playbackClockStartedAtUtc =
-                    null;
+                int nvrNo =
+                    item.Key;
 
-                _pausedFromState =
-                    PlaybackState.Rewinding;
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
 
-                CurrentState =
-                    PlaybackState.Paused;
+                INvrPlaybackEngine engine;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
+                {
+                    bool restored =
+                        await RestorePlaybackGroupsAfterSeekFailureAsync(
+                            playbackTimeBeforeSeek,
+                            stateBeforeSeek);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+                    }
+                    else
+                    {
+                        RestoreServiceStateAfterSeek(
+                            playbackTimeBeforeSeek,
+                            stateBeforeSeek);
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "영상 이동에 필요한 NVR 그룹 또는 재생 엔진이 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_SEEK_GROUP_INVALID",
+                        PlaybackFailureCategory.System);
+                }
+
+                NvrResult seekResult =
+                    await engine.SeekAsync(
+                        groupSession,
+                        normalizedTargetTime,
+                        cancellationToken);
+
+                if (seekResult == null
+                    || !seekResult.Success)
+                {
+                    /*
+                     * 한 NVR 그룹이라도 실패하면
+                     * 성공한 그룹과 실패한 그룹 모두 원래 시각으로 되돌린다.
+                     *
+                     * 실패한 제조사 그룹은 일부 채널만 이동한 뒤
+                     * Paused 상태로 남았을 가능성이 있기 때문이다.
+                     */
+                    bool restored =
+                        await RestorePlaybackGroupsAfterSeekFailureAsync(
+                            playbackTimeBeforeSeek,
+                            stateBeforeSeek);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "일부 NVR 그룹의 영상 이동 실패 후 "
+                            + "기존 위치를 복원하지 못해 재생을 중지했습니다.",
+                            "PLAYBACK_SEEK_ROLLBACK_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    RestoreServiceStateAfterSeek(
+                        playbackTimeBeforeSeek,
+                        stateBeforeSeek);
+
+                    return seekResult == null
+                        ? PlayerPlaybackResult.Fail(
+                            "NVR 그룹 영상 이동 결과가 없습니다. "
+                            + "NvrNo="
+                            + nvrNo,
+                            "PLAYBACK_GROUP_SEEK_RESULT_EMPTY",
+                            PlaybackFailureCategory.System)
+                        : ToPlayerResult(
+                            seekResult);
+                }
+
+                if (seekResult.Status
+                        == NvrResultStatus.PartialSuccess
+                    && !string.IsNullOrWhiteSpace(
+                        seekResult.Message))
+                {
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": "
+                        + seekResult.Message);
+                }
             }
-            else
-            {
-                _playbackClockStartedAtUtc =
-                    DateTime.UtcNow;
 
-                CurrentState =
-                    PlaybackState.Rewinding;
+            /*
+             * 모든 제조사 그룹 이동이 성공한 뒤
+             * 공통 서비스의 영상재생시간 기준을 변경한다.
+             */
+            RestoreServiceStateAfterSeek(
+                normalizedTargetTime,
+                stateBeforeSeek);
+
+            if (warningMessages.Count > 0)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "영상재생시간을 "
+                    + normalizedTargetTime.ToString(
+                        "yyyy-MM-dd HH:mm:ss")
+                    + "으로 이동했지만 일부 경고가 발생했습니다."
+                    + Environment.NewLine
+                    + string.Join(
+                        Environment.NewLine,
+                        warningMessages.Select(
+                            warning =>
+                                "- "
+                                + warning)));
             }
 
             return PlayerPlaybackResult.Ok(
-                "역재생 위치를 이동했습니다. "
-                + targetTime.ToString("yyyy-MM-dd HH:mm:ss"));
+                "영상재생시간을 "
+                + normalizedTargetTime.ToString(
+                    "yyyy-MM-dd HH:mm:ss")
+                + "으로 이동했습니다.");
         }
 
         /// <summary>
@@ -4330,71 +5639,6 @@ namespace CamViewer.Services
             }
         }
 
-
-        /// <summary>
-        /// 세션별 시간 보정 초를 반환한다.
-        /// </summary>
-        private int GetSessionTimeOffset(int sessionKey)
-        {
-            int offsetSeconds;
-
-            return _sessionTimeOffsets.TryGetValue(
-                sessionKey,
-                out offsetSeconds)
-                ? offsetSeconds
-                : 0;
-        }
-
-        /// <summary>
-        /// Provider가 지원하는 경우 특정 세션의 실제 재생시간을 조회한다.
-        /// 지원하지 않거나 실패하면 null을 반환한다.
-        /// </summary>
-        private async Task<DateTime?> TryGetProviderPlaybackTimeAsync(
-            INvrPlaybackSession session,
-            CancellationToken cancellationToken)
-        {
-            if (session == null)
-            {
-                return null;
-            }
-
-            INvrProvider provider =
-                GetProviderByNvrNo(session.NvrNo);
-
-            if (provider == null)
-            {
-                return null;
-            }
-
-            ProviderCapabilities capabilities =
-                provider.GetCapabilities();
-
-            if (capabilities == null || !capabilities.CanGetPlaybackPosition)
-            {
-                return null;
-            }
-
-            INvrPlaybackPositionProvider positionProvider =
-                provider as INvrPlaybackPositionProvider;
-
-            if (positionProvider == null)
-            {
-                return null;
-            }
-
-            NvrResult<DateTime> result =
-                await positionProvider.GetPlaybackTimeAsync(
-                    session,
-                    cancellationToken);
-
-            if (result == null || !result.Success)
-            {
-                return null;
-            }
-
-            return result.Data;
-        }
-
         /// <summary>
         /// 화면 위치 값을 표시 문자열로 변환한다.
         /// </summary>
@@ -4416,455 +5660,1258 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 현재 재생 중인 세션에서 조회한 유효한 Provider 시간을 반환한다.
+        /// 그룹 재생 준비 또는 시작 도중 실패했을 때
+        /// 이미 생성된 제조사 재생 그룹을 모두 정리한다.
         ///
-        /// 현재 조회 범위를 벗어난 오래된 OSD 시간은 사용하지 않는다.
+        /// 한 그룹의 정리 실패가 다른 그룹 정리를 막지 않도록
+        /// 각 그룹을 독립적으로 처리한다.
         /// </summary>
-        private async Task<DateTime?> TryGetAnyProviderPlaybackTimeAsync(
-            CancellationToken cancellationToken)
+        private async Task CleanupPreparedPlaybackGroupsAsync(
+            IList<PreparedPlaybackGroup> preparedGroups)
         {
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
+            if (preparedGroups == null
+                || preparedGroups.Count == 0)
             {
-                int sessionKey = item.Key;
-
-                INvrPlaybackSession session = item.Value;
-
-                if (session == null)
-                {
-                    continue;
-                }
-
-                DateTime? providerTime =
-                    await TryGetProviderPlaybackTimeAsync(session, cancellationToken);
-
-                if (!providerTime.HasValue)
-                {
-                    continue;
-                }
-
-                int offsetSeconds = GetSessionTimeOffset(sessionKey);
-
-                DateTime normalizedTime;
-
-                /*
-                 * SDK 호출이 성공했더라도 현재 조회 구간을 벗어난 값은
-                 * 실제 재생시간으로 사용하지 않는다.
-                 */
-                if (!TryNormalizeProviderPlaybackTime(providerTime.Value, offsetSeconds, out normalizedTime))
-                {
-                    continue;
-                }
-
-                return normalizedTime;
+                return;
             }
 
-            return null;
-        }
-
-        /// <summary>
-        /// 하나의 재생 세션에서 조회한 실제 재생시간 정보이다.
-        /// </summary>
-        private sealed class PlaybackTimeSnapshot
-        {
-            /// <summary>
-            /// 세션 Dictionary Key.
-            /// </summary>
-            public int SessionKey { get; set; }
-
-            /// <summary>
-            /// 재생 세션.
-            /// </summary>
-            public INvrPlaybackSession Session { get; set; }
-
-            /// <summary>
-            /// 세션을 처리하는 Provider.
-            /// </summary>
-            public INvrProvider Provider { get; set; }
-
-            /// <summary>
-            /// 채널별 시간 보정 초.
-            /// </summary>
-            public int OffsetSeconds { get; set; }
-
-            /// <summary>
-            /// Provider에서 조회한 실제 NVR 재생시간.
-            /// </summary>
-            public DateTime ProviderTime { get; set; }
-
-            /// <summary>
-            /// 화면 기준으로 보정된 재생시간.
-            /// ProviderTime - OffsetSeconds.
-            /// </summary>
-            public DateTime NormalizedTime { get; set; }
-        }
-
-        /// <summary>
-        /// 현재 생성된 모든 재생 세션에서 정상적인 Provider 시간이
-        /// 확인될 때까지 기다린다.
-        ///
-        /// 고정 3초 대기가 아니라 최대 3초 대기이며,
-        /// 모든 채널이 준비되면 즉시 종료한다.
-        /// </summary>
-        private async Task<bool> WaitForPlaybackReadyAsync(
-            CancellationToken cancellationToken)
-        {
-            const int maximumWaitMilliseconds =
-                3000;
-
-            const int checkIntervalMilliseconds =
-                200;
-
-            if (_sessions.Count == 0
-                || _currentRequest == null)
+            /*
+             * 가장 마지막에 생성된 그룹부터 역순으로 정리한다.
+             */
+            for (int index = preparedGroups.Count - 1;
+                index >= 0;
+                index--)
             {
-                return false;
-            }
+                PreparedPlaybackGroup preparedGroup =
+                    preparedGroups[index];
 
-            int expectedSessionCount =
-                _sessions.Count;
-
-            Stopwatch stopwatch =
-                Stopwatch.StartNew();
-
-            while (stopwatch.ElapsedMilliseconds
-                < maximumWaitMilliseconds)
-            {
-                if (cancellationToken.IsCancellationRequested)
+                if (preparedGroup == null
+                    || preparedGroup.Engine == null
+                    || preparedGroup.Session == null)
                 {
-                    return false;
+                    continue;
                 }
-
-                /*
-                 * GetPlaybackTimeSnapshotsAsync에서
-                 * 조회 구간을 벗어난 비정상 시간은 이미 제외된다.
-                 *
-                 * 따라서 반환된 snapshot 개수만 확인하면 된다.
-                 */
-                List<PlaybackTimeSnapshot> snapshots =
-                    await GetPlaybackTimeSnapshotsAsync(
-                        cancellationToken);
-
-                /*
-                 * 현재 생성된 모든 세션의 정상 시간이 확인되면
-                 * 최대 3초를 기다리지 않고 즉시 종료한다.
-                 */
-                if (snapshots != null
-                    && snapshots.Count
-                        >= expectedSessionCount)
-                {
-                    return true;
-                }
-
-                int remainingMilliseconds =
-                    maximumWaitMilliseconds
-                    - Convert.ToInt32(
-                        stopwatch.ElapsedMilliseconds);
-
-                if (remainingMilliseconds <= 0)
-                {
-                    break;
-                }
-
-                int delayMilliseconds =
-                    Math.Min(
-                        checkIntervalMilliseconds,
-                        remainingMilliseconds);
 
                 try
                 {
-                    await Task.Delay(
-                        delayMilliseconds,
-                        cancellationToken);
+                    /*
+                     * 그룹 Stop은 반드시 정리가 완료되어야 하므로
+                     * 호출자가 전달한 취소 토큰 대신 None을 사용한다.
+                     */
+                    await preparedGroup.Engine.StopAsync(
+                        preparedGroup.Session,
+                        CancellationToken.None);
                 }
-                catch (OperationCanceledException)
+                catch
                 {
-                    return false;
+                    /*
+                     * 실패 복구 과정의 예외가
+                     * 원래 Open 또는 Start 실패 결과를 덮어쓰지 않게 한다.
+                     */
                 }
-            }
 
-            return false;
+                /*
+                 * StopAsync 구현에서 그룹 내부의 채널 세션까지
+                 * 정리하므로 여기서 그룹 세션을 별도로 Dispose하지 않는다.
+                 *
+                 * INvrPlaybackGroupSession은 IDisposable을 요구하지 않는다.
+                 */
+            }
         }
 
         /// <summary>
-        /// 현재 재생 중인 모든 세션에서 Provider 실제 재생시간을 조회한다.
-        /// 
-        /// Provider가 실제 재생시간 조회를 지원하지 않는 세션은 제외한다.
+        /// NVR 재생 그룹을 준비하는 동안 임시로 보관하는 정보이다.
+        ///
+        /// 모든 NVR 그룹이 정상적으로 준비된 경우에만
+        /// _playbackGroupSessions에 최종 반영한다.
+        ///
+        /// 준비 도중 하나라도 실패하면
+        /// CleanupPreparedPlaybackGroupsAsync에서 역순으로 정리한다.
         /// </summary>
-        private async Task<List<PlaybackTimeSnapshot>> GetPlaybackTimeSnapshotsAsync(
-            CancellationToken cancellationToken)
+        private sealed class PreparedPlaybackGroup
         {
-            var snapshots = new List<PlaybackTimeSnapshot>();
+            /// <summary>
+            /// 그룹이 연결된 NVR 번호.
+            /// </summary>
+            public int NvrNo { get; set; }
 
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions)
+            /// <summary>
+            /// 그룹을 생성하고 제어하는 제조사 재생 엔진.
+            /// </summary>
+            public INvrPlaybackEngine Engine { get; set; }
+
+            /// <summary>
+            /// OpenAsync로 준비된 제조사 재생 그룹 세션.
+            /// </summary>
+            public INvrPlaybackGroupSession Session { get; set; }
+        }
+
+
+
+        /// <summary>
+        /// 현재 실행 중인 제조사별 재생 그룹만 중지하고 정리한다.
+        ///
+        /// Provider 로그인과 재생 엔진은 유지한다.
+        /// 따라서 재조회 시 Provider 초기화와 로그인을 다시 하지 않고
+        /// 기존 재생 엔진을 재사용할 수 있다.
+        ///
+        /// 처리 순서:
+        /// 1. 서비스 영상재생시간 고정
+        /// 2. 논리 재생 시계 정지
+        /// 3. NVR별 그룹 StopAsync 실행
+        /// 4. 그룹 세션 Dictionary 초기화
+        ///
+        /// 일부 그룹 중지에 실패하더라도
+        /// 다른 그룹의 정리는 계속 수행한다.
+        /// </summary>
+        private async Task<PlayerPlaybackResult>
+            StopCurrentPlaybackGroupsOnlyAsync()
+        {
+            /*
+             * 정리할 그룹이 없으면 중복 Stop 요청으로 보고
+             * 정상 성공 처리한다.
+             */
+            if (_playbackGroupSessions.Count == 0)
             {
-                int sessionKey = item.Key;
-                INvrPlaybackSession session = item.Value;
-                if (session == null)
+                _playbackClockStartedAtUtc =
+                    null;
+
+                CurrentState =
+                    PlaybackState.Stopped;
+
+                return PlayerPlaybackResult.Ok(
+                    "정리할 NVR 재생 그룹이 없습니다.");
+            }
+
+            var cleanupWarnings =
+                new List<string>();
+
+            /*
+             * Dictionary를 반복하는 중에 원본 컬렉션을 변경하지 않도록
+             * 현재 그룹 목록의 복사본을 생성한다.
+             */
+            List<KeyValuePair<int, INvrPlaybackGroupSession>>
+                groupItems =
+                    _playbackGroupSessions
+                        .ToList();
+
+            /*
+             * 실제 그룹 중지 처리 시간이 걸리더라도
+             * 서비스 영상재생시간이 계속 증가하거나 감소하지 않도록
+             * 먼저 현재 시간을 고정한다.
+             */
+            if (_currentRequest != null)
+            {
+                _currentPlaybackTime =
+                    ClampPlaybackTime(
+                        GetEstimatedPlaybackTime());
+            }
+
+            _playbackClockStartedAtUtc =
+                null;
+
+            CurrentState =
+                PlaybackState.Stopped;
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in groupItems)
+            {
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null)
+                {
+                    cleanupWarnings.Add(
+                        "NVR 재생 그룹 세션 정보가 없습니다. "
+                        + "NvrNo="
+                        + nvrNo);
+
+                    continue;
+                }
+
+                INvrPlaybackEngine engine;
+
+                if (!_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
+                {
+                    cleanupWarnings.Add(
+                        "NVR 재생 그룹을 중지할 재생 엔진이 없습니다. "
+                        + "NvrNo="
+                        + nvrNo);
+
+                    continue;
+                }
+
+                try
+                {
+                    /*
+                     * 그룹 Stop은 리소스 정리 명령이므로
+                     * 사용자 취소 여부와 관계없이 완료되어야 한다.
+                     */
+                    NvrResult stopResult =
+                        await engine.StopAsync(
+                            groupSession,
+                            CancellationToken.None);
+
+                    if (stopResult == null)
+                    {
+                        cleanupWarnings.Add(
+                            "NVR 재생 그룹 중지 결과가 없습니다. "
+                            + "NvrNo="
+                            + nvrNo);
+                    }
+                    else if (!stopResult.Success)
+                    {
+                        cleanupWarnings.Add(
+                            "NVR 재생 그룹 중지에 실패했습니다. "
+                            + "NvrNo="
+                            + nvrNo
+                            + ", Status="
+                            + stopResult.Status
+                            + ", Message="
+                            + (
+                                string.IsNullOrWhiteSpace(
+                                    stopResult.Message)
+                                    ? "-"
+                                    : stopResult.Message
+                            ));
+                    }
+                    else if (
+                        stopResult.Status
+                        == NvrResultStatus.PartialSuccess)
+                    {
+                        /*
+                         * Stop 자체는 완료되었지만
+                         * 제조사 엔진 내부에서 일부 정리 경고가 발생한 경우다.
+                         */
+                        cleanupWarnings.Add(
+                            "NVR 재생 그룹은 중지되었지만 "
+                            + "일부 정리 경고가 발생했습니다. "
+                            + "NvrNo="
+                            + nvrNo
+                            + ", Message="
+                            + stopResult.Message);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    /*
+                     * 한 NVR 그룹의 정리 예외 때문에
+                     * 다른 NVR 그룹의 정리가 중단되면 안 된다.
+                     */
+                    cleanupWarnings.Add(
+                        "NVR 재생 그룹 중지 중 예외가 발생했습니다. "
+                        + "NvrNo="
+                        + nvrNo
+                        + ", Error="
+                        + ex.Message);
+                }
+            }
+
+            /*
+             * 제조사 엔진 Stop 성공 여부와 관계없이
+             * 공통 서비스가 보유한 그룹 세션 참조는 제거한다.
+             *
+             * 각 제조사 엔진은 StopAsync 내부에서
+             * 실제 채널 세션과 네이티브 핸들을 정리해야 한다.
+             */
+            _playbackGroupSessions.Clear();
+
+            /*
+             * _playbackEngines는 제거하지 않는다.
+             *
+             * 재생 엔진은 로그인된 Provider에 연결되어 있으므로
+             * 다음 조회에서 다시 사용할 수 있다.
+             */
+            if (cleanupWarnings.Count > 0)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "NVR 재생 그룹은 정리되었지만 "
+                    + "일부 경고가 발생했습니다."
+                    + Environment.NewLine
+                    + string.Join(
+                        Environment.NewLine,
+                        cleanupWarnings.Select(
+                            warning =>
+                                "- "
+                                + warning)));
+            }
+
+            return PlayerPlaybackResult.Ok(
+                "현재 NVR 재생 그룹을 정리했습니다.");
+        }
+
+        /// <summary>
+        /// UI 영상재생시간에 사용할 기준 NVR 그룹의
+        /// 실제 공통 재생시간을 조회한다.
+        ///
+        /// 좌측 화면이 속한 NVR 그룹을 우선 사용하고,
+        /// 찾을 수 없으면 NVR 번호가 가장 낮은 그룹을 사용한다.
+        ///
+        /// 실제 시간 조회에 실패하면 null을 반환하며,
+        /// 호출부는 기존 추정 시간을 사용할 수 있다.
+        /// </summary>
+        private async Task<DateTime?>
+            GetReferencePlaybackGroupTimeAsync(
+                CancellationToken cancellationToken)
+        {
+            if (_playbackGroupSessions.Count == 0)
+            {
+                return null;
+            }
+
+            int? referenceNvrNo =
+                null;
+
+            /*
+             * 좌측 화면이 속한 NVR을
+             * 영상재생시간 기준 그룹으로 우선 선택한다.
+             */
+            if (_currentRequest != null
+                && _currentRequest.Channels != null)
+            {
+                PlayerChannelTarget leftChannel =
+                    _currentRequest.Channels
+                        .FirstOrDefault(
+                            channel =>
+                                channel != null
+                                && channel.ScreenPosition
+                                    == ScreenPosition.Left);
+
+                if (leftChannel != null)
+                {
+                    referenceNvrNo =
+                        leftChannel.NvrNo;
+                }
+            }
+
+            /*
+             * 좌측 채널 그룹이 없으면
+             * 등록된 첫 번째 NVR 그룹을 사용한다.
+             */
+            if (!referenceNvrNo.HasValue
+                || !_playbackGroupSessions.ContainsKey(
+                    referenceNvrNo.Value))
+            {
+                referenceNvrNo =
+                    _playbackGroupSessions.Keys
+                        .OrderBy(nvrNo => nvrNo)
+                        .Select(nvrNo => (int?)nvrNo)
+                        .FirstOrDefault();
+            }
+
+            if (!referenceNvrNo.HasValue)
+            {
+                return null;
+            }
+
+            INvrPlaybackGroupSession groupSession;
+
+            if (!_playbackGroupSessions.TryGetValue(
+                    referenceNvrNo.Value,
+                    out groupSession)
+                || groupSession == null)
+            {
+                return null;
+            }
+
+            INvrPlaybackEngine engine;
+
+            if (!_playbackEngines.TryGetValue(
+                    referenceNvrNo.Value,
+                    out engine)
+                || engine == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                NvrResult<NvrPlaybackGroupStatus> statusResult =
+                    await engine.GetStatusAsync(
+                        groupSession,
+                        cancellationToken);
+
+                /*
+                 * PartialSuccess도 Data에 마지막 정상 시간이 포함될 수 있으므로
+                 * Success 값과 Data 존재 여부를 기준으로 판단한다.
+                 */
+                if (statusResult == null
+                    || !statusResult.Success
+                    || statusResult.Data == null
+                    || !statusResult.Data.CurrentPlaybackTime.HasValue)
+                {
+                    return null;
+                }
+
+                return ClampPlaybackTime(
+                    statusResult.Data.CurrentPlaybackTime.Value);
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            catch
+            {
+                /*
+                 * 상태 조회 실패가 Pause 또는 Resume 전체를
+                 * 즉시 실패시키지는 않는다.
+                 *
+                 * 호출부에서 서비스 추정 시간을 사용한다.
+                 */
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 여러 NVR 그룹 Pause 도중 실패했을 때
+        /// 이미 일시정지된 그룹을 다시 재개한다.
+        /// </summary>
+        private async Task<bool>
+            ResumePausedPlaybackGroupsAsync(
+                IList<PreparedPlaybackGroup> pausedGroups)
+        {
+            if (pausedGroups == null
+                || pausedGroups.Count == 0)
+            {
+                return true;
+            }
+
+            bool allSucceeded =
+                true;
+
+            for (int index = pausedGroups.Count - 1;
+                index >= 0;
+                index--)
+            {
+                PreparedPlaybackGroup group =
+                    pausedGroups[index];
+
+                if (group == null
+                    || group.Engine == null
+                    || group.Session == null)
+                {
+                    allSucceeded =
+                        false;
+
+                    continue;
+                }
+
+                try
+                {
+                    NvrResult result =
+                        await group.Engine.ResumeAsync(
+                            group.Session,
+                            CancellationToken.None);
+
+                    if (result == null
+                        || !result.Success)
+                    {
+                        allSucceeded =
+                            false;
+                    }
+                }
+                catch
+                {
+                    allSucceeded =
+                        false;
+                }
+            }
+
+            return allSucceeded;
+        }
+
+        /// <summary>
+        /// 여러 NVR 그룹 Resume 도중 실패했을 때
+        /// 이미 재개된 그룹을 다시 일시정지한다.
+        /// </summary>
+        private async Task<bool>
+            PauseResumedPlaybackGroupsAsync(
+                IList<PreparedPlaybackGroup> resumedGroups)
+        {
+            if (resumedGroups == null
+                || resumedGroups.Count == 0)
+            {
+                return true;
+            }
+
+            bool allSucceeded =
+                true;
+
+            for (int index = resumedGroups.Count - 1;
+                index >= 0;
+                index--)
+            {
+                PreparedPlaybackGroup group =
+                    resumedGroups[index];
+
+                if (group == null
+                    || group.Engine == null
+                    || group.Session == null)
+                {
+                    allSucceeded =
+                        false;
+
+                    continue;
+                }
+
+                try
+                {
+                    NvrResult result =
+                        await group.Engine.PauseAsync(
+                            group.Session,
+                            CancellationToken.None);
+
+                    if (result == null
+                        || !result.Success)
+                    {
+                        allSucceeded =
+                            false;
+                    }
+                }
+                catch
+                {
+                    allSucceeded =
+                        false;
+                }
+            }
+
+            return allSucceeded;
+        }
+
+        /// <summary>
+        /// 여러 NVR 그룹 중 일부 Seek가 실패했을 때
+        /// 모든 그룹을 Seek 이전의 공통 영상재생시간과 상태로 복원한다.
+        /// </summary>
+        private async Task<bool>
+            RestorePlaybackGroupsAfterSeekFailureAsync(
+                DateTime restoreTime,
+                PlaybackState originalState)
+        {
+            bool allSucceeded =
+                true;
+
+            /*
+             * 실패한 그룹도 일부 채널이 이미 이동했을 수 있으므로
+             * 등록된 모든 그룹에 원래 시각 Seek를 다시 실행한다.
+             */
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                INvrPlaybackEngine engine;
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        item.Key,
+                        out engine)
+                    || engine == null)
+                {
+                    allSucceeded =
+                        false;
+
+                    continue;
+                }
+
+                try
+                {
+                    NvrResult seekResult =
+                        await engine.SeekAsync(
+                            groupSession,
+                            restoreTime,
+                            CancellationToken.None);
+
+                    if (seekResult == null
+                        || !seekResult.Success)
+                    {
+                        allSucceeded =
+                            false;
+                    }
+                }
+                catch
+                {
+                    allSucceeded =
+                        false;
+                }
+            }
+
+            /*
+             * Seek 실패 시 제조사 엔진은 안전을 위해
+             * Paused 상태로 남길 수 있다.
+             *
+             * 원래 재생 중이었다면 모든 그룹을 다시 Resume하고,
+             * 원래 Paused 상태였다면 모든 그룹을 Pause로 통일한다.
+             */
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                INvrPlaybackEngine engine;
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        item.Key,
+                        out engine)
+                    || engine == null)
+                {
+                    allSucceeded =
+                        false;
+
+                    continue;
+                }
+
+                try
+                {
+                    NvrResult stateResult =
+                        originalState == PlaybackState.Playing
+                            ? await engine.ResumeAsync(
+                                groupSession,
+                                CancellationToken.None)
+                            : await engine.PauseAsync(
+                                groupSession,
+                                CancellationToken.None);
+
+                    if (stateResult == null
+                        || !stateResult.Success)
+                    {
+                        allSucceeded =
+                            false;
+                    }
+                }
+                catch
+                {
+                    allSucceeded =
+                        false;
+                }
+            }
+
+            return allSucceeded;
+        }
+
+        /// <summary>
+        /// Seek 완료 또는 복원 후
+        /// 공통 서비스의 영상재생시간과 논리 상태를 갱신한다.
+        /// </summary>
+        private void RestoreServiceStateAfterSeek(
+            DateTime playbackTime,
+            PlaybackState state)
+        {
+            _currentPlaybackTime =
+                ClampPlaybackTime(
+                    playbackTime);
+
+            CurrentState =
+                state;
+
+            _playbackClockStartedAtUtc =
+                state == PlaybackState.Playing
+                    ? (DateTime?)DateTime.UtcNow
+                    : null;
+
+            if (state == PlaybackState.Paused)
+            {
+                _pausedFromState =
+                    PlaybackState.Playing;
+            }
+        }
+
+        /// <summary>
+        /// 현재 실행 중인 모든 NVR 재생 그룹의 방향을 변경한다.
+        ///
+        /// 제조사 엔진은 다음 작업을 내부적으로 처리한다.
+        /// - 현재 실제 영상재생시간 확인
+        /// - 필요 시 기존 재생 세션 일시정지
+        /// - 새 방향 세션 생성
+        /// - 기존 속도 재적용
+        /// - 기존 Playing 또는 Paused 상태 복원
+        ///
+        /// 여러 NVR 그룹 중 하나라도 실패하면
+        /// 모든 그룹을 이전 방향과 이전 상태로 복원한다.
+        /// </summary>
+        private async Task<PlayerPlaybackResult>
+            ChangePlaybackGroupDirectionAsync(
+                NvrPlaybackDirection targetDirection,
+                CancellationToken cancellationToken)
+        {
+            PlaybackState originalState =
+                CurrentState;
+
+            if (originalState != PlaybackState.Playing
+                && originalState != PlaybackState.Rewinding
+                && originalState != PlaybackState.Paused)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 상태에서는 방향을 변경할 수 없습니다. "
+                    + "State="
+                    + originalState,
+                    "PLAYBACK_DIRECTION_INVALID_STATE",
+                    PlaybackFailureCategory.System);
+            }
+
+            NvrPlaybackDirection previousDirection =
+                originalState == PlaybackState.Rewinding
+                || (
+                    originalState == PlaybackState.Paused
+                    && _pausedFromState
+                        == PlaybackState.Rewinding
+                )
+                    ? NvrPlaybackDirection.Reverse
+                    : NvrPlaybackDirection.Forward;
+
+            if (previousDirection == targetDirection)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "이미 요청한 재생 방향으로 설정되어 있습니다.");
+            }
+
+            /*
+             * 공통 서비스의 영상재생시간 기준을 갱신하기 위해
+             * 방향 변경 직전 실제 OSD 시간을 먼저 확인한다.
+             *
+             * 각 제조사 엔진도 내부에서 실제 시간을 다시 확인하므로
+             * 이 값은 서비스 UI 시계 갱신 용도로 사용한다.
+             */
+            DateTime? actualPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생 방향 변경 요청이 취소되었습니다.",
+                    "PLAYBACK_DIRECTION_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
+
+            DateTime directionChangeTime =
+                actualPlaybackTime.HasValue
+                    ? actualPlaybackTime.Value
+                    : GetEstimatedPlaybackTime();
+
+            directionChangeTime =
+                ClampPlaybackTime(
+                    directionChangeTime);
+
+            if (targetDirection
+                    == NvrPlaybackDirection.Reverse
+                && directionChangeTime
+                    <= _currentRequest.PlayStartTime)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "조회 시작시간보다 이전으로 역재생할 수 없습니다.",
+                    "REWIND_BEFORE_START",
+                    PlaybackFailureCategory.NotSupported);
+            }
+
+            if (targetDirection
+                    == NvrPlaybackDirection.Forward
+                && directionChangeTime
+                    >= _currentRequest.PlayEndTime)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "조회 종료시간 이후로 정방향 재생을 시작할 수 없습니다.",
+                    "FORWARD_AFTER_END",
+                    PlaybackFailureCategory.NotSupported);
+            }
+
+            var warningMessages =
+                new List<string>();
+
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    bool restored =
+                        await RestorePlaybackGroupsAfterDirectionFailureAsync(
+                            previousDirection,
+                            originalState);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "방향 변경 취소 후 기존 방향을 복원하지 못해 "
+                            + "재생을 중지했습니다.",
+                            "PLAYBACK_DIRECTION_ROLLBACK_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    ApplyServiceDirectionState(
+                        directionChangeTime,
+                        originalState,
+                        previousDirection);
+
+                    return PlayerPlaybackResult.Fail(
+                        "재생 방향 변경 요청이 취소되었습니다.",
+                        "PLAYBACK_DIRECTION_CANCELLED",
+                        PlaybackFailureCategory.Cancelled);
+                }
+
+                int nvrNo =
+                    item.Key;
+
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                INvrPlaybackEngine engine;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        nvrNo,
+                        out engine)
+                    || engine == null)
+                {
+                    bool restored =
+                        await RestorePlaybackGroupsAfterDirectionFailureAsync(
+                            previousDirection,
+                            originalState);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+                    }
+                    else
+                    {
+                        ApplyServiceDirectionState(
+                            directionChangeTime,
+                            originalState,
+                            previousDirection);
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "방향 변경에 필요한 NVR 그룹 또는 엔진이 없습니다. "
+                        + "NvrNo="
+                        + nvrNo,
+                        "PLAYBACK_DIRECTION_GROUP_INVALID",
+                        PlaybackFailureCategory.System);
+                }
+
+                NvrResult directionResult =
+                    await engine.SetDirectionAsync(
+                        groupSession,
+                        targetDirection,
+                        cancellationToken);
+
+                if (directionResult == null
+                    || !directionResult.Success)
+                {
+                    /*
+                     * 실패한 제조사 엔진도 세션 전환 도중
+                     * Paused 또는 새 방향 상태가 되었을 수 있다.
+                     *
+                     * 따라서 성공한 그룹만이 아니라
+                     * 현재 등록된 전체 그룹의 방향을 복원한다.
+                     */
+                    bool restored =
+                        await RestorePlaybackGroupsAfterDirectionFailureAsync(
+                            previousDirection,
+                            originalState);
+
+                    if (!restored)
+                    {
+                        await StopCurrentPlaybackGroupsOnlyAsync();
+
+                        return PlayerPlaybackResult.Fail(
+                            "일부 NVR 그룹의 방향 변경 실패 후 "
+                            + "기존 상태를 복원하지 못해 재생을 중지했습니다.",
+                            "PLAYBACK_DIRECTION_ROLLBACK_FAILED",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    ApplyServiceDirectionState(
+                        directionChangeTime,
+                        originalState,
+                        previousDirection);
+
+                    return directionResult == null
+                        ? PlayerPlaybackResult.Fail(
+                            "NVR 재생 방향 변경 결과가 없습니다. "
+                            + "NvrNo="
+                            + nvrNo,
+                            "PLAYBACK_DIRECTION_RESULT_EMPTY",
+                            PlaybackFailureCategory.System)
+                        : ToPlayerResult(
+                            directionResult);
+                }
+
+                if (directionResult.Status
+                        == NvrResultStatus.PartialSuccess
+                    && !string.IsNullOrWhiteSpace(
+                        directionResult.Message))
+                {
+                    warningMessages.Add(
+                        "NvrNo="
+                        + nvrNo
+                        + ": "
+                        + directionResult.Message);
+                }
+            }
+
+            /*
+             * 방향 전환 후 기준 그룹의 실제 시간을 다시 확인한다.
+             *
+             * 새 세션 생성 과정에서 실제 위치가 약간 달라졌을 수 있으므로
+             * 가능하면 변경 후 OSD 시간을 서비스 기준으로 사용한다.
+             */
+            DateTime? changedPlaybackTime =
+                await GetReferencePlaybackGroupTimeAsync(
+                    CancellationToken.None);
+
+            DateTime finalPlaybackTime =
+                changedPlaybackTime.HasValue
+                    ? changedPlaybackTime.Value
+                    : directionChangeTime;
+
+            ApplyServiceDirectionState(
+                finalPlaybackTime,
+                originalState,
+                targetDirection);
+
+            string directionText =
+                targetDirection
+                    == NvrPlaybackDirection.Reverse
+                        ? "역방향"
+                        : "정방향";
+
+            string stateText;
+
+            if (originalState
+                == PlaybackState.Paused)
+            {
+                stateText =
+                    "일시정지 상태를 유지했습니다.";
+            }
+            else
+            {
+                stateText =
+                    targetDirection
+                        == NvrPlaybackDirection.Reverse
+                            ? "역재생을 시작했습니다."
+                            : "정방향 재생을 시작했습니다.";
+            }
+
+            if (warningMessages.Count > 0)
+            {
+                return PlayerPlaybackResult.Ok(
+                    "재생 방향을 "
+                    + directionText
+                    + "으로 변경하고 "
+                    + stateText
+                    + Environment.NewLine
+                    + "일부 경고가 발생했습니다."
+                    + Environment.NewLine
+                    + string.Join(
+                        Environment.NewLine,
+                        warningMessages.Select(
+                            warning =>
+                                "- "
+                                + warning)));
+            }
+
+            return PlayerPlaybackResult.Ok(
+                "재생 방향을 "
+                + directionText
+                + "으로 변경하고 "
+                + stateText);
+        }
+
+        /// <summary>
+        /// 여러 NVR 그룹의 방향 전환 중 실패했을 때
+        /// 이전 방향과 이전 재생 상태를 복원한다.
+        /// </summary>
+        private async Task<bool>
+            RestorePlaybackGroupsAfterDirectionFailureAsync(
+                NvrPlaybackDirection previousDirection,
+                PlaybackState originalState)
+        {
+            bool allSucceeded =
+                true;
+
+            /*
+             * 우선 모든 그룹을 이전 방향으로 되돌린다.
+             *
+             * 이미 이전 방향인 그룹은 제조사 엔진에서
+             * 중복 요청으로 성공 처리한다.
+             */
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                INvrPlaybackEngine engine;
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        item.Key,
+                        out engine)
+                    || engine == null)
+                {
+                    allSucceeded =
+                        false;
+
+                    continue;
+                }
+
+                try
+                {
+                    NvrResult directionResult =
+                        await engine.SetDirectionAsync(
+                            groupSession,
+                            previousDirection,
+                            CancellationToken.None);
+
+                    if (directionResult == null
+                        || !directionResult.Success)
+                    {
+                        allSucceeded =
+                            false;
+                    }
+                }
+                catch
+                {
+                    allSucceeded =
+                        false;
+                }
+            }
+
+            /*
+             * 방향 복원 도중 일부 제조사 그룹이 안전을 위해
+             * Paused로 남을 수 있으므로 원래 상태도 다시 맞춘다.
+             */
+            foreach (
+                KeyValuePair<int, INvrPlaybackGroupSession>
+                item in _playbackGroupSessions
+                    .OrderBy(pair => pair.Key))
+            {
+                INvrPlaybackEngine engine;
+                INvrPlaybackGroupSession groupSession =
+                    item.Value;
+
+                if (groupSession == null
+                    || !_playbackEngines.TryGetValue(
+                        item.Key,
+                        out engine)
+                    || engine == null)
+                {
+                    allSucceeded =
+                        false;
+
+                    continue;
+                }
+
+                try
+                {
+                    NvrResult stateResult;
+
+                    if (originalState
+                        == PlaybackState.Paused)
+                    {
+                        stateResult =
+                            await engine.PauseAsync(
+                                groupSession,
+                                CancellationToken.None);
+                    }
+                    else
+                    {
+                        stateResult =
+                            await engine.ResumeAsync(
+                                groupSession,
+                                CancellationToken.None);
+                    }
+
+                    if (stateResult == null
+                        || !stateResult.Success)
+                    {
+                        allSucceeded =
+                            false;
+                    }
+                }
+                catch
+                {
+                    allSucceeded =
+                        false;
+                }
+            }
+
+            return allSucceeded;
+        }
+
+        /// <summary>
+        /// 방향 전환 또는 방향 복원 후
+        /// 공통 서비스의 영상재생시간과 방향 상태를 갱신한다.
+        /// </summary>
+        private void ApplyServiceDirectionState(
+            DateTime playbackTime,
+            PlaybackState originalState,
+            NvrPlaybackDirection direction)
+        {
+            _currentPlaybackTime =
+                ClampPlaybackTime(
+                    playbackTime);
+
+            if (originalState
+                == PlaybackState.Paused)
+            {
+                /*
+                 * 일시정지 상태에서 방향을 변경해도
+                 * 실제 재생은 시작하지 않는다.
+                 *
+                 * 다음 ResumeAsync가 어느 방향으로 재개할지
+                 * _pausedFromState에 저장한다.
+                 */
+                CurrentState =
+                    PlaybackState.Paused;
+
+                _pausedFromState =
+                    direction == NvrPlaybackDirection.Reverse
+                        ? PlaybackState.Rewinding
+                        : PlaybackState.Playing;
+
+                _playbackClockStartedAtUtc =
+                    null;
+
+                return;
+            }
+
+            if (direction
+                == NvrPlaybackDirection.Reverse)
+            {
+                CurrentState =
+                    PlaybackState.Rewinding;
+
+                _pausedFromState =
+                    PlaybackState.Rewinding;
+            }
+            else
+            {
+                CurrentState =
+                    PlaybackState.Playing;
+
+                _pausedFromState =
+                    PlaybackState.Playing;
+            }
+
+            _playbackClockStartedAtUtc =
+                DateTime.UtcNow;
+        }
+
+
+        /// <summary>
+        /// StopAsync 자체에서 예상하지 못한 예외가 발생했을 때
+        /// 서비스가 보유한 로컬 재생 리소스를 강제로 정리한다.
+        ///
+        /// 주의:
+        /// - 정상 정리 경로는 반드시 StopAsync를 사용한다.
+        /// - 이 메서드는 비동기 Stop 또는 Logout을 수행하지 않는다.
+        /// - 이미 일부 리소스가 해제됐을 수 있으므로
+        ///   모든 Dispose 호출은 개별적으로 예외를 무시한다.
+        /// - 사용자가 선택한 재생속도는 초기화하지 않는다.
+        /// </summary>
+        private void ForceReleasePlaybackResources()
+        {
+            /*
+             * 그룹 재생 세션 Dictionary를 먼저 비운다.
+             *
+             * INvrPlaybackGroupSession은 IDisposable을 강제하지 않으므로
+             * 실제 네이티브 정리는 엔진 또는 Provider Dispose에 맡긴다.
+             */
+            _playbackGroupSessions.Clear();
+
+            /*
+             * 제조사별 재생 엔진이 IDisposable을 구현한 경우 해제한다.
+             */
+            foreach (INvrPlaybackEngine engine
+                in _playbackEngines.Values.ToList())
+            {
+                if (engine == null)
                 {
                     continue;
                 }
-                INvrProvider provider =
-                    GetProviderByNvrNo(session.NvrNo);
 
+                IDisposable disposableEngine =
+                    engine as IDisposable;
+
+                if (disposableEngine == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    disposableEngine.Dispose();
+                }
+                catch
+                {
+                    /*
+                     * 비상 정리 중 하나의 엔진 Dispose 실패가
+                     * 다른 리소스 정리를 막지 않게 한다.
+                     */
+                }
+            }
+
+            _playbackEngines.Clear();
+
+            /*
+             * Provider를 마지막으로 해제한다.
+             *
+             * StopAsync 실패 후의 비상 경로이므로
+             * 비동기 Logout은 실행하지 않고 Dispose만 시도한다.
+             */
+            foreach (INvrProvider provider
+                in _providers.Values.ToList())
+            {
                 if (provider == null)
                 {
                     continue;
                 }
 
-                ProviderCapabilities capabilities =
-                    provider.GetCapabilities();
-
-                if (capabilities == null || !capabilities.CanGetPlaybackPosition)
+                try
                 {
-                    continue;
+                    provider.Dispose();
                 }
-
-                INvrPlaybackPositionProvider positionProvider =
-                    provider as INvrPlaybackPositionProvider;
-
-                if (positionProvider == null)
+                catch
                 {
-                    continue;
-                }
-
-                NvrResult<DateTime> timeResult =
-                    await positionProvider.GetPlaybackTimeAsync(
-                        session,
-                        cancellationToken);
-
-                if (timeResult == null || !timeResult.Success)
-                {
-                    continue;
-                }
-
-                int offsetSeconds =
-                    GetSessionTimeOffset(
-                        sessionKey);
-
-                DateTime normalizedTime;
-
-                /*
-                 * SDK 호출 자체는 성공했더라도
-                 * 현재 조회 구간에서 크게 벗어난 값은 동기화 계산에 사용하지 않는다.
-                 */
-                if (!TryNormalizeProviderPlaybackTime(
-                    timeResult.Data,
-                    offsetSeconds,
-                    out normalizedTime))
-                {
-                    continue;
-                }
-
-                snapshots.Add(
-                    new PlaybackTimeSnapshot
-                    {
-                        SessionKey = sessionKey,
-                        Session = session,
-                        Provider = provider,
-                        OffsetSeconds = offsetSeconds,
-                        ProviderTime = timeResult.Data,
-                        NormalizedTime = normalizedTime
-                    });
-            }
-
-            return snapshots;
-        }
-
-        /// <summary>
-        /// 재생 명령 실패 후 현재 재생 세션과 Provider를 모두 정리하고
-        /// 사용자에게 반환할 실패 결과를 생성한다.
-        ///
-        /// 처리 순서:
-        /// 1. 원래 실패 메시지와 오류 코드를 보관한다.
-        /// 2. 취소 여부와 관계없이 StopAsync를 실행한다.
-        /// 3. StopAsync 자체가 예외를 발생시키면 논리적인 재생 상태를 강제로 초기화한다.
-        /// 4. 원래 오류 정보와 정리 오류 정보를 함께 반환한다.
-        /// </summary>
-        /// <param name="operationName">
-        /// 실패한 작업 이름.
-        /// 예: 좌우 영상 동기화, 일시정지, 재생 재개
-        /// </param>
-        /// <param name="failureResult">
-        /// Provider 또는 재생 서비스에서 반환된 원래 실패 결과.
-        /// </param>
-        /// <param name="fallbackErrorCode">
-        /// 원래 실패 결과에 오류 코드가 없을 때 사용할 기본 오류 코드.
-        /// </param>
-        /// <returns>
-        /// 재생 정리 결과가 반영된 실패 결과.
-        /// </returns>
-        private async Task<PlayerPlaybackResult> RecoverFromPlaybackFailureAsync(
-            string operationName,
-            PlayerPlaybackResult failureResult,
-            string fallbackErrorCode)
-        {
-            /*
-             * 원래 오류 메시지를 먼저 보관한다.
-             * StopAsync를 실행하면 현재 요청과 재생 상태가 초기화되므로
-             * 오류 정보는 정리 작업 전에 확보해야 한다.
-             */
-            string failureMessage =
-                failureResult == null
-                    ? "상세 오류 정보를 확인할 수 없습니다."
-                    : failureResult.Message;
-
-            if (string.IsNullOrWhiteSpace(failureMessage))
-            {
-                failureMessage =
-                    "상세 오류 정보를 확인할 수 없습니다.";
-            }
-
-            string errorCode =
-                failureResult == null
-                    ? fallbackErrorCode
-                    : failureResult.ErrorCode;
-
-            if (string.IsNullOrWhiteSpace(errorCode))
-            {
-                errorCode =
-                    string.IsNullOrWhiteSpace(fallbackErrorCode)
-                        ? "PLAYBACK_OPERATION_FAILED"
-                        : fallbackErrorCode;
-            }
-
-            string cleanupWarning =
-                string.Empty;
-
-            try
-            {
-                /*
-                 * 재생 명령에 사용된 CancellationToken이 이미 취소된 경우에도
-                 * 세션과 Provider 정리는 반드시 수행해야 한다.
-                 *
-                 * 따라서 복구 작업에는 CancellationToken.None을 사용한다.
-                 */
-                PlayerPlaybackResult stopResult =
-                    await StopAsync(
-                        CancellationToken.None);
-
-                /*
-                 * 현재 StopAsync는 일부 정리 경고가 있어도 Success=true를
-                 * 반환할 수 있다.
-                 *
-                 * 향후 정리 결과 정책을 세분화할 수 있도록
-                 * 실패 결과가 반환되는 경우도 방어적으로 처리한다.
-                 */
-                if (stopResult != null &&
-                    !stopResult.Success)
-                {
-                    cleanupWarning =
-                        " 정리 과정에서도 오류가 발생했습니다. "
-                        + stopResult.Message;
+                    // 다른 Provider 정리를 계속한다.
                 }
             }
-            catch (Exception ex)
-            {
-                /*
-                 * StopAsync에서 예상하지 못한 예외가 발생한 경우
-                 * Dispose가 완전히 끝났다고 보장할 수는 없다.
-                 *
-                 * 그러나 손상되었을 수 있는 세션과 Provider를
-                 * 다음 재생에서 다시 사용하면 안 되므로
-                 * 서비스의 논리적인 상태는 강제로 초기화한다.
-                 */
-                _sessions.Clear();
-                _providers.Clear();
-                _sessionTimeOffsets.Clear();
 
-                _currentRequest = null;
-                _currentPlaybackTime = null;
-                _playbackClockStartedAtUtc = null;
-
-                CurrentState =
-                    PlaybackState.Stopped;
-
-                cleanupWarning =
-                    " 재생 리소스 정리 중 예외가 발생했습니다. "
-                    + ex.Message;
-            }
+            _providers.Clear();
 
             /*
-             * 실패 복구 이후 일시정지 이전 방향 정보도 기본값으로 되돌린다.
-             * 재생속도 선택값은 사용자 선택값이므로 초기화하지 않는다.
+             * 5. 서비스의 논리적인 재생 상태를 초기화한다.
              */
+            _currentRequest =
+                null;
+
+            _currentPlaybackTime =
+                null;
+
+            _playbackClockStartedAtUtc =
+                null;
+
             _pausedFromState =
                 PlaybackState.Playing;
 
-            return PlayerPlaybackResult.Fail(
-                operationName
-                + "에 실패하여 재생을 중지하고 상태를 초기화했습니다. "
-                + failureMessage
-                + cleanupWarning,
-                errorCode);
-        }
-
-        /// <summary>
-        /// Provider에서 조회한 재생시간이 현재 조회 구간 안의
-        /// 정상적인 시간인지 확인하고 화면 기준시간으로 변환한다.
-        ///
-        /// Dahua 재생 시작 직후에는 1~2초 정도 경계 오차가 발생할 수 있으므로
-        /// 조회 구간 앞뒤로 2초의 허용 범위를 둔다.
-        /// </summary>
-        private bool TryNormalizeProviderPlaybackTime(
-            DateTime providerTime,
-            int offsetSeconds,
-            out DateTime normalizedTime)
-        {
-            normalizedTime =
-                DateTime.MinValue;
-
-            if (_currentRequest == null)
-            {
-                return false;
-            }
-
-            if (providerTime == DateTime.MinValue
-                || providerTime == DateTime.MaxValue)
-            {
-                return false;
-            }
-
-            DateTime candidateTime =
-                providerTime.AddSeconds(
-                    -offsetSeconds);
-
-            DateTime minimumTime =
-                _currentRequest.PlayStartTime.AddSeconds(
-                    -2);
-
-            DateTime maximumTime =
-                _currentRequest.PlayEndTime.AddSeconds(
-                    2);
-
-            /*
-             * 현재 조회 구간에서 크게 벗어난 시간은
-             * SDK가 반환한 오래된 값 또는 아직 안정화되지 않은 값으로 본다.
-             */
-            if (candidateTime < minimumTime
-                || candidateTime > maximumTime)
-            {
-                return false;
-            }
-
-            normalizedTime =
-                ClampPlaybackTime(
-                    candidateTime);
-
-            return true;
-        }
-
-        /// <summary>
-        /// 현재 재생 방향이 역방향인지 확인한다.
-        ///
-        /// 역재생 일시정지 상태에서도 방향은 역방향으로 간주한다.
-        /// </summary>
-        private bool IsReversePlaybackDirection()
-        {
-            return CurrentState == PlaybackState.Rewinding
-                || (
-                    CurrentState == PlaybackState.Paused
-                    && _pausedFromState == PlaybackState.Rewinding
-                );
+            CurrentState =
+                PlaybackState.Stopped;
         }
     }
 }
