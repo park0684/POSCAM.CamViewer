@@ -661,6 +661,88 @@ namespace CamViewer.Nvr.Dahua.Playback
                         "Start"));
             }
 
+            /*
+             * 다중채널 재생 그룹은 실제 재생을 시작하기 전에
+             * Dahua 제조사 방식으로 채널 시간을 동기화한다.
+             *
+             * 현재 그룹은 OpenAsync 완료 후 Paused 상태이므로
+             * SynchronizeAsync는 다음 작업을 수행한다.
+             *
+             * 1. 각 채널의 실제 OSD 영상재생시간 조회
+             * 2. 채널별 시간 보정값을 제거하여 공통 시각으로 변환
+             * 3. 허용 시간차를 초과하는 채널 정렬
+             * 4. 실제 OSD 시간을 다시 확인
+             * 5. 모든 채널을 Paused 상태로 유지
+             *
+             * 동기화가 완료된 후에만 아래 Resume 루프에서
+             * 모든 채널을 순서대로 시작한다.
+             */
+            if (groupSession.ChannelCount > 1)
+            {
+                NvrResult synchronizeResult =
+                    await _synchronizer.SynchronizeAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (synchronizeResult == null
+                    || !synchronizeResult.Success)
+                {
+                    /*
+                     * 동기화 중 일부 채널의 위치가 변경되었을 수 있으므로
+                     * 실패 시 자동으로 재생을 시작하지 않는다.
+                     *
+                     * 사용자가 다시 시도할 수 있도록
+                     * 그룹은 Paused + Ready 상태를 유지한다.
+                     */
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    groupSession.SetReady(
+                        true,
+                        "Dahua 채널 동기화에 실패하여 "
+                        + "일시정지 상태로 유지합니다.");
+
+                    return NvrResult.Fail(
+                        synchronizeResult == null
+                            ? NvrResultStatus.Failed
+                            : synchronizeResult.Status,
+
+                        synchronizeResult == null
+                            ? "Dahua 재생 그룹 동기화 결과가 없습니다."
+                            : synchronizeResult.Message,
+
+                        synchronizeResult == null
+                            ? CreateError(
+                                "DAHUA_GROUP_START_SYNC_RESULT_EMPTY",
+                                "Dahua 재생 그룹 동기화 결과가 없습니다.",
+                                "Start")
+                            : synchronizeResult.Error);
+                }
+
+                /*
+                 * StartAsync에서 호출한 동기화는
+                 * 재생을 직접 시작하지 않고 Paused 상태로 반환해야 한다.
+                 *
+                 * 예상하지 못한 상태가 반환되면
+                 * 일부 채널에 Resume 명령을 보내지 않고 중단한다.
+                 */
+                if (groupSession.State
+                    != NvrPlaybackState.Paused)
+                {
+                    return NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 채널 동기화 후 그룹 상태가 올바르지 않습니다. "
+                        + "State="
+                        + groupSession.State,
+                        CreateError(
+                            "DAHUA_GROUP_INVALID_STATE_AFTER_SYNC",
+                            "Dahua 채널 동기화 후 그룹 상태가 "
+                            + "Paused가 아닙니다.",
+                            "Start"));
+                }
+            }
+
+
             IList<DahuaPlaybackGroupChannel> channels =
                 groupSession.GetChannels();
 
