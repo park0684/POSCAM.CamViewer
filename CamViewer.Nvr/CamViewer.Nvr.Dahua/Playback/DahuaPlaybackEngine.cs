@@ -400,34 +400,93 @@ namespace CamViewer.Nvr.Dahua.Playback
 
                     /*
                      * 전체 조회 시작 시각과 InitialTime이 다르면
-                     * 일시정지된 상태에서 최초 위치로 이동한다.
+                     * Dahua 정렬 기능을 사용하여 실제 OSD가 목표 시각 부근에
+                     * 도착할 때까지 확인한다.
                      *
-                     * 실제 OSD 도착 여부와 채널 간 정렬은
-                     * 이후 SynchronizeAsync에서 처리한다.
+                     * 단순 SeekAsync만 호출하면 SDK 내부 위치는 이동했더라도
+                     * 일시정지 화면의 OSD가 이전 시각에 머물 수 있다.
+                     *
+                     * 이후 SynchronizeAsync가 정확한 OSD 시각을 읽을 수 있도록
+                     * Open 단계에서 실제 재생 위치까지 확정한다.
                      */
                     if (providerInitialTime != providerStartTime)
                     {
-                        NvrResult seekResult = await _provider.SeekAsync(dahuaSession, providerInitialTime, cancellationToken);
+                        var alignmentRequest = new NvrPlaybackAlignmentRequest
+                            {
+                                TargetTime = providerInitialTime,
 
-                        if (seekResult == null || !seekResult.Success)
+                                Direction = NvrPlaybackDirection.Forward,
+
+                                Speed = NvrPlaybackSpeed.Normal,
+
+                                /*
+                                 * OpenAsync의 성공 상태는 Paused + Ready이므로
+                                 * 정렬이 끝난 채널도 일시정지 상태를 유지한다.
+                                 */
+                                RemainPaused = true
+                            };
+
+                        NvrResult<INvrPlaybackSession> alignmentResult =
+                            await _provider.AlignPlaybackAsync(
+                                dahuaSession,
+                                alignmentRequest,
+                                cancellationToken);
+
+                        if (alignmentResult == null
+                            || !alignmentResult.Success
+                            || alignmentResult.Data == null)
                         {
-                            await CleanupGroupAsync(groupSession);
+                            await CleanupGroupAsync(
+                                groupSession);
 
                             return NvrResult<INvrPlaybackGroupSession>.Fail(
-                                seekResult == null
+                                alignmentResult == null
                                     ? NvrResultStatus.Failed
-                                    : seekResult.Status,
+                                    : alignmentResult.Status,
 
-                                seekResult == null
-                                    ? "Dahua 채널 최초 위치 이동 결과가 없습니다."
-                                    : seekResult.Message,
+                                alignmentResult == null
+                                    ? "Dahua 채널 최초 위치 정렬 결과가 없습니다."
+                                    : alignmentResult.Message,
 
-                                seekResult == null
+                                alignmentResult == null
                                     ? CreateError(
-                                        "DAHUA_GROUP_INITIAL_SEEK_RESULT_EMPTY",
-                                        "Dahua 채널 최초 위치 이동 결과가 없습니다.",
+                                        "DAHUA_GROUP_INITIAL_ALIGNMENT_RESULT_EMPTY",
+                                        "Dahua 채널 최초 위치 정렬 결과가 없습니다.",
                                         "Open")
-                                    : seekResult.Error);
+                                    : alignmentResult.Error);
+                        }
+
+                        DahuaPlaybackSession alignedSession =
+                            alignmentResult.Data
+                                as DahuaPlaybackSession;
+
+                        if (alignedSession == null)
+                        {
+                            await CleanupGroupAsync(
+                                groupSession);
+
+                            return NvrResult<INvrPlaybackGroupSession>.Fail(
+                                NvrResultStatus.Failed,
+                                "Dahua 최초 위치 정렬 결과의 세션 형식이 올바르지 않습니다.",
+                                CreateError(
+                                    "INVALID_DAHUA_INITIAL_ALIGNMENT_SESSION",
+                                    "Dahua 최초 위치 정렬 결과의 세션 형식이 올바르지 않습니다.",
+                                    "Open"));
+                        }
+
+                        /*
+                         * 현재 Dahua AlignPlaybackAsync는 기존 세션을 그대로 반환하지만,
+                         * 향후 Provider가 재생 세션을 새로 생성하여 반환할 수도 있다.
+                         *
+                         * INvrPlaybackAlignmentProvider 계약에 따라 새 세션이 반환된 경우
+                         * 기존 네이티브 세션 정리는 Provider 내부에서 수행된다.
+                         */
+                        if (!object.ReferenceEquals(
+                                groupChannel.Session,
+                                alignedSession))
+                        {
+                            groupChannel.ReplaceSession(
+                                alignedSession);
                         }
 
                         /*
