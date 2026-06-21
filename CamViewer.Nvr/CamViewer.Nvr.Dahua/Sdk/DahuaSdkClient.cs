@@ -218,6 +218,150 @@ namespace CamViewer.Nvr.Dahua.Sdk
         }
 
         /// <summary>
+        /// 기존 Dahua 재생 핸들을 유지한 상태로
+        /// 지정된 절대 영상 시각으로 이동한다.
+        ///
+        /// CLIENT_SeekPlayBack은 절대 시각이 아니라
+        /// CLIENT_PlayBackByTimeEx에 전달한 시작 시각으로부터의
+        /// 상대 초를 받는다.
+        /// </summary>
+        public static NvrResult SeekPlayback(
+            DahuaPlaybackSession playbackSession,
+            DateTime targetTime)
+        {
+            if (playbackSession == null
+                || playbackSession.PlaybackHandle == IntPtr.Zero)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "이동할 Dahua 재생 세션이 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_SEEK_SESSION_INVALID",
+
+                        ErrorMessage =
+                            "이동할 Dahua 재생 세션이 없습니다.",
+
+                        Operation =
+                            "CLIENT_SeekPlayBack"
+                    });
+            }
+
+            if (targetTime < playbackSession.StartTime)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "이동할 재생 시각은 재생 시작 시각보다 이전일 수 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_SEEK_BEFORE_START",
+
+                        ErrorMessage =
+                            "이동할 재생 시각은 재생 시작 시각보다 이전일 수 없습니다.",
+
+                        Operation =
+                            "CLIENT_SeekPlayBack"
+                    });
+            }
+
+            if (targetTime >= playbackSession.EndTime)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "이동할 재생 시각은 재생 종료 시각보다 이전이어야 합니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_SEEK_AFTER_END",
+
+                        ErrorMessage =
+                            "이동할 재생 시각은 재생 종료 시각보다 이전이어야 합니다.",
+
+                        Operation =
+                            "CLIENT_SeekPlayBack"
+                    });
+            }
+
+            double offsetSecondsValue =
+                (
+                    targetTime
+                    - playbackSession.StartTime
+                ).TotalSeconds;
+
+            if (offsetSecondsValue < 0
+                || offsetSecondsValue > uint.MaxValue)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 이동 상대시간이 허용 범위를 벗어났습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_SEEK_OFFSET_OUT_OF_RANGE",
+
+                        ErrorMessage =
+                            "Dahua 재생 이동 상대시간이 허용 범위를 벗어났습니다.",
+
+                        Operation =
+                            "CLIENT_SeekPlayBack"
+                    });
+            }
+
+            /*
+             * Dahua 재생 위치는 초 단위이므로
+             * 소수점 이하는 버린다.
+             */
+            uint offsetSeconds =
+                Convert.ToUInt32(
+                    Math.Floor(
+                        offsetSecondsValue));
+
+            /*
+             * 시간 기준 Seek에서는 offsetByte를 0으로 전달한다.
+             */
+            bool seekResult =
+                DahuaNative.CLIENT_SeekPlayBack(
+                    playbackSession.PlaybackHandle,
+                    offsetSeconds,
+                    0u);
+
+            if (!seekResult)
+            {
+                uint nativeErrorCode =
+                    DahuaNative.CLIENT_GetLastError();
+
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 위치 이동에 실패했습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_SEEK_FAILED",
+
+                        ErrorMessage =
+                            "CLIENT_SeekPlayBack 호출에 실패했습니다.",
+
+                        NativeErrorCode =
+                            nativeErrorCode.ToString(),
+
+                        Operation =
+                            "CLIENT_SeekPlayBack"
+                    });
+            }
+
+            /*
+             * 여기서는 실제 OSD 도착 여부가 아직 확인되지 않았다.
+             * CurrentPlaybackTime과 State를 확정하지 않는다.
+             *
+             * 실제 시간 확정은 AlignPlaybackAsync에서 수행한다.
+             */
+            return NvrResult.Ok(
+                "Dahua 재생 위치 이동 명령을 전달했습니다.");
+        }
+
+        /// <summary>
         /// Dahua 재생 세션을 재개한다.
         /// </summary>
         public static NvrResult ResumePlayback(

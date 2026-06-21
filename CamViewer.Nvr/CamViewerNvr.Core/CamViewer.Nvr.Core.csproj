@@ -49,6 +49,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Abstractions\INvrPlaybackAlignmentProvider.cs" />
     <Compile Include="Abstractions\INvrPlaybackPositionProvider.cs" />
     <Compile Include="Abstractions\INvrPlaybackSession.cs" />
     <Compile Include="Abstractions\INvrProvider.cs" />
@@ -58,6 +59,7 @@
     <Compile Include="Abstractions\INvrVideoSourceInfoProvider.cs" />
     <Compile Include="Attributes\NvrProviderExportAttribute.cs" />
     <Compile Include="Enums\NvrConnectionType.cs" />
+    <Compile Include="Enums\NvrPlaybackDirection.cs" />
     <Compile Include="Enums\NvrPlaybackSpeed.cs" />
     <Compile Include="Enums\NvrPlaybackState.cs" />
     <Compile Include="Enums\NvrRenderMode.cs" />
@@ -66,6 +68,7 @@
     <Compile Include="Events\PlaybackPositionChangedEventArgs.cs" />
     <Compile Include="Events\PlaybackStateChangedEventArgs.cs" />
     <Compile Include="Models\NvrConnectionInfo.cs" />
+    <Compile Include="Models\NvrPlaybackAlignmentRequest.cs" />
     <Compile Include="Models\NvrPlaybackRequest.cs" />
     <Compile Include="Models\NvrRecordQueryRequest.cs" />
     <Compile Include="Models\NvrVideoSourceInfo.cs" />
@@ -83,6 +86,5 @@
     <Compile Include="Results\ProviderLoadError.cs" />
     <Compile Include="Results\ProviderLoadReport.cs" />
   </ItemGroup>
-  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

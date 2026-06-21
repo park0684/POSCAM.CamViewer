@@ -6,6 +6,7 @@ using CamViewer.Nvr.Core.Results;
 using CamViewer.Nvr.Dahua.Sdk;
 using NetSDKCS;
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -22,7 +23,7 @@ namespace CamViewer.Nvr.Dahua.Providers
         "Dahua NetSDK",
         "Dahua",
         NvrConnectionType.Sdk)]
-    public sealed class DahuaNvrProvider : INvrProvider,INvrPlaybackPositionProvider,INvrVideoSourceInfoProvider, INvrReversePlaybackProvider
+    public sealed class DahuaNvrProvider : INvrProvider,INvrPlaybackPositionProvider,INvrVideoSourceInfoProvider, INvrReversePlaybackProvider, INvrPlaybackAlignmentProvider
     {
         private bool _disposed;
         private bool _runtimeAcquired;
@@ -418,8 +419,8 @@ namespace CamViewer.Nvr.Dahua.Providers
         /// <summary>
         /// 지정된 Dahua 재생 세션을 특정 시각으로 이동한다.
         ///
-        /// 현재 단계에서는 Dahua SDK의 직접 Seek API를 사용하지 않고,
-        /// 기존 재생을 중지한 뒤 targetTime 기준으로 다시 재생한다.
+        /// 기존 재생 핸들을 중지하거나 새로 생성하지 않고
+        /// CLIENT_SeekPlayBack을 사용하여 현재 핸들의 위치만 변경한다.
         /// </summary>
         public Task<NvrResult> SeekAsync(
             INvrPlaybackSession session,
@@ -431,7 +432,8 @@ namespace CamViewer.Nvr.Dahua.Providers
             if (cancellationToken.IsCancellationRequested)
             {
                 return Task.FromResult(
-                    CreateCancelledResult("Seek"));
+                    CreateCancelledResult(
+                        "Seek"));
             }
 
             DahuaPlaybackSession dahuaSession =
@@ -440,7 +442,8 @@ namespace CamViewer.Nvr.Dahua.Providers
             if (dahuaSession == null)
             {
                 return Task.FromResult(
-                    CreateInvalidSessionResult("Seek"));
+                    CreateInvalidSessionResult(
+                        "Seek"));
             }
 
             if (!IsInitialized)
@@ -459,68 +462,323 @@ namespace CamViewer.Nvr.Dahua.Providers
                         "Dahua NVR에 로그인되어 있지 않습니다."));
             }
 
-            if (targetTime < dahuaSession.StartTime)
+            NvrResult seekResult =
+                DahuaSdkClient.SeekPlayback(
+                    dahuaSession,
+                    targetTime);
+
+            if (seekResult == null
+                || !seekResult.Success)
             {
+                _lastError =
+                    seekResult == null
+                        ? new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "DAHUA_SEEK_RESULT_EMPTY",
+
+                            ErrorMessage =
+                                "Dahua 재생 위치 이동 결과가 없습니다.",
+
+                            Operation =
+                                "Seek"
+                        }
+                        : seekResult.Error;
+
                 return Task.FromResult(
-                    NvrResult.Fail(
+                    seekResult
+                    ?? NvrResult.Fail(
                         NvrResultStatus.Failed,
-                        "이동할 재생 시각은 현재 재생 시작 시각보다 이전일 수 없습니다."));
+                        "Dahua 재생 위치 이동 결과가 없습니다.",
+                        _lastError));
             }
 
-            if (targetTime >= dahuaSession.EndTime)
-            {
-                return Task.FromResult(
-                    NvrResult.Fail(
-                        NvrResultStatus.Failed,
-                        "이동할 재생 시각은 종료 시각보다 이전이어야 합니다."));
-            }
-
-            var replayRequest = new NvrPlaybackRequest
-            {
-                CounterNo = dahuaSession.CounterNo,
-                NvrNo = dahuaSession.NvrNo,
-                ChannelNo = dahuaSession.ChannelNo,
-                ScreenPosition = dahuaSession.ScreenPosition,
-                SearchDateTime = dahuaSession.SearchDateTime,
-                StartTime = targetTime,
-                EndTime = dahuaSession.EndTime,
-                RenderTargetHandle = dahuaSession.RenderTargetHandle,
-                AutoPlay = dahuaSession.AutoPlay
-            };
-
-            NvrResult<DahuaPlaybackSession> replayResult =
-                DahuaSdkClient.PlayByTime(
-                    _loginSession,
-                    replayRequest);
-
-            if (!replayResult.Success || replayResult.Data == null)
-            {
-                _lastError = replayResult.Error;
-
-                return Task.FromResult(
-                    NvrResult.Fail(
-                        replayResult.Status,
-                        string.IsNullOrWhiteSpace(replayResult.Message)
-                            ? "Dahua 재생 위치 이동에 실패했습니다."
-                            : replayResult.Message,
-                        replayResult.Error));
-            }
-
-            IntPtr newPlaybackHandle =
-                replayResult.Data.DetachPlaybackHandle();
-
-            dahuaSession.ReplacePlaybackHandle(
-                newPlaybackHandle,
-                targetTime);
-
-            replayResult.Data.Dispose();
-
-            _lastError = null;
+            _lastError =
+                null;
 
             return Task.FromResult(
-                NvrResult.Ok(
-                    "Dahua 재생 위치를 이동했습니다. "
-                    + targetTime.ToString("yyyy-MM-dd HH:mm:ss")));
+                seekResult);
+        }
+
+        /// <summary>
+        /// Dahua 재생 세션을 지정된 영상 시각과 상태로 정렬한다.
+        ///
+        /// 현재 구현 방식:
+        /// 1. 기존 SeekAsync를 사용하여 목표 시각으로 재생 핸들을 교체
+        /// 2. 요청된 재생속도 적용
+        /// 3. RemainPaused가 true이면 정렬된 세션을 일시정지
+        ///
+        /// 추후 Dahua 직접 Seek API가 확인되면
+        /// 이 메서드 내부 구현만 교체한다.
+        /// </summary>
+        public async Task<NvrResult<INvrPlaybackSession>> AlignPlaybackAsync(
+            INvrPlaybackSession session,
+            NvrPlaybackAlignmentRequest request,
+            CancellationToken cancellationToken)
+        {
+            EnsureNotDisposed();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return NvrResult<INvrPlaybackSession>.Fail(
+                    NvrResultStatus.Cancelled,
+                    "재생 세션 정렬 요청이 취소되었습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "PLAYBACK_ALIGNMENT_CANCELLED",
+                        ErrorMessage = "재생 세션 정렬 요청이 취소되었습니다.",
+                        Operation = "AlignPlayback"
+                    });
+            }
+
+            if (request == null)
+            {
+                return NvrResult<INvrPlaybackSession>.Fail(
+                    NvrResultStatus.Failed,
+                    "재생 세션 정렬 요청 정보가 없습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "PLAYBACK_ALIGNMENT_REQUEST_REQUIRED",
+                        ErrorMessage = "재생 세션 정렬 요청 정보가 없습니다.",
+                        Operation = "AlignPlayback"
+                    });
+            }
+
+            DahuaPlaybackSession dahuaSession =
+                session as DahuaPlaybackSession;
+
+            if (dahuaSession == null)
+            {
+                return NvrResult<INvrPlaybackSession>.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 세션이 아닙니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "INVALID_DAHUA_PLAYBACK_SESSION",
+                        ErrorMessage = "Dahua 재생 세션이 아닙니다.",
+                        Operation = "AlignPlayback"
+                    });
+            }
+
+            /*
+             * 현재 Dahua SeekAsync는 정방향 PlayByTime을 이용한다.
+             * 역방향 정렬은 아직 동일한 방식으로 보장할 수 없으므로
+             * 성공으로 처리하지 않는다.
+             */
+            if (request.Direction
+                != NvrPlaybackDirection.Forward)
+            {
+                return NvrResult<INvrPlaybackSession>.Fail(
+                    NvrResultStatus.NotSupported,
+                    "현재 Dahua Provider는 역방향 재생 세션 정렬을 지원하지 않습니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode = "DAHUA_REVERSE_ALIGNMENT_NOT_SUPPORTED",
+                        ErrorMessage =
+                            "현재 Dahua Provider는 역방향 재생 세션 정렬을 지원하지 않습니다.",
+                        Operation = "AlignPlayback"
+                    });
+            }
+
+            /*
+ * 1. 기존 재생 핸들에 직접 Seek 명령을 전달한다.
+ */
+            NvrResult seekResult =
+                await SeekAsync(
+                    dahuaSession,
+                    request.TargetTime,
+                    cancellationToken);
+
+            if (seekResult == null
+                || !seekResult.Success)
+            {
+                return NvrResult<INvrPlaybackSession>.Fail(
+                    seekResult == null
+                        ? NvrResultStatus.Failed
+                        : seekResult.Status,
+
+                    seekResult == null
+                        ? "Dahua 재생 위치 이동 결과가 없습니다."
+                        : seekResult.Message,
+
+                    seekResult == null
+                        ? new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "DAHUA_ALIGNMENT_SEEK_RESULT_EMPTY",
+
+                            ErrorMessage =
+                                "Dahua 재생 위치 이동 결과가 없습니다.",
+
+                            Operation =
+                                "AlignPlayback"
+                        }
+                        : seekResult.Error);
+            }
+
+            /*
+             * 현재 공통 동기화는 1배속 정방향에서만 실행한다.
+             * 속도 변경 명령을 반복 호출하면 Pause 상태가 바뀔 수 있으므로
+             * 여기서는 별도 속도 명령을 실행하지 않는다.
+             */
+            if (request.Speed != NvrPlaybackSpeed.Normal)
+            {
+                return NvrResult<INvrPlaybackSession>.Fail(
+                    NvrResultStatus.NotSupported,
+                    "Dahua 재생 정렬은 현재 1배속만 지원합니다.",
+                    new NvrErrorInfo
+                    {
+                        ErrorCode =
+                            "DAHUA_ALIGNMENT_SPEED_NOT_SUPPORTED",
+
+                        ErrorMessage =
+                            "Dahua 재생 정렬은 현재 1배속만 지원합니다.",
+
+                        Operation =
+                            "AlignPlayback"
+                    });
+            }
+
+            /*
+             * 2. Seek 직후에는 목표 이전의 키프레임에 위치할 수 있다.
+             * 디코더가 목표 시각까지 진행하도록 명시적으로 재개한다.
+             */
+            NvrResult resumeResult =
+                await ResumeAsync(
+                    dahuaSession,
+                    cancellationToken);
+
+            if (resumeResult == null
+                || !resumeResult.Success)
+            {
+                return NvrResult<INvrPlaybackSession>.Fail(
+                    resumeResult == null
+                        ? NvrResultStatus.Failed
+                        : resumeResult.Status,
+
+                    resumeResult == null
+                        ? "Dahua 정렬 세션 재개 결과가 없습니다."
+                        : resumeResult.Message,
+
+                    resumeResult == null
+                        ? new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "DAHUA_ALIGNMENT_RESUME_RESULT_EMPTY",
+
+                            ErrorMessage =
+                                "Dahua 정렬 세션 재개 결과가 없습니다.",
+
+                            Operation =
+                                "AlignPlayback"
+                        }
+                        : resumeResult.Error);
+            }
+
+            /*
+             * 3. 첫 유효 OSD가 아니라
+             * 목표 시각 부근에 도착한 실제 OSD를 기다린다.
+             */
+            NvrResult<DateTime> readyResult =
+                await WaitForAlignmentPlaybackTimeAsync(
+                    dahuaSession,
+                    request.TargetTime,
+                    cancellationToken);
+
+            if (readyResult == null
+                || !readyResult.Success)
+            {
+                /*
+                 * 준비 실패 시 한 채널만 계속 재생되지 않도록
+                 * 가능한 범위에서 다시 Pause한다.
+                 */
+                try
+                {
+                    await PauseAsync(
+                        dahuaSession,
+                        CancellationToken.None);
+                }
+                catch
+                {
+                }
+
+                return NvrResult<INvrPlaybackSession>.Fail(
+                    readyResult == null
+                        ? NvrResultStatus.Failed
+                        : readyResult.Status,
+
+                    readyResult == null
+                        ? "Dahua 재생 정렬 준비 확인 결과가 없습니다."
+                        : readyResult.Message,
+
+                    readyResult == null
+                        ? new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "DAHUA_ALIGNMENT_READY_RESULT_EMPTY",
+
+                            ErrorMessage =
+                                "Dahua 재생 정렬 준비 확인 결과가 없습니다.",
+
+                            Operation =
+                                "AlignPlayback"
+                        }
+                        : readyResult.Error);
+            }
+
+            /*
+             * 4. 목표 시각에 도착한 실제 시간을 세션에 기록한다.
+             */
+            dahuaSession.SetCurrentPlaybackTime(
+                readyResult.Data);
+
+            /*
+             * 5. 공통 서비스가 모든 채널을 함께 Resume할 수 있도록
+             * RemainPaused=true이면 여기서 정지 상태로 반환한다.
+             */
+            if (request.RemainPaused)
+            {
+                NvrResult pauseResult =
+                    await PauseAsync(
+                        dahuaSession,
+                        cancellationToken);
+
+                if (pauseResult == null
+                    || !pauseResult.Success)
+                {
+                    return NvrResult<INvrPlaybackSession>.Fail(
+                        pauseResult == null
+                            ? NvrResultStatus.Failed
+                            : pauseResult.Status,
+
+                        pauseResult == null
+                            ? "Dahua 정렬 세션의 일시정지 결과가 없습니다."
+                            : pauseResult.Message,
+
+                        pauseResult == null
+                            ? new NvrErrorInfo
+                            {
+                                ErrorCode =
+                                    "DAHUA_ALIGNMENT_PAUSE_RESULT_EMPTY",
+
+                                ErrorMessage =
+                                    "Dahua 정렬 세션의 일시정지 결과가 없습니다.",
+
+                                Operation =
+                                    "AlignPlayback"
+                            }
+                            : pauseResult.Error);
+                }
+            }
+
+            _lastError =
+                null;
+
+            return NvrResult<INvrPlaybackSession>.Ok(
+                dahuaSession,
+                "Dahua 재생 세션을 정렬했습니다. "
+                + readyResult.Data.ToString(
+                    "yyyy-MM-dd HH:mm:ss"));
         }
 
         /// <summary>
@@ -1047,5 +1305,212 @@ namespace CamViewer.Nvr.Dahua.Providers
                 Operation = "GetVideoSourceInfo"
             };
         }
+
+        /// <summary>
+        /// Dahua 직접 Seek 후 실제 OSD 시간이 목표 시각 부근에
+        /// 도착할 때까지 기다린다.
+        ///
+        /// Dahua OSD와 CLIENT_SeekPlayBack은 초 단위로 동작하므로
+        /// 목표와 실제값을 모두 초 단위로 정규화하여 비교한다.
+        /// </summary>
+        private async Task<NvrResult<DateTime>>
+            WaitForAlignmentPlaybackTimeAsync(
+                DahuaPlaybackSession session,
+                DateTime targetTime,
+                CancellationToken cancellationToken)
+        {
+            const int maximumWaitMilliseconds =
+                5000;
+
+            const int pollingIntervalMilliseconds =
+                100;
+
+            /*
+             * SDK가 목표 이전 키프레임부터 디코딩할 수 있으므로
+             * 목표보다 1초 이전까지 허용한다.
+             *
+             * 폴링 간격과 OSD 초 단위 갱신을 고려하여
+             * 목표보다 3초 이후까지 허용한다.
+             */
+            const int allowedBeforeSeconds =
+                1;
+
+            const int allowedAfterSeconds =
+                3;
+
+            /*
+             * 서비스의 추정 시간에는 밀리초가 포함될 수 있지만
+             * Dahua OSD에는 밀리초가 존재하지 않는다.
+             *
+             * 비교 전에 반드시 초 단위로 잘라낸다.
+             */
+            DateTime normalizedTargetTime =
+                TruncateToSecond(
+                    targetTime);
+
+            DateTime minimumAcceptedTime =
+                normalizedTargetTime.AddSeconds(
+                    -allowedBeforeSeconds);
+
+            DateTime maximumAcceptedTime =
+                normalizedTargetTime.AddSeconds(
+                    allowedAfterSeconds);
+
+            DateTime? lastObservedTime =
+                null;
+
+            Stopwatch stopwatch =
+                Stopwatch.StartNew();
+
+            while (stopwatch.ElapsedMilliseconds
+                < maximumWaitMilliseconds)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return NvrResult<DateTime>.Fail(
+                        NvrResultStatus.Cancelled,
+                        "Dahua 재생 정렬 준비 확인이 취소되었습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "DAHUA_ALIGNMENT_READY_CANCELLED",
+
+                            ErrorMessage =
+                                "Dahua 재생 정렬 준비 확인이 취소되었습니다.",
+
+                            Operation =
+                                "WaitForAlignmentPlaybackTime"
+                        });
+                }
+
+                NvrResult<DateTime> timeResult =
+                    await GetPlaybackTimeAsync(
+                        session,
+                        cancellationToken);
+
+                if (timeResult != null
+                    && timeResult.Success)
+                {
+                    DateTime actualTime =
+                        timeResult.Data;
+
+                    DateTime normalizedActualTime =
+                        TruncateToSecond(
+                            actualTime);
+
+                    lastObservedTime =
+                        normalizedActualTime;
+
+                    /*
+                     * 여기에서는 세션 StartTime/EndTime을 다시 검사하지 않는다.
+                     *
+                     * 목표 시각의 조회 범위 검증은 SeekPlayback에서 이미 완료했다.
+                     * 이 메서드의 책임은 실제 OSD가 목표 부근에 도착했는지만
+                     * 확인하는 것이다.
+                     */
+                    bool reachedTargetRange =
+                        normalizedActualTime
+                            >= minimumAcceptedTime
+                        && normalizedActualTime
+                            <= maximumAcceptedTime;
+
+                    if (reachedTargetRange)
+                    {
+                        return NvrResult<DateTime>.Ok(
+                            normalizedActualTime,
+                            "Dahua 재생 시간이 목표 시각 부근에 도착했습니다.");
+                    }
+                }
+
+                int remainingMilliseconds =
+                    maximumWaitMilliseconds
+                    - Convert.ToInt32(
+                        stopwatch.ElapsedMilliseconds);
+
+                if (remainingMilliseconds <= 0)
+                {
+                    break;
+                }
+
+                int delayMilliseconds =
+                    Math.Min(
+                        pollingIntervalMilliseconds,
+                        remainingMilliseconds);
+
+                try
+                {
+                    await Task.Delay(
+                        delayMilliseconds,
+                        cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    return NvrResult<DateTime>.Fail(
+                        NvrResultStatus.Cancelled,
+                        "Dahua 재생 정렬 준비 확인이 취소되었습니다.",
+                        new NvrErrorInfo
+                        {
+                            ErrorCode =
+                                "DAHUA_ALIGNMENT_READY_CANCELLED",
+
+                            ErrorMessage =
+                                "Dahua 재생 정렬 준비 확인이 취소되었습니다.",
+
+                            Operation =
+                                "WaitForAlignmentPlaybackTime"
+                        });
+                }
+            }
+
+            string lastTimeText =
+                lastObservedTime.HasValue
+                    ? lastObservedTime.Value.ToString(
+                        "yyyy-MM-dd HH:mm:ss.fff")
+                    : "확인 불가";
+
+            return NvrResult<DateTime>.Fail(
+                NvrResultStatus.Failed,
+                "제한시간 안에 Dahua 재생 시간이 목표 시각에 도착하지 못했습니다. "
+                + "목표="
+                + normalizedTargetTime.ToString(
+                    "yyyy-MM-dd HH:mm:ss.fff")
+                + ", 허용범위="
+                + minimumAcceptedTime.ToString(
+                    "HH:mm:ss.fff")
+                + " ~ "
+                + maximumAcceptedTime.ToString(
+                    "HH:mm:ss.fff")
+                + ", 마지막 확인="
+                + lastTimeText,
+                new NvrErrorInfo
+                {
+                    ErrorCode =
+                        "DAHUA_ALIGNMENT_TARGET_TIMEOUT",
+
+                    ErrorMessage =
+                        "제한시간 안에 Dahua 재생 시간이 목표 시각에 도착하지 못했습니다.",
+
+                    Operation =
+                        "WaitForAlignmentPlaybackTime"
+                });
+        }
+
+        /// <summary>
+        /// DateTime의 밀리초 이하 값을 제거하여
+        /// Dahua OSD의 초 단위 시간과 동일한 정밀도로 변환한다.
+        /// </summary>
+        private static DateTime TruncateToSecond(
+            DateTime value)
+        {
+            return new DateTime(
+                value.Year,
+                value.Month,
+                value.Day,
+                value.Hour,
+                value.Minute,
+                value.Second,
+                value.Kind);
+        }
+
     }
 }

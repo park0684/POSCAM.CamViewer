@@ -565,40 +565,40 @@ namespace CamViewer.Presenters
 
             _view.StopPlaybackTimer();
 
+            /*
+             * NVR 재생을 시작하기 전에 원본 해상조를 조회하며
+             * 실제 RenderTaget의 크기와 위치를 확인
+             * 
+             * Provider에는 이 계산이 완료된 RenderTarget Handle을 전달
+             * */
+
             await ApplyVideoSourceInfoAsync(request);
 
-            PlayerPlaybackResult playResult =
-                await _playbackService.PlayAsync(
-                    request,
-                    CancellationToken.None);
+            PlayerPlaybackResult playResult = await _playbackService.PlayAsync(request, CancellationToken.None);
 
-            if (!playResult.Success)
+            if (playResult == null || !playResult.Success)
             {
-                _view.SetPlaybackState(
-                    _playbackService.CurrentState);
+                _view.SetPlaybackState(_playbackService.CurrentState);
+                _view.SetPlaybackTime(_playbackService.CurrentPlaybackTime);
+                _view.SetTimelinePlaybackTime(_playbackService.CurrentPlaybackTime);
 
-                _view.SetPlaybackTime(
-                    _playbackService.CurrentPlaybackTime);
-                _view.SetTimelinePlaybackTime(
-                    _playbackService.CurrentPlaybackTime);
-
-
-                return playResult;
+                return playResult
+                    ?? PlayerPlaybackResult.Fail(
+                        "영상 재생 처리 결과가 없습니다.",
+                        "PLAYBACK_RESULT_EMPTY");
             }
-            DateTime? playbackTime =
-                _playbackService.CurrentPlaybackTime;
+
+            /*
+             * 재생 시작 후에는 원본 크기를 다시 조회하거나
+             * RenderTarget의 크기를 다시 변경 하지 않는다
+             */
+
+            DateTime? playbackTime = _playbackService.CurrentPlaybackTime;
 
             _view.SetPlaybackTime(playbackTime);
-
-            _view.SetTimelineRange(
-                request.PlayStartTime,
-                request.PlayEndTime);
-
+            _view.SetTimelineRange(request.PlayStartTime, request.PlayEndTime);
             _view.SetTimelinePlaybackTime(playbackTime);
-
-            _view.SetPlaybackState(
-                _playbackService.CurrentState);
-
+            _view.SetPlaybackState(_playbackService.CurrentState);
             _view.StartPlaybackTimer();
 
             return playResult;
@@ -1256,21 +1256,31 @@ namespace CamViewer.Presenters
         }
 
         /// <summary>
-        /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치를 화면에 반영한다.
-        /// Provider가 실제 재생시간을 제공하면 실제 시간을 사용하고,
-        /// 제공하지 못하면 추정 시간을 사용한다.
+        /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치와
+        /// 좌우 동기화 상태를 화면에 반영한다.
+        ///
+        /// 재생 명령이 처리되는 동안에는 Provider 세션을 조회하지 않는다.
+        /// Pause, Seek, Align, Resume 도중의 중간 상태를 읽으면
+        /// 일부 채널만 조회되거나 오래된 OSD 시간이 사용될 수 있다.
         /// </summary>
-        /// <summary>
-        /// 영상재생시간 갱신 Tick을 받아 현재 재생 위치와 좌/우 동기화 상태를 화면에 반영한다.
-        /// </summary>
-        private async void OnPlaybackTimerTick(object sender, EventArgs e)
+        private async void OnPlaybackTimerTick(
+            object sender,
+            EventArgs e)
         {
-            if (_isPlaybackTimerTickRunning)
+            /*
+             * 재생 명령이 진행 중이면 타이머가 Provider를 호출해서는 안 된다.
+             *
+             * 동기화, 시간 이동, 속도 변경, 재조회 과정에서는
+             * 세션 상태와 재생 위치가 단계적으로 변경되기 때문이다.
+             */
+            if (_isPlaybackCommandRunning
+                || _isPlaybackTimerTickRunning)
             {
                 return;
             }
 
-            _isPlaybackTimerTickRunning = true;
+            _isPlaybackTimerTickRunning =
+                true;
 
             try
             {
@@ -1278,19 +1288,44 @@ namespace CamViewer.Presenters
                     await _playbackService.SyncPlaybackTimeAsync(
                         CancellationToken.None);
 
-                _view.SetPlaybackTime(playbackTime);
-                _view.SetTimelinePlaybackTime(playbackTime);
+                /*
+                 * 위 await 도중 사용자가 재생 명령을 시작했을 수 있다.
+                 * 이 경우 조회 결과를 화면에 반영하지 않고 즉시 종료한다.
+                 */
+                if (_isPlaybackCommandRunning)
+                {
+                    return;
+                }
 
-                PlaybackSyncStatus syncStatus = await _playbackService.GetPlaybackSyncStatusAsync(CancellationToken.None);
+                _view.SetPlaybackTime(
+                    playbackTime);
+
+                _view.SetTimelinePlaybackTime(
+                    playbackTime);
+
+                PlaybackSyncStatus syncStatus =
+                    await _playbackService.GetPlaybackSyncStatusAsync(
+                        CancellationToken.None);
+
+                /*
+                 * 동기화 상태를 조회하는 동안 재생 명령이 시작됐다면
+                 * 부분 세션 결과를 화면에 표시하지 않는다.
+                 */
+                if (_isPlaybackCommandRunning)
+                {
+                    return;
+                }
 
                 if (syncStatus != null)
                 {
-                    _view.SetPlaybackSyncStatus(syncStatus.ToDisplayText());
+                    _view.SetPlaybackSyncStatus(
+                        syncStatus.ToDisplayText());
                 }
             }
             finally
             {
-                _isPlaybackTimerTickRunning = false;
+                _isPlaybackTimerTickRunning =
+                    false;
             }
         }
 
@@ -1816,6 +1851,12 @@ namespace CamViewer.Presenters
         //}
 
 
+        /// <summary>
+        /// 재생 명령 실행 상태를 시작한다.
+        ///
+        /// 명령 처리 중에는 UI 타이머가 Provider 재생시간을
+        /// 조회하지 않도록 타이머를 먼저 중지한다.
+        /// </summary>
         private bool TryBeginPlaybackCommand()
         {
             if (_isPlaybackCommandRunning)
@@ -1829,13 +1870,23 @@ namespace CamViewer.Presenters
             _isPlaybackCommandRunning =
                 true;
 
+            /*
+             * Pause, Seek, Align, Resume 처리와
+             * 1초 OSD 조회가 동시에 실행되지 않도록 한다.
+             */
+            _view.StopPlaybackTimer();
+
             UpdatePlaybackControlAvailability();
 
             return true;
         }
 
+
         /// <summary>
         /// 재생 명령 실행 상태를 해제한다.
+        ///
+        /// 명령이 완전히 종료된 뒤 서비스의 실제 상태를 기준으로
+        /// UI 타이머를 다시 시작하거나 중지한다.
         /// </summary>
         private void EndPlaybackCommand()
         {
@@ -1843,6 +1894,12 @@ namespace CamViewer.Presenters
                 false;
 
             UpdatePlaybackControlAvailability();
+
+            /*
+             * Playing 또는 Rewinding이면 타이머를 다시 시작하고,
+             * Paused 또는 Stopped이면 중지 상태를 유지한다.
+             */
+            UpdatePlaybackTimerState();
         }
 
         /// <summary>

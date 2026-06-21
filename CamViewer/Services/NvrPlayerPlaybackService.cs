@@ -1152,228 +1152,371 @@ namespace CamViewer.Services
         }
 
         /// <summary>
-        /// 좌측 화면을 기준으로 좌우 영상의 재생시간을 동기화한다.
+        /// 현재 재생 중인 좌우 채널을 동일한 영상 시각으로 동기화한다.
         ///
-        /// 정방향:
-        /// - 시간이 어긋난 채널에 일반 Seek를 적용한다.
-        ///
-        /// 역방향:
-        /// - 일반 Seek를 사용하면 정방향 세션으로 바뀔 수 있으므로
-        ///   기준시간에서 모든 역재생 세션을 다시 생성한다.
+        /// 처리 순서:
+        /// 1. 재생 상태와 배속 검증
+        /// 2. 현재 채널별 실제 재생시간 조회
+        /// 3. 좌측 화면 기준 시각 결정
+        /// 4. 단일 채널이면 시간만 갱신
+        /// 5. 역재생이면 기존 역재생 동기화 방식 사용
+        /// 6. 정방향이면 모든 채널 Pause
+        /// 7. Pause 완료 후 고정된 실제 시각을 다시 확인
+        /// 8. 공통 정렬 메서드에 실제 정렬·검증·재개 위임
         /// </summary>
         public async Task<PlayerPlaybackResult> ResyncPlaybackSessionsAsync(CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
-            const double allowedDifferenceSeconds = 1.0;
-            const int leftScreenPosition = 1;
-
-            List<PlaybackTimeSnapshot> snapshots = await GetPlaybackTimeSnapshotsAsync(cancellationToken);
-
-            if (snapshots.Count == 0)
+            if (cancellationToken.IsCancellationRequested)
             {
                 return PlayerPlaybackResult.Fail(
-                    "좌우 영상의 실제 재생시간을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                    "영상 동기화 요청이 취소되었습니다.",
+                    "PLAYBACK_SYNC_CANCELLED");
+            }
+
+            if (_sessions.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "동기화할 재생 세션이 없습니다.",
+                    "PLAYBACK_SESSION_EMPTY");
+            }
+
+            /*
+             * 확정된 운영 정책:
+             * 자동 동기화 및 수동 동기화는 1배속에서만 실행한다.
+             */
+            if (_currentSpeed != PlaybackSpeed.Normal)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "영상 동기화는 1배속에서만 실행할 수 있습니다.",
+                    "PLAYBACK_SYNC_NORMAL_SPEED_ONLY",
+                    PlaybackFailureCategory.NotSupported);
+            }
+
+            const double allowedDifferenceSeconds =
+                1.0;
+
+            /*
+             * 현재 재생 중인 각 채널의 실제 OSD 시간을 조회한다.
+             *
+             * GetPlaybackTimeSnapshotsAsync에서
+             * 채널별 TimeOffsetSeconds가 제거된 NormalizedTime을 반환한다.
+             */
+            List<PlaybackTimeSnapshot> snapshots =
+                await GetPlaybackTimeSnapshotsAsync(
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "영상 동기화 시간 조회가 취소되었습니다.",
+                    "PLAYBACK_SYNC_TIME_CANCELLED");
+            }
+
+            if (snapshots == null
+                || snapshots.Count == 0)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생 중인 채널의 실제 영상재생시간을 확인하지 못했습니다. "
+                    + "잠시 후 다시 시도해 주세요.",
                     "PLAYBACK_SYNC_TIME_UNAVAILABLE",
                     PlaybackFailureCategory.Retryable);
             }
 
-            PlaybackTimeSnapshot master = snapshots.FirstOrDefault(item =>item.Session != null && item.Session.ScreenPosition == leftScreenPosition);
+            /*
+             * 좌측 화면을 기준 채널로 선택한다.
+             *
+             * ScreenPosition.Left의 내부값은 0이다.
+             * 기존 코드에서 1을 사용했다면 우측 화면을 의미하므로 수정해야 한다.
+             */
+            PlaybackTimeSnapshot master =
+                snapshots.FirstOrDefault(
+                    snapshot =>
+                        snapshot.Session != null
+                        && snapshot.Session.ScreenPosition
+                            == (int)ScreenPosition.Left);
 
+            /*
+             * 좌측 채널 시간이 아직 준비되지 않은 예외 상황에서는
+             * 현재 확인된 첫 번째 채널 시간을 임시 기준으로 사용한다.
+             */
             if (master == null)
             {
-                master = snapshots[0];
+                master =
+                    snapshots[0];
             }
 
-            Dictionary<int, PlaybackTimeSnapshot> snapshotMap = snapshots.ToDictionary(item => item.SessionKey);
-            double maxDifferenceSeconds = snapshots.Max(item => Math.Abs((item.NormalizedTime - master.NormalizedTime).TotalSeconds));
-            bool allSessionTimesAvailable = snapshots.Count >= _sessions.Count;
             /*
-             * 허용 범위 안이면 세션을 재생성하거나 Seek하지 않고
-             * 서비스 기준시간만 실제 Provider 시간으로 맞춘다.
+             * 모든 채널의 실제 시간이 확인됐고 이미 허용 범위 안이면
+             * Provider Seek와 재정렬을 다시 실행하지 않는다.
+             *
+             * 수동 동기화 버튼을 눌렀다는 이유만으로 정상 세션을
+             * 다시 Seek하면 오히려 SDK 상태가 불안정해질 수 있다.
              */
-            if (allSessionTimesAvailable && maxDifferenceSeconds <= allowedDifferenceSeconds)
-            {
-                _currentPlaybackTime = master.NormalizedTime;
+            bool allSessionTimesAvailable =
+                snapshots.Count >= _sessions.Count;
 
-                if (CurrentState == PlaybackState.Playing || CurrentState == PlaybackState.Rewinding)
+            double maximumDifferenceSeconds =
+                snapshots.Max(
+                    snapshot =>
+                        Math.Abs(
+                            (
+                                snapshot.NormalizedTime
+                                - master.NormalizedTime
+                            ).TotalSeconds));
+
+            if (allSessionTimesAvailable
+                && maximumDifferenceSeconds
+                    <= allowedDifferenceSeconds)
+            {
+                _currentPlaybackTime =
+                    ClampPlaybackTime(
+                        master.NormalizedTime);
+
+                if (CurrentState == PlaybackState.Playing
+                    || CurrentState == PlaybackState.Rewinding)
                 {
-                    _playbackClockStartedAtUtc = DateTime.UtcNow;
+                    _playbackClockStartedAtUtc =
+                        DateTime.UtcNow;
                 }
                 else
                 {
-                    _playbackClockStartedAtUtc = null;
-                }
-
-                return PlayerPlaybackResult.Ok( "좌우 영상 동기화 상태가 정상입니다.");
-            }
-
-            /*
-             * 역재생 또는 역재생 일시정지 상태에서는
-             * 일반 Provider.SeekAsync를 호출하지 않는다.
-             *
-             * 좌측 기준시간으로 전체 역재생 세션을 다시 생성하여
-             * 방향과 배속을 유지하면서 좌우 시간을 맞춘다.
-             */
-            if (IsReversePlaybackDirection())
-            {
-                bool keepPaused = CurrentState == PlaybackState.Paused;
-
-                DateTime reverseSyncTime = ClampPlaybackTime(master.NormalizedTime);
-
-                PlayerPlaybackResult reverseSyncResult = await SeekReverseToTimeAsync(reverseSyncTime,keepPaused,cancellationToken);
-
-                if (!reverseSyncResult.Success)
-                {
-                    return reverseSyncResult;
+                    _playbackClockStartedAtUtc =
+                        null;
                 }
 
                 return PlayerPlaybackResult.Ok(
-                    "역재생 방향을 유지하면서 좌우 영상 싱크를 보정했습니다. "
-                    + "기준시간 "
-                    + reverseSyncTime.ToString("yyyy-MM-dd HH:mm:ss")
-                    + ", 최대 차이 "
-                    + maxDifferenceSeconds.ToString("0.0")
+                    "좌우 영상 동기화 상태가 이미 정상입니다. "
+                    + "최대 시간차 "
+                    + maximumDifferenceSeconds.ToString("0.0")
                     + "초");
             }
 
             /*
-             * 여기부터는 정방향 또는 정방향 일시정지 상태의 동기화다.
+             * 단일 채널 재생은 다른 채널과 비교할 필요가 없다.
+             * 현재 실제 재생시간만 서비스 기준시간으로 반영한다.
              */
-            foreach (KeyValuePair<int, INvrPlaybackSession> item in _sessions.ToList())
+            if (_sessions.Count == 1)
             {
-                int sessionKey =
-                    item.Key;
+                _currentPlaybackTime =
+                    ClampPlaybackTime(
+                        master.NormalizedTime);
 
-                INvrPlaybackSession session =
-                    item.Value;
-
-                if (session == null)
+                if (CurrentState == PlaybackState.Playing
+                    || CurrentState == PlaybackState.Rewinding)
                 {
-                    return PlayerPlaybackResult.Fail(
-                        "동기화할 재생 세션 정보가 없습니다.",
-                        "PLAYBACK_SYNC_SESSION_INVALID",
-                        PlaybackFailureCategory.System);
+                    _playbackClockStartedAtUtc =
+                        DateTime.UtcNow;
+                }
+                else
+                {
+                    _playbackClockStartedAtUtc =
+                        null;
                 }
 
+                return PlayerPlaybackResult.Ok(
+                    "단일 채널의 실제 영상재생시간을 확인했습니다.");
+            }
+
+            /*
+             * 역재생은 아직 공통 Alignment Provider 경로로 변경하지 않는다.
+             *
+             * 현재 Dahua AlignPlaybackAsync는 정방향 정렬만 보장하므로,
+             * 역재생은 기존 SeekReverseToTimeAsync 방식으로 유지한다.
+             */
+            if (IsReversePlaybackDirection())
+            {
+                bool allReverseTimesAvailable =
+                    snapshots.Count >= _sessions.Count;
+
+                double reverseMaxDifferenceSeconds =
+                    snapshots.Max(
+                        snapshot =>
+                            Math.Abs(
+                                (
+                                    snapshot.NormalizedTime
+                                    - master.NormalizedTime
+                                ).TotalSeconds));
+
                 /*
-                 * 기준 세션은 이동하지 않는다.
+                 * 모든 역재생 채널이 이미 허용 범위 안이면
+                 * 세션을 다시 생성하지 않고 서비스 기준시간만 갱신한다.
                  */
-                if (sessionKey == master.SessionKey)
-                {
-                    continue;
-                }
-
-                PlaybackTimeSnapshot currentSnapshot;
-
-                bool hasValidSnapshot =
-                    snapshotMap.TryGetValue(
-                        sessionKey,
-                        out currentSnapshot);
-
-                /*
-                 * 정상 시간이 확인된 채널은 차이가 허용 범위 이내면
-                 * 별도 Seek를 실행하지 않는다.
-                 *
-                 * 시간이 유효하지 않은 채널은 기준 채널 시간으로 강제 보정한다.
-                 */
-                if (hasValidSnapshot)
-                {
-                    double differenceSeconds =
-                        Math.Abs(
-                            (
-                                currentSnapshot.NormalizedTime
-                                - master.NormalizedTime
-                            ).TotalSeconds);
-
-                    if (differenceSeconds
+                if (allReverseTimesAvailable
+                    && reverseMaxDifferenceSeconds
                         <= allowedDifferenceSeconds)
-                    {
-                        continue;
-                    }
-                }
-
-                INvrProvider provider =
-                    GetProviderByNvrNo(
-                        session.NvrNo);
-
-                if (provider == null)
                 {
-                    return PlayerPlaybackResult.Fail(
-                        "동기화할 NVR Provider를 찾을 수 없습니다.",
-                        "NVR_PROVIDER_NOT_FOUND",
-                        PlaybackFailureCategory.Configuration);
+                    _currentPlaybackTime =
+                        ClampPlaybackTime(
+                            master.NormalizedTime);
+
+                    if (CurrentState
+                        == PlaybackState.Rewinding)
+                    {
+                        _playbackClockStartedAtUtc =
+                            DateTime.UtcNow;
+                    }
+                    else
+                    {
+                        _playbackClockStartedAtUtc =
+                            null;
+                    }
+
+                    return PlayerPlaybackResult.Ok(
+                        "역재생 좌우 영상 동기화 상태가 정상입니다.");
                 }
 
-                int offsetSeconds =
-                    GetSessionTimeOffset(
-                        sessionKey);
+                bool keepReversePaused =
+                    CurrentState == PlaybackState.Paused;
 
-                DateTime providerTargetTime =
-                    master.NormalizedTime.AddSeconds(
-                        offsetSeconds);
+                DateTime reverseTargetTime =
+                    ClampPlaybackTime(
+                        master.NormalizedTime);
 
-                NvrResult seekResult =
-                    await provider.SeekAsync(
-                        session,
-                        providerTargetTime,
+                PlayerPlaybackResult reverseResult =
+                    await SeekReverseToTimeAsync(
+                        reverseTargetTime,
+                        keepReversePaused,
                         cancellationToken);
 
-                if (seekResult == null
-                    || !seekResult.Success)
+                if (reverseResult == null)
                 {
-                    return ToPlayerResult(
-                        seekResult);
+                    return PlayerPlaybackResult.Fail(
+                        "역재생 동기화 처리 결과가 없습니다.",
+                        "REVERSE_PLAYBACK_SYNC_RESULT_EMPTY");
                 }
 
-                if (_currentSpeed != PlaybackSpeed.Normal)
-                {
-                    NvrResult speedResult =
-                        await provider.SetPlaybackSpeedAsync(
-                            session,
-                            ToNvrPlaybackSpeed(
-                                _currentSpeed),
-                            cancellationToken);
-
-                    if (speedResult == null
-                        || !speedResult.Success)
-                    {
-                        return ToPlayerResult(
-                            speedResult);
-                    }
-                }
-
-                if (CurrentState == PlaybackState.Paused)
-                {
-                    NvrResult pauseResult =
-                        await provider.PauseAsync(
-                            session,
-                            cancellationToken);
-
-                    if (pauseResult == null
-                        || !pauseResult.Success)
-                    {
-                        return ToPlayerResult(
-                            pauseResult);
-                    }
-                }
+                return reverseResult;
             }
 
-            _currentPlaybackTime = master.NormalizedTime;
+            /*
+             * 여기부터는 정방향 또는 정방향 일시정지 상태만 처리한다.
+             */
+            bool keepPaused =
+                CurrentState == PlaybackState.Paused;
 
-            if (CurrentState == PlaybackState.Playing)
+            if (CurrentState != PlaybackState.Playing
+                && CurrentState != PlaybackState.Paused)
             {
-                _playbackClockStartedAtUtc = DateTime.UtcNow;
-            }
-            else
-            {
-                _playbackClockStartedAtUtc = null;
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 상태에서는 좌우 영상 동기화를 실행할 수 없습니다.",
+                    "PLAYBACK_SYNC_INVALID_STATE");
             }
 
-            return PlayerPlaybackResult.Ok(
-                "좌우 영상 싱크를 보정했습니다. 최대 차이 "
-                + maxDifferenceSeconds.ToString("0.0")
-                + "초");
+            /*
+             * 재생 중이었다면 모든 채널을 먼저 일시정지한다.
+             *
+             * 기준 채널이 움직이는 상태에서 다른 채널을 맞추면
+             * 정렬 처리 시간만큼 다시 차이가 발생하므로,
+             * 반드시 모든 채널을 고정한 뒤 목표 시각을 확정한다.
+             */
+            if (!keepPaused)
+            {
+                PlayerPlaybackResult pauseResult =
+                    await PauseAsync(
+                        cancellationToken);
+
+                if (pauseResult == null)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "영상 동기화 전 일시정지 처리 결과가 없습니다.",
+                        "PLAYBACK_SYNC_PAUSE_RESULT_EMPTY");
+                }
+
+                if (!pauseResult.Success)
+                {
+                    return pauseResult;
+                }
+            }
+
+            /*
+             * 모든 채널이 Pause된 뒤 실제 OSD 시간을 다시 읽는다.
+             *
+             * Pause 명령은 채널별로 순차 실행되므로,
+             * Pause 이전에 읽은 master 시간보다 이 값이 더 정확한 고정 기준이다.
+             */
+            List<PlaybackTimeSnapshot> pausedSnapshots =
+                await GetPlaybackTimeSnapshotsAsync(
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                PlayerPlaybackResult cancelledResult =
+                    PlayerPlaybackResult.Fail(
+                        "일시정지된 영상의 재생시간 확인이 취소되었습니다.",
+                        "PLAYBACK_SYNC_PAUSED_TIME_CANCELLED");
+
+                return await RecoverFromPlaybackFailureAsync(
+                    "좌우 영상 동기화",
+                    cancelledResult,
+                    "PLAYBACK_SYNC_FAILED");
+            }
+
+            DateTime synchronizationTargetTime =
+                ClampPlaybackTime(
+                    master.NormalizedTime);
+
+            /*
+             * Pause 후 좌측 실제 시간이 정상 조회되면
+             * 해당 시간을 최종 정렬 목표로 사용한다.
+             */
+            if (pausedSnapshots != null
+                && pausedSnapshots.Count > 0)
+            {
+                PlaybackTimeSnapshot pausedMaster =
+                    pausedSnapshots.FirstOrDefault(
+                        snapshot =>
+                            snapshot.Session != null
+                            && snapshot.Session.ScreenPosition
+                                == (int)ScreenPosition.Left);
+
+                if (pausedMaster == null)
+                {
+                    pausedMaster =
+                        pausedSnapshots[0];
+                }
+
+                synchronizationTargetTime =
+                    ClampPlaybackTime(
+                        pausedMaster.NormalizedTime);
+            }
+
+            /*
+             * 실제 채널 정렬, OSD 검증, 재정렬 재시도 및 Resume는
+             * AlignPlaybackSessionsToTimeAsync에 전부 위임한다.
+             *
+             * 이 메서드 아래에서 별도의 Align 반복문,
+             * WaitForPlaybackAlignmentAsync 또는 ResumeAsync를 다시 호출하면 안 된다.
+             */
+            PlayerPlaybackResult alignmentResult =
+                await AlignPlaybackSessionsToTimeAsync(
+                    synchronizationTargetTime,
+                    keepPaused,
+                    cancellationToken);
+
+            if (alignmentResult == null)
+            {
+                PlayerPlaybackResult emptyResult =
+                    PlayerPlaybackResult.Fail(
+                        "좌우 영상 정렬 처리 결과가 없습니다.",
+                        "PLAYBACK_ALIGNMENT_RESULT_EMPTY");
+
+                return await RecoverFromPlaybackFailureAsync(
+                    "좌우 영상 동기화",
+                    emptyResult,
+                    "PLAYBACK_SYNC_FAILED");
+            }
+
+            if (!alignmentResult.Success)
+            {
+                return await RecoverFromPlaybackFailureAsync(
+                    "좌우 영상 동기화",
+                    alignmentResult,
+                    "PLAYBACK_SYNC_FAILED");
+            }
+
+            return alignmentResult;
         }
 
         /// <summary>
@@ -1640,19 +1783,15 @@ namespace CamViewer.Services
 
         /// <summary>
         /// 현재 영상재생시간을 기준으로 정방향 재생으로 전환한다.
-        /// 
-        /// 사용 시점:
-        /// - 역재생 중 재생 버튼 클릭
-        /// 
-        /// 처리 순서:
-        /// 1. 현재 Provider 재생시간 또는 추정 재생시간 조회
-        /// 2. 기존 역재생 세션만 정리
-        /// 3. 기존 Provider/Login은 유지
-        /// 4. 현재 시간부터 조회 종료시간까지 정방향 재생 세션 재생성
-        /// 5. 기존 선택 배속을 새 세션에 다시 적용
+        ///
+        /// 중요 정책:
+        /// - 방향 전환 후에도 재생 세션의 범위는 최초 조회 범위를 유지한다.
+        /// - 현재 전환 위치는 forwardTargetTime으로 별도 관리한다.
+        /// - 위치 정렬이 완료된 후 사용자가 선택한 배속을 복원한다.
         /// </summary>
-        public async Task<PlayerPlaybackResult> PlayForwardFromCurrentTimeAsync(
-            CancellationToken cancellationToken)
+        public async Task<PlayerPlaybackResult>
+            PlayForwardFromCurrentTimeAsync(
+                CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
 
@@ -1677,20 +1816,27 @@ namespace CamViewer.Services
                     "PLAYBACK_SESSION_EMPTY");
             }
 
+            /*
+             * 역재생 중인 실제 현재 위치를 확보한다.
+             *
+             * 이 값은 새 세션의 시작시간이 아니라,
+             * 새 정방향 세션을 정렬할 목표 위치다.
+             */
             DateTime? syncedTime =
                 await SyncPlaybackTimeAsync(
                     cancellationToken);
 
-            DateTime forwardStartTime =
+            DateTime forwardTargetTime =
                 syncedTime.HasValue
                     ? syncedTime.Value
                     : GetEstimatedPlaybackTime();
 
-            forwardStartTime =
+            forwardTargetTime =
                 ClampPlaybackTime(
-                    forwardStartTime);
+                    forwardTargetTime);
 
-            if (forwardStartTime >= _currentRequest.PlayEndTime)
+            if (forwardTargetTime
+                >= _currentRequest.PlayEndTime)
             {
                 return PlayerPlaybackResult.Fail(
                     "조회 종료시간 이후로 정방향 재생을 시작할 수 없습니다.",
@@ -1703,39 +1849,75 @@ namespace CamViewer.Services
             PlayerPlaybackRequest request =
                 _currentRequest;
 
+            /*
+             * 기존 역재생 세션만 정리한다.
+             * Provider 로그인과 최초 조회 요청 범위는 유지한다.
+             */
             PlayerPlaybackResult stopResult =
                 await StopCurrentPlaybackSessionsOnlyAsync(
-                    cancellationToken);
+                    CancellationToken.None);
 
-            if (!stopResult.Success)
+            if (stopResult == null
+                || !stopResult.Success)
             {
-                return stopResult;
+                return stopResult
+                    ?? PlayerPlaybackResult.Fail(
+                        "기존 역재생 세션 정리 결과가 없습니다.",
+                        "FORWARD_CLEANUP_RESULT_EMPTY",
+                        PlaybackFailureCategory.System);
             }
 
+            /*
+             * 새 재생 핸들은 기본 1배속이다.
+             * 정렬이 끝날 때까지 논리 속도도 1배속으로 유지한다.
+             */
             _currentSpeed =
-                selectedSpeed;
+                PlaybackSpeed.Normal;
 
-            foreach (PlayerChannelTarget channel in request.Channels)
+            foreach (PlayerChannelTarget channel
+                in request.Channels)
             {
+                /*
+                 * 핵심:
+                 * 현재 전환 시각부터 세션을 열지 않는다.
+                 *
+                 * 최초 조회 시작시간부터 종료시간까지 전체 범위로
+                 * 정방향 세션을 다시 생성한다.
+                 *
+                 * 이렇게 해야 방향 전환 이후에도 타임라인을 이용해
+                 * 현재 위치보다 과거로 이동할 수 있다.
+                 */
                 PlayerPlaybackResult playResult =
                     await PlayChannelAsync(
                         request,
                         channel,
-                        forwardStartTime,
+                        request.PlayStartTime,
                         request.PlayEndTime,
                         cancellationToken);
 
-                if (!playResult.Success)
+                if (playResult == null
+                    || !playResult.Success)
                 {
+                    _currentSpeed =
+                        selectedSpeed;
+
                     await StopCurrentPlaybackSessionsOnlyAsync(
                         CancellationToken.None);
 
-                    return playResult;
+                    return playResult
+                        ?? PlayerPlaybackResult.Fail(
+                            "정방향 채널 재생 결과가 없습니다.",
+                            "FORWARD_CHANNEL_RESULT_EMPTY",
+                            PlaybackFailureCategory.System);
                 }
             }
 
+            /*
+             * 새 세션은 최초 조회 시작시간에서 열렸으므로
+             * 준비 확인 전 서비스 시간도 같은 위치로 설정한다.
+             */
             _currentPlaybackTime =
-                forwardStartTime;
+                request.PlayStartTime;
 
             _playbackClockStartedAtUtc =
                 DateTime.UtcNow;
@@ -1744,9 +1926,105 @@ namespace CamViewer.Services
                 PlaybackState.Playing;
 
             /*
-             * 기존 선택속도가 1배속이 아니면
-             * 새 정방향 세션에 동일하게 적용한다.
+             * 새 정방향 세션의 실제 OSD가 준비될 때까지 기다린다.
              */
+            bool playbackReady =
+                await WaitForPlaybackReadyAsync(
+                    cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                _currentSpeed =
+                    selectedSpeed;
+
+                PlayerPlaybackResult cancelledResult =
+                    PlayerPlaybackResult.Fail(
+                        "정방향 전환 준비 확인이 취소되었습니다.",
+                        "FORWARD_READY_CANCELLED",
+                        PlaybackFailureCategory.Cancelled);
+
+                return await RecoverFromPlaybackFailureAsync(
+                    "정방향 전환 준비 확인",
+                    cancelledResult,
+                    "FORWARD_READY_CANCELLED");
+            }
+
+            if (!playbackReady)
+            {
+                _currentSpeed =
+                    selectedSpeed;
+
+                PlayerPlaybackResult notReadyResult =
+                    PlayerPlaybackResult.Fail(
+                        "정방향 재생 세션의 실제 재생시간을 확인하지 못했습니다.",
+                        "FORWARD_PLAYBACK_NOT_READY",
+                        PlaybackFailureCategory.Retryable);
+
+                return await RecoverFromPlaybackFailureAsync(
+                    "정방향 전환 준비 확인",
+                    notReadyResult,
+                    "FORWARD_READY_FAILED");
+            }
+
+            /*
+             * 움직이는 상태에서 채널별로 정렬하지 않도록
+             * 모든 세션을 먼저 일시정지한다.
+             */
+            PlayerPlaybackResult pauseResult =
+                await PauseAsync(
+                    cancellationToken);
+
+            if (pauseResult == null
+                || !pauseResult.Success)
+            {
+                _currentSpeed =
+                    selectedSpeed;
+
+                return pauseResult
+                    ?? PlayerPlaybackResult.Fail(
+                        "정방향 전환 후 일시정지 결과가 없습니다.",
+                        "FORWARD_PAUSE_RESULT_EMPTY",
+                        PlaybackFailureCategory.System);
+            }
+
+            /*
+             * 최초 조회 시작시간에서 생성된 세션을
+             * 역재생 종료 위치로 직접 이동한다.
+             *
+             * keepPaused=false이므로 정렬 성공 후 전체 재생이 재개된다.
+             */
+            PlayerPlaybackResult alignmentResult =
+                await AlignPlaybackSessionsToTimeAsync(
+                    forwardTargetTime,
+                    false,
+                    cancellationToken);
+
+            if (alignmentResult == null
+                || !alignmentResult.Success)
+            {
+                _currentSpeed =
+                    selectedSpeed;
+
+                PlayerPlaybackResult failureResult =
+                    alignmentResult
+                    ?? PlayerPlaybackResult.Fail(
+                        "정방향 전환 후 영상 정렬 결과가 없습니다.",
+                        "FORWARD_ALIGNMENT_RESULT_EMPTY",
+                        PlaybackFailureCategory.System);
+
+                return await RecoverFromPlaybackFailureAsync(
+                    "정방향 전환 후 좌우 영상 정렬",
+                    failureResult,
+                    "FORWARD_ALIGNMENT_FAILED");
+            }
+
+            /*
+             * 정방향 위치 정렬이 완료된 후
+             * 사용자가 선택했던 배속을 복원한다.
+             */
+            _currentSpeed =
+                selectedSpeed;
+
             if (_currentSpeed
                 != PlaybackSpeed.Normal)
             {
@@ -1765,44 +2043,14 @@ namespace CamViewer.Services
                         speedResult,
                         "FORWARD_SPEED_APPLY_FAILED");
                 }
-
-                /*
-                 * 확정된 운영 정책:
-                 * 배속 상태에서는 자동 동기화와 Seek를 실행하지 않는다.
-                 */
-                return PlayerPlaybackResult.Ok(
-                    "정방향 재생으로 전환했습니다. "
-                    + forwardStartTime.ToString(
-                        "yyyy-MM-dd HH:mm:ss")
-                    + " / "
-                    + GetPlaybackSpeedText(
-                        _currentSpeed)
-                    + " / 배속 재생 중에는 자동 영상 동기화를 실행하지 않습니다.");
-            }
-
-            /*
-             * 1배속 정방향 전환인 경우에만
-             * 좌우 영상 동기화를 실행한다.
-             */
-            PlayerPlaybackResult syncResult =
-                await ResyncPlaybackSessionsAsync(
-                    cancellationToken);
-
-            if (syncResult == null
-                || !syncResult.Success)
-            {
-                return await RecoverFromPlaybackFailureAsync(
-                    "정방향 전환 후 좌우 영상 동기화",
-                    syncResult,
-                    "FORWARD_SYNC_FAILED");
             }
 
             return PlayerPlaybackResult.Ok(
                 "정방향 재생으로 전환했습니다. "
-                + forwardStartTime.ToString(
+                + forwardTargetTime.ToString(
                     "yyyy-MM-dd HH:mm:ss")
                 + " / "
-                + syncResult.Message);
+                + alignmentResult.Message);
         }
 
         /// <summary>
@@ -2059,6 +2307,366 @@ namespace CamViewer.Services
 
             return PlayerPlaybackResult.Ok(
                 "기존 재생 세션을 정리했습니다.");
+        }
+
+        /// <summary>
+        /// 모든 정방향 재생 세션을 동일한 공통 영상 시각으로 정렬한다.
+        ///
+        /// 한 번의 정렬 후 채널 간 시간차가 허용 범위를 초과하면
+        /// 실제로 가장 늦게 준비된 채널의 시각을 새 목표 시각으로 사용하여
+        /// 전체 채널을 다시 정렬한다.
+        /// </summary>
+        private async Task<PlayerPlaybackResult>
+            AlignPlaybackSessionsToTimeAsync(
+                DateTime targetTime,
+                bool keepPaused,
+                CancellationToken cancellationToken)
+        {
+            const int maximumAlignmentAttempts = 3;
+            const double allowedDifferenceSeconds = 1.0;
+
+            DateTime currentTargetTime =
+                ClampPlaybackTime(
+                    targetTime);
+
+            for (int attempt = 1;
+                attempt <= maximumAlignmentAttempts;
+                attempt++)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return PlayerPlaybackResult.Fail(
+                        "영상 동기화 요청이 취소되었습니다.",
+                        "PLAYBACK_SYNC_CANCELLED");
+                }
+
+                /*
+                 * 각 보정 시도마다 모든 채널을 동일한 공통 시각으로 정렬한다.
+                 */
+                foreach (KeyValuePair<int, INvrPlaybackSession> item
+                    in _sessions.ToList())
+                {
+                    int sessionKey =
+                        item.Key;
+
+                    INvrPlaybackSession session =
+                        item.Value;
+
+                    if (session == null)
+                    {
+                        return PlayerPlaybackResult.Fail(
+                            "동기화할 재생 세션 정보가 없습니다.",
+                            "PLAYBACK_SYNC_SESSION_INVALID",
+                            PlaybackFailureCategory.System);
+                    }
+
+                    INvrProvider provider =
+                        GetProviderByNvrNo(
+                            session.NvrNo);
+
+                    if (provider == null)
+                    {
+                        return PlayerPlaybackResult.Fail(
+                            "동기화할 NVR Provider를 찾을 수 없습니다. "
+                            + "NvrNo="
+                            + session.NvrNo
+                            + ", ChannelNo="
+                            + session.ChannelNo,
+                            "NVR_PROVIDER_NOT_FOUND",
+                            PlaybackFailureCategory.Configuration);
+                    }
+
+                    INvrPlaybackAlignmentProvider alignmentProvider =
+                        provider as INvrPlaybackAlignmentProvider;
+
+                    if (alignmentProvider == null)
+                    {
+                        return PlayerPlaybackResult.Fail(
+                            "현재 NVR Provider는 재생 정렬 기능을 "
+                            + "구현하지 않았습니다. "
+                            + "NvrNo="
+                            + session.NvrNo
+                            + ", ChannelNo="
+                            + session.ChannelNo,
+                            "PLAYBACK_ALIGNMENT_PROVIDER_NOT_IMPLEMENTED",
+                            PlaybackFailureCategory.NotSupported);
+                    }
+
+                    int offsetSeconds =
+                        GetSessionTimeOffset(
+                            sessionKey);
+
+                    DateTime providerTargetTime =
+                        currentTargetTime.AddSeconds(
+                            offsetSeconds);
+
+                    var alignmentRequest =
+                        new NvrPlaybackAlignmentRequest
+                        {
+                            TargetTime =
+                                providerTargetTime,
+
+                            Direction =
+                                NvrPlaybackDirection.Forward,
+
+                            Speed =
+                                NvrPlaybackSpeed.Normal,
+
+                            RemainPaused =
+                                true
+                        };
+
+                    NvrResult<INvrPlaybackSession> alignmentResult =
+                        await alignmentProvider.AlignPlaybackAsync(
+                            session,
+                            alignmentRequest,
+                            cancellationToken);
+
+                    if (alignmentResult == null
+                        || !alignmentResult.Success
+                        || alignmentResult.Data == null)
+                    {
+                        return ToPlayerResult(
+                            alignmentResult);
+                    }
+
+                    _sessions[sessionKey] =
+                        alignmentResult.Data;
+                }
+
+                /*
+                 * 모든 채널 정렬이 끝난 뒤 실제 OSD 시간을 한 번 읽는다.
+                 */
+                List<PlaybackTimeSnapshot> snapshots =
+                    await GetPlaybackTimeSnapshotsAsync(
+                        cancellationToken);
+
+                if (snapshots.Count < _sessions.Count)
+                {
+                    /*
+                     * 아직 모든 OSD가 준비되지 않은 경우에는
+                     * 잠시 기다린 뒤 같은 목표 시각으로 다시 정렬한다.
+                     */
+                    if (attempt < maximumAlignmentAttempts)
+                    {
+                        await Task.Delay(
+                            200,
+                            cancellationToken);
+
+                        continue;
+                    }
+
+                    return PlayerPlaybackResult.Fail(
+                        "일부 채널의 실제 재생시간을 확인하지 못했습니다.",
+                        "PLAYBACK_SYNC_TIME_UNAVAILABLE",
+                        PlaybackFailureCategory.Retryable);
+                }
+
+                DateTime minimumTime =
+                    snapshots.Min(
+                        snapshot =>
+                            snapshot.NormalizedTime);
+
+                DateTime maximumTime =
+                    snapshots.Max(
+                        snapshot =>
+                            snapshot.NormalizedTime);
+
+                double differenceSeconds =
+                    Math.Abs(
+                        (
+                            maximumTime
+                            - minimumTime
+                        ).TotalSeconds);
+
+                if (differenceSeconds
+                    <= allowedDifferenceSeconds)
+                {
+                    PlaybackTimeSnapshot master =
+                        snapshots.FirstOrDefault(
+                            snapshot =>
+                                snapshot.Session != null
+                                && snapshot.Session.ScreenPosition
+                                    == (int)ScreenPosition.Left);
+
+                    if (master == null)
+                    {
+                        master =
+                            snapshots[0];
+                    }
+
+                    _currentPlaybackTime =
+                        ClampPlaybackTime(
+                            master.NormalizedTime);
+
+                    _playbackClockStartedAtUtc =
+                        null;
+
+                    CurrentState =
+                        PlaybackState.Paused;
+
+                    if (keepPaused)
+                    {
+                        return PlayerPlaybackResult.Ok(
+                            "일시정지 상태를 유지하면서 좌우 영상을 동기화했습니다. "
+                            + "기준시간 "
+                            + _currentPlaybackTime.Value.ToString(
+                                "yyyy-MM-dd HH:mm:ss"));
+                    }
+
+                    PlayerPlaybackResult resumeResult =
+                        await ResumeAsync(
+                            cancellationToken);
+
+                    if (resumeResult == null
+                        || !resumeResult.Success)
+                    {
+                        return resumeResult
+                            ?? PlayerPlaybackResult.Fail(
+                                "영상 동기화 후 재생 재개 결과가 없습니다.",
+                                "PLAYBACK_SYNC_RESUME_RESULT_EMPTY");
+                    }
+
+                    return PlayerPlaybackResult.Ok(
+                        "좌우 영상을 동기화했습니다. "
+                        + "기준시간 "
+                        + _currentPlaybackTime.Value.ToString(
+                            "yyyy-MM-dd HH:mm:ss")
+                        + ", 시간차 "
+                        + differenceSeconds.ToString("0.0")
+                        + "초");
+                }
+
+                /*
+                 * 기다려도 Pause된 채널 간 차이는 줄어들지 않는다.
+                 *
+                 * 현재 가장 늦은 실제 시각을 다음 정렬 목표로 사용하여
+                 * 모든 채널을 한 번 더 맞춘다.
+                 */
+                currentTargetTime =
+                    ClampPlaybackTime(
+                        maximumTime);
+            }
+
+            return PlayerPlaybackResult.Fail(
+                "재생시간을 반복 보정했지만 좌우 채널을 "
+                + "허용 범위 안으로 맞추지 못했습니다.",
+                "PLAYBACK_SYNC_ALIGNMENT_RETRY_EXCEEDED",
+                PlaybackFailureCategory.Retryable);
+        }
+
+        /// <summary>
+        /// 모든 재생 세션의 실제 정규화 시간이
+        /// 서로 허용 범위 안으로 맞춰졌는지 확인한다.
+        ///
+        /// 동기화 성공 여부는 최초 요청한 targetTime과의 차이가 아니라
+        /// 채널 간 실제 재생시간 차이를 기준으로 판단한다.
+        /// </summary>
+        private async Task<DateTime?> WaitForPlaybackAlignmentAsync(
+            double allowedDifferenceSeconds,
+            CancellationToken cancellationToken)
+        {
+            const int maximumWaitMilliseconds =
+                3000;
+
+            const int pollingIntervalMilliseconds =
+                200;
+
+            Stopwatch stopwatch =
+                Stopwatch.StartNew();
+
+            while (stopwatch.ElapsedMilliseconds
+                < maximumWaitMilliseconds)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return null;
+                }
+
+                List<PlaybackTimeSnapshot> snapshots =
+                    await GetPlaybackTimeSnapshotsAsync(
+                        cancellationToken);
+
+                bool allTimesAvailable =
+                    snapshots.Count >= _sessions.Count;
+
+                if (allTimesAvailable
+                    && snapshots.Count > 0)
+                {
+                    DateTime minimumTime =
+                        snapshots.Min(
+                            snapshot =>
+                                snapshot.NormalizedTime);
+
+                    DateTime maximumTime =
+                        snapshots.Max(
+                            snapshot =>
+                                snapshot.NormalizedTime);
+
+                    double channelDifferenceSeconds =
+                        Math.Abs(
+                            (
+                                maximumTime
+                                - minimumTime
+                            ).TotalSeconds);
+
+                    /*
+                     * 목표 시각과의 오차가 아니라
+                     * 가장 빠른 채널과 가장 느린 채널의 차이를 확인한다.
+                     */
+                    if (channelDifferenceSeconds
+                        <= allowedDifferenceSeconds)
+                    {
+                        /*
+                         * 서비스 표시시간은 좌측 화면 시간을 우선 사용한다.
+                         *
+                         * ScreenPosition.Left의 내부값은 0이다.
+                         */
+                        PlaybackTimeSnapshot master =
+                            snapshots.FirstOrDefault(
+                                snapshot =>
+                                    snapshot.Session != null
+                                    && snapshot.Session.ScreenPosition
+                                        == (int)ScreenPosition.Left);
+
+                        if (master == null)
+                        {
+                            master =
+                                snapshots[0];
+                        }
+
+                        return master.NormalizedTime;
+                    }
+                }
+
+                int remainingMilliseconds =
+                    maximumWaitMilliseconds
+                    - Convert.ToInt32(
+                        stopwatch.ElapsedMilliseconds);
+
+                if (remainingMilliseconds <= 0)
+                {
+                    break;
+                }
+
+                int delayMilliseconds =
+                    Math.Min(
+                        pollingIntervalMilliseconds,
+                        remainingMilliseconds);
+
+                try
+                {
+                    await Task.Delay(
+                        delayMilliseconds,
+                        cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    return null;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -3265,11 +3873,27 @@ namespace CamViewer.Services
 
         /// <summary>
         /// 지정한 영상재생시간으로 이동한다.
-        /// 이동 후 좌/우 영상 싱크를 동기화한다.
+        ///
+        /// 정방향 처리 순서:
+        /// 1. 현재 재생 상태 확인
+        /// 2. 재생 중이면 모든 채널 Pause
+        /// 3. 모든 채널을 목표 시각으로 한 번만 정렬
+        /// 4. 실제 OSD 시간 검증
+        /// 5. 기존 상태가 재생 중이면 전체 Resume
+        ///
+        /// 역방향은 기존 역재생 세션 재생성 방식을 유지한다.
         /// </summary>
         public async Task<PlayerPlaybackResult> SeekToTimeAsync(DateTime targetTime, CancellationToken cancellationToken)
         {
             EnsureNotDisposed();
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "재생 위치 이동 요청이 취소되었습니다.",
+                    "PLAYBACK_SEEK_CANCELLED",
+                    PlaybackFailureCategory.Cancelled);
+            }
 
             if (_sessions.Count == 0)
             {
@@ -3299,170 +3923,101 @@ namespace CamViewer.Services
                     "SEEK_AFTER_END");
             }
 
-            PlaybackState stateBeforeSeek =
-                CurrentState;
+            PlaybackState stateBeforeSeek = CurrentState;
 
             /*
-             * 역재생 중 또는 역재생 일시정지 상태에서 위치를 이동할 때는
-             * 일반 Provider.SeekAsync를 사용하면 안 된다.
-             *
-             * Dahua의 일반 SeekAsync는 정방향 PlayByTime 세션을 다시 만들기 때문에
-             * 서비스 상태만 Rewinding이고 실제 영상은 정방향이 되는 문제가 발생한다.
+             * 역재생 중이거나 역재생에서 일시정지된 상태는
+             * 정방향 Alignment Provider를 사용하지 않는다.
              */
-            bool isReverseSeek =
-                stateBeforeSeek == PlaybackState.Rewinding
-                || (
-                    stateBeforeSeek == PlaybackState.Paused
-                    && _pausedFromState == PlaybackState.Rewinding
-                );
+            bool isReverseSeek = 
+                stateBeforeSeek == PlaybackState.Rewinding || (stateBeforeSeek == PlaybackState.Paused && _pausedFromState == PlaybackState.Rewinding);
 
             if (isReverseSeek)
             {
-                return await SeekReverseToTimeAsync(
-                    targetTime,
-                    stateBeforeSeek == PlaybackState.Paused,
-                    cancellationToken);
+                return await SeekReverseToTimeAsync(targetTime, stateBeforeSeek == PlaybackState.Paused, cancellationToken);
+            }
+
+            if (stateBeforeSeek != PlaybackState.Playing && stateBeforeSeek != PlaybackState.Paused)
+            {
+                return PlayerPlaybackResult.Fail(
+                    "현재 재생 상태에서는 영상 위치를 이동할 수 없습니다.",
+                    "PLAYBACK_SEEK_INVALID_STATE");
+            }
+
+            bool keepPaused = stateBeforeSeek == PlaybackState.Paused;
+
+            /*
+             * 재생 중인 상태에서 한 채널씩 Seek하면
+             * 먼저 처리된 채널은 계속 진행하여 다시 시간차가 발생한다.
+             *
+             * 따라서 모든 채널을 먼저 Pause한 뒤 고정된 상태에서 정렬한다.
+             */
+            if (!keepPaused)
+            {
+                PlayerPlaybackResult pauseResult =
+                    await PauseAsync(
+                        cancellationToken);
+
+                if (pauseResult == null)
+                {
+                    PlayerPlaybackResult emptyPauseResult =
+                        PlayerPlaybackResult.Fail(
+                            "재생 위치 이동 전 일시정지 결과가 없습니다.",
+                            "PLAYBACK_SEEK_PAUSE_RESULT_EMPTY",
+                            PlaybackFailureCategory.System);
+
+                    return await RecoverFromPlaybackFailureAsync(
+                        "재생 위치 이동",
+                        emptyPauseResult,
+                        "PLAYBACK_SEEK_FAILED");
+                }
+
+                if (!pauseResult.Success)
+                {
+                    return pauseResult;
+                }
             }
 
             /*
-             * Dictionary 원본을 직접 순회하지 않고 복사본을 사용한다.
+             * 각 채널에 provider.SeekAsync를 직접 호출하지 않는다.
              *
-             * Seek 실패 시 RecoverFromPlaybackFailureAsync 내부에서
-             * _sessions가 초기화될 수 있으므로, 원본 Dictionary를 순회하면
-             * 컬렉션 변경 오류가 발생할 가능성이 있다.
+             * 실제 정렬, OSD 도착 확인, 재정렬 보정 및 Resume는
+             * AlignPlaybackSessionsToTimeAsync 한 곳에서 처리한다.
              */
-            foreach (KeyValuePair<int, INvrPlaybackSession> item
-                in _sessions.ToList())
+            PlayerPlaybackResult alignmentResult =
+                await AlignPlaybackSessionsToTimeAsync(
+                    targetTime,
+                    keepPaused,
+                    cancellationToken);
+
+            if (alignmentResult == null)
             {
-                INvrPlaybackSession session =
-                    item.Value;
+                PlayerPlaybackResult emptyResult =
+                    PlayerPlaybackResult.Fail(
+                        "재생 위치 정렬 결과가 없습니다.",
+                        "PLAYBACK_SEEK_ALIGNMENT_RESULT_EMPTY",
+                        PlaybackFailureCategory.System);
 
-                /*
-                 * 세션 정보가 손실된 상태에서는 정상적인 Seek를 보장할 수 없다.
-                 * 일부 채널만 이동하지 않도록 전체 재생을 정리한다.
-                 */
-                if (session == null)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "재생 세션 정보가 없습니다.",
-                            "PLAYBACK_SESSION_INVALID");
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 위치 이동",
-                        failureResult,
-                        "PLAYBACK_SEEK_FAILED");
-                }
-
-                INvrProvider provider =
-                    GetProviderByNvrNo(
-                        session.NvrNo);
-
-                /*
-                 * 기존에는 Provider가 없으면 continue하여
-                 * 나머지 채널만 이동할 수 있었다.
-                 *
-                 * 좌우 화면의 재생 위치가 달라지는 것을 막기 위해
-                 * Provider 누락도 전체 재생 실패로 처리한다.
-                 */
-                if (provider == null)
-                {
-                    PlayerPlaybackResult failureResult =
-                        PlayerPlaybackResult.Fail(
-                            "NVR Provider를 찾을 수 없습니다. "
-                            + "NvrNo="
-                            + session.NvrNo
-                            + ", ChannelNo="
-                            + session.ChannelNo
-                            + ", ScreenPosition="
-                            + session.ScreenPosition,
-                            "NVR_PROVIDER_NOT_FOUND");
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 위치 이동",
-                        failureResult,
-                        "PLAYBACK_SEEK_FAILED");
-                }
-
-                /*
-                 * 채널마다 설정된 시간 보정값을 적용한다.
-                 *
-                 * 예:
-                 * 공통 UI 목표시간 10:00:00
-                 * 채널 보정값 +2초
-                 * 실제 Provider Seek 시간 10:00:02
-                 */
-                int offsetSeconds =
-                    GetSessionTimeOffset(
-                        item.Key);
-
-                DateTime providerTargetTime =
-                    targetTime.AddSeconds(
-                        offsetSeconds);
-
-                NvrResult result =
-                    await provider.SeekAsync(
-                        session,
-                        providerTargetTime,
-                        cancellationToken);
-
-                /*
-                 * 한 채널이라도 Seek에 실패하면 다른 채널은 이미 이동했을 수 있다.
-                 * 부분 이동 상태를 유지하지 않고 전체 세션을 정리한다.
-                 */
-                if (result == null || !result.Success)
-                {
-                    PlayerPlaybackResult failureResult =
-                        ToPlayerResult(result);
-
-                    return await RecoverFromPlaybackFailureAsync(
-                        "재생 위치 이동",
-                        failureResult,
-                        "PLAYBACK_SEEK_FAILED");
-                }
-            }
-
-            _currentPlaybackTime = targetTime;
-
-            if (stateBeforeSeek == PlaybackState.Playing
-                || stateBeforeSeek == PlaybackState.Rewinding)
-            {
-                _playbackClockStartedAtUtc = DateTime.UtcNow;
-                CurrentState = stateBeforeSeek;
-            }
-            else if (stateBeforeSeek == PlaybackState.Paused)
-            {
-                _playbackClockStartedAtUtc = null;
-                CurrentState = PlaybackState.Paused;
-            }
-            else
-            {
-                _playbackClockStartedAtUtc = null;
-                CurrentState = stateBeforeSeek;
-            }
-
-            PlayerPlaybackResult syncResult = await ResyncPlaybackSessionsAsync( cancellationToken);
-
-            if (!syncResult.Success)
-            {
-                /*
-                 * 모든 채널의 개별 Seek는 성공했지만
-                 * 최종 좌우 시간 동기화에 실패한 상태다.
-                 *
-                 * 실제 채널 위치가 서로 다를 수 있으므로
-                 * 세션을 유지하지 않고 전체 재생 상태를 초기화한다.
-                 */
                 return await RecoverFromPlaybackFailureAsync(
-                    "이동 후 좌우 영상 동기화",
-                    syncResult,
-                    "PLAYBACK_SEEK_SYNC_FAILED");
+                    "재생 위치 이동",
+                    emptyResult,
+                    "PLAYBACK_SEEK_FAILED");
+            }
+
+            if (!alignmentResult.Success)
+            {
+                return await RecoverFromPlaybackFailureAsync(
+                    "재생 위치 이동",
+                    alignmentResult,
+                    "PLAYBACK_SEEK_FAILED");
             }
 
             return PlayerPlaybackResult.Ok(
                 "재생 위치를 이동했습니다. "
-                + targetTime.ToString("yyyy-MM-dd HH:mm:ss")
+                + targetTime.ToString(
+                    "yyyy-MM-dd HH:mm:ss")
                 + " / "
-                + syncResult.Message);
+                + alignmentResult.Message);
         }
 
         /// <summary>
@@ -3845,12 +4400,14 @@ namespace CamViewer.Services
         /// </summary>
         private static string GetScreenPositionText(int screenPosition)
         {
-            if (screenPosition == 1)
+            if (screenPosition
+                == (int)ScreenPosition.Left)
             {
                 return "좌측";
             }
 
-            if (screenPosition == 2)
+            if (screenPosition
+                == (int)ScreenPosition.Right)
             {
                 return "우측";
             }

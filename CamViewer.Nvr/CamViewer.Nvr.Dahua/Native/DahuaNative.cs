@@ -510,6 +510,26 @@ namespace CamViewer.Nvr.Dahua.Native
             [MarshalAs(UnmanagedType.Bool)] bool pause);
 
         /// <summary>
+        /// 현재 Dahua 녹화 재생 핸들을
+        /// 재생 시작 시각 기준의 상대 초 위치로 이동한다.
+        ///
+        /// offsetTime:
+        /// CLIENT_PlayBackByTimeEx에 전달한 StartTime으로부터의 상대 초.
+        ///
+        /// offsetByte:
+        /// 현재 SDK에서는 사용하지 않는 값이므로 uint.MaxValue를 전달한다.
+        /// </summary>
+        [DllImport(
+            DllName,
+            CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Ansi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CLIENT_SeekPlayBack(
+            IntPtr playHandle,
+            uint offsetTime,
+            uint offsetByte);
+
+        /// <summary>
         /// 재생 속도를 빠르게 한다.
         /// SDK 내부 기준으로 호출할 때마다 한 단계씩 빨라진다.
         /// </summary>
