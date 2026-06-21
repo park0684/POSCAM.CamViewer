@@ -741,42 +741,847 @@ namespace CamViewer.Nvr.Dahua.Playback
 
 
 
-        /// <summary>
-        /// Dahua 재생 그룹의 모든 채널을 일시정지한다.
-        /// </summary>
-        public Task<NvrResult> PauseAsync(
-            INvrPlaybackGroupSession session,
-            CancellationToken cancellationToken)
-        {
-            return Task.FromResult(
-                CreateNotImplementedResult(
-                    "Pause"));
-        }
 
         /// <summary>
-        /// 일시정지된 Dahua 재생 그룹을 재개한다.
+        /// 재생 중인 Dahua 그룹의 모든 채널을 일시정지한다.
+        ///
+        /// 처리 순서:
+        /// 1. 그룹 세션과 현재 상태 확인
+        /// 2. 채널별 Pause 명령 수행
+        /// 3. 일부 채널 Pause 실패 시 이미 멈춘 채널을 다시 Resume
+        /// 4. 모든 채널 성공 시 그룹 상태를 Paused로 변경
+        ///
+        /// 일시정지하더라도 Direction은 변경하지 않는다.
+        /// 이후 ResumeAsync가 기존 방향을 기준으로 상태를 복원한다.
         /// </summary>
-        public Task<NvrResult> ResumeAsync(
-            INvrPlaybackGroupSession session,
-            CancellationToken cancellationToken)
+        public async Task<NvrResult> PauseAsync(INvrPlaybackGroupSession session, CancellationToken cancellationToken)
         {
-            return Task.FromResult(
-                CreateNotImplementedResult(
-                    "Resume"));
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Cancelled,
+                    "Dahua 재생 그룹 일시정지 요청이 취소되었습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_PAUSE_CANCELLED",
+                        "Dahua 재생 그룹 일시정지 요청이 취소되었습니다.",
+                        "Pause"));
+            }
+
+            DahuaPlaybackGroupSession groupSession =
+                session as DahuaPlaybackGroupSession;
+
+            if (groupSession == null)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹 세션이 아닙니다.",
+                    CreateError(
+                        "INVALID_DAHUA_GROUP_SESSION",
+                        "Dahua 재생 그룹 세션이 아닙니다.",
+                        "Pause"));
+            }
+
+            /*
+             * 이미 일시정지된 상태라면 중복 명령으로 보고
+             * SDK Pause 명령을 다시 호출하지 않는다.
+             */
+            if (groupSession.State
+                == NvrPlaybackState.Paused)
+            {
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹이 이미 일시정지되어 있습니다.");
+            }
+
+            if (!groupSession.IsReady)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹이 준비되지 않았습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_NOT_READY",
+                        "Dahua 재생 그룹이 준비되지 않았습니다.",
+                        "Pause"));
+            }
+
+            if (groupSession.ChannelCount <= 0)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_CHANNEL_EMPTY",
+                        "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                        "Pause"));
+            }
+
+            /*
+             * 정방향 재생 또는 역방향 재생 중일 때만
+             * 일시정지 명령을 허용한다.
+             */
+            if (groupSession.State != NvrPlaybackState.Playing
+                && groupSession.State != NvrPlaybackState.Rewinding)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹을 일시정지할 수 없는 상태입니다. "
+                    + "State="
+                    + groupSession.State,
+                    CreateError(
+                        "DAHUA_GROUP_INVALID_PAUSE_STATE",
+                        "Dahua 재생 그룹을 일시정지할 수 없는 상태입니다.",
+                        "Pause"));
+            }
+
+            /*
+             * Pause 실패 시 원래 상태로 돌려놓기 위해
+             * 현재 그룹 상태를 보관한다.
+             */
+            NvrPlaybackState originalState =
+                groupSession.State;
+
+            IList<DahuaPlaybackGroupChannel> channels =
+                groupSession.GetChannels();
+
+            var pausedChannels =
+                new List<DahuaPlaybackGroupChannel>();
+
+            foreach (DahuaPlaybackGroupChannel channel
+                in channels)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    /*
+                     * 이미 Pause된 채널을 다시 Resume하여
+                     * 취소 전의 재생 상태로 복원한다.
+                     */
+                    await ResumePausedChannelsAsync(
+                        pausedChannels);
+
+                    groupSession.SetState(
+                        originalState);
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Cancelled,
+                        "Dahua 재생 그룹 일시정지 요청이 취소되었습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_PAUSE_CANCELLED",
+                            "Dahua 재생 그룹 일시정지 요청이 취소되었습니다.",
+                            "Pause"));
+                }
+
+                if (channel == null
+                    || channel.Session == null)
+                {
+                    await ResumePausedChannelsAsync(
+                        pausedChannels);
+
+                    groupSession.SetState(
+                        originalState);
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_CHANNEL_SESSION_INVALID",
+                            "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                            "Pause"));
+                }
+
+                NvrResult pauseResult =
+                    await _provider.PauseAsync(
+                        channel.Session,
+                        cancellationToken);
+
+                if (pauseResult == null
+                    || !pauseResult.Success)
+                {
+                    /*
+                     * 일부 채널만 정지된 상태를 방지하기 위해
+                     * 앞에서 Pause된 채널들을 다시 Resume한다.
+                     */
+                    await ResumePausedChannelsAsync(
+                        pausedChannels);
+
+                    groupSession.SetState(
+                        originalState);
+
+                    return NvrResult.Fail(
+                        pauseResult == null
+                            ? NvrResultStatus.Failed
+                            : pauseResult.Status,
+
+                        pauseResult == null
+                            ? "Dahua 채널 일시정지 결과가 없습니다."
+                            : pauseResult.Message,
+
+                        pauseResult == null
+                            ? CreateError(
+                                "DAHUA_GROUP_PAUSE_RESULT_EMPTY",
+                                "Dahua 채널 일시정지 결과가 없습니다.",
+                                "Pause")
+                            : pauseResult.Error);
+                }
+
+                pausedChannels.Add(
+                    channel);
+            }
+
+            /*
+             * 모든 채널의 Pause가 성공한 이후에만
+             * 그룹 전체 상태를 Paused로 확정한다.
+             *
+             * Direction은 유지한다.
+             */
+            groupSession.SetState(
+                NvrPlaybackState.Paused);
+
+            groupSession.SetReady(
+                true,
+                "Dahua 재생 그룹의 모든 채널을 일시정지했습니다.");
+
+            return NvrResult.Ok(
+                "Dahua 재생 그룹을 일시정지했습니다.");
         }
 
+
+
         /// <summary>
-        /// Dahua 재생 그룹을 지정 시각으로 이동한다.
+        /// 일시정지된 Dahua 그룹의 모든 채널을 재개한다.
+        ///
+        /// 처리 순서:
+        /// 1. 그룹 세션과 현재 상태 확인
+        /// 2. 채널별 Resume 명령 수행
+        /// 3. 일부 채널 Resume 실패 시 이미 시작된 채널을 다시 Pause
+        /// 4. 기존 Direction에 따라 Playing 또는 Rewinding 상태로 복원
         /// </summary>
-        public Task<NvrResult> SeekAsync(
+        public async Task<NvrResult> ResumeAsync(INvrPlaybackGroupSession session, CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Cancelled,
+                    "Dahua 재생 그룹 재개 요청이 취소되었습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_RESUME_CANCELLED",
+                        "Dahua 재생 그룹 재개 요청이 취소되었습니다.",
+                        "Resume"));
+            }
+
+            DahuaPlaybackGroupSession groupSession =
+                session as DahuaPlaybackGroupSession;
+
+            if (groupSession == null)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹 세션이 아닙니다.",
+                    CreateError(
+                        "INVALID_DAHUA_GROUP_SESSION",
+                        "Dahua 재생 그룹 세션이 아닙니다.",
+                        "Resume"));
+            }
+
+            /*
+             * 이미 현재 방향으로 재생 중이면
+             * 중복 Resume 요청으로 처리한다.
+             */
+            if (groupSession.State == NvrPlaybackState.Playing
+                || groupSession.State == NvrPlaybackState.Rewinding)
+            {
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹이 이미 재생 중입니다.");
+            }
+
+            if (!groupSession.IsReady)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹이 준비되지 않았습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_NOT_READY",
+                        "Dahua 재생 그룹이 준비되지 않았습니다.",
+                        "Resume"));
+            }
+
+            if (groupSession.ChannelCount <= 0)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_CHANNEL_EMPTY",
+                        "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                        "Resume"));
+            }
+
+            if (groupSession.State
+                != NvrPlaybackState.Paused)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹을 재개할 수 없는 상태입니다. "
+                    + "State="
+                    + groupSession.State,
+                    CreateError(
+                        "DAHUA_GROUP_INVALID_RESUME_STATE",
+                        "Dahua 재생 그룹을 재개할 수 없는 상태입니다.",
+                        "Resume"));
+            }
+
+            IList<DahuaPlaybackGroupChannel> channels =
+                groupSession.GetChannels();
+
+            var resumedChannels =
+                new List<DahuaPlaybackGroupChannel>();
+
+            foreach (DahuaPlaybackGroupChannel channel
+                in channels)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    /*
+                     * 이미 Resume된 채널을 다시 Pause하여
+                     * 일시정지 상태로 복원한다.
+                     */
+                    await PauseStartedChannelsAsync(
+                        resumedChannels);
+
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Cancelled,
+                        "Dahua 재생 그룹 재개 요청이 취소되었습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_RESUME_CANCELLED",
+                            "Dahua 재생 그룹 재개 요청이 취소되었습니다.",
+                            "Resume"));
+                }
+
+                if (channel == null
+                    || channel.Session == null)
+                {
+                    await PauseStartedChannelsAsync(
+                        resumedChannels);
+
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_CHANNEL_SESSION_INVALID",
+                            "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                            "Resume"));
+                }
+
+                NvrResult resumeResult =
+                    await _provider.ResumeAsync(
+                        channel.Session,
+                        cancellationToken);
+
+                if (resumeResult == null
+                    || !resumeResult.Success)
+                {
+                    await PauseStartedChannelsAsync(
+                        resumedChannels);
+
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    return NvrResult.Fail(
+                        resumeResult == null
+                            ? NvrResultStatus.Failed
+                            : resumeResult.Status,
+
+                        resumeResult == null
+                            ? "Dahua 채널 재개 결과가 없습니다."
+                            : resumeResult.Message,
+
+                        resumeResult == null
+                            ? CreateError(
+                                "DAHUA_GROUP_RESUME_RESULT_EMPTY",
+                                "Dahua 채널 재개 결과가 없습니다.",
+                                "Resume")
+                            : resumeResult.Error);
+                }
+
+                resumedChannels.Add(
+                    channel);
+            }
+
+            /*
+             * Pause 중에도 Direction은 유지되므로
+             * 현재 방향을 기준으로 그룹 상태를 복원한다.
+             */
+            if (groupSession.Direction
+                == NvrPlaybackDirection.Reverse)
+            {
+                groupSession.SetState(
+                    NvrPlaybackState.Rewinding);
+            }
+            else
+            {
+                groupSession.SetState(
+                    NvrPlaybackState.Playing);
+            }
+
+            groupSession.SetReady(
+                true,
+                "Dahua 재생 그룹의 모든 채널을 재개했습니다.");
+
+            return NvrResult.Ok(
+                "Dahua 재생 그룹을 재개했습니다.");
+        }
+
+
+        /// <summary>
+        /// Dahua 재생 그룹의 모든 채널을 지정된 공통 영상 시각으로 이동한다.
+        ///
+        /// 처리 순서:
+        /// 1. 그룹과 목표 시각 검증
+        /// 2. 현재 재생 상태 보관
+        /// 3. 재생 중이면 전체 채널 일시정지
+        /// 4. 채널별 시간 보정값을 적용한 Provider 목표 시각 계산
+        /// 5. Dahua AlignPlaybackAsync를 이용해 실제 OSD 시각까지 정렬
+        /// 6. 그룹의 공통 영상재생시간 갱신
+        /// 7. Seek 전 재생 중이었다면 전체 채널 재개
+        ///
+        /// Seek 실패 시 일부 채널만 재생되는 상태를 방지하기 위해
+        /// 그룹은 일시정지 상태로 유지한다.
+        /// </summary>
+        public async Task<NvrResult> SeekAsync(
             INvrPlaybackGroupSession session,
             DateTime targetTime,
             CancellationToken cancellationToken)
         {
-            return Task.FromResult(
-                CreateNotImplementedResult(
-                    "Seek"));
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Cancelled,
+                    "Dahua 재생 그룹 이동 요청이 취소되었습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_SEEK_CANCELLED",
+                        "Dahua 재생 그룹 이동 요청이 취소되었습니다.",
+                        "Seek"));
+            }
+
+            DahuaPlaybackGroupSession groupSession =
+                session as DahuaPlaybackGroupSession;
+
+            if (groupSession == null)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹 세션이 아닙니다.",
+                    CreateError(
+                        "INVALID_DAHUA_GROUP_SESSION",
+                        "Dahua 재생 그룹 세션이 아닙니다.",
+                        "Seek"));
+            }
+
+            if (!groupSession.IsReady)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹이 준비되지 않았습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_NOT_READY",
+                        "Dahua 재생 그룹이 준비되지 않았습니다.",
+                        "Seek"));
+            }
+
+            if (groupSession.ChannelCount <= 0)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_CHANNEL_EMPTY",
+                        "Dahua 재생 그룹에 등록된 채널이 없습니다.",
+                        "Seek"));
+            }
+
+            /*
+             * 종료시간은 재생 구간에 포함되지 않는다.
+             *
+             * 따라서 StartTime <= targetTime < EndTime 조건을 사용한다.
+             */
+            if (targetTime < groupSession.StartTime)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "이동할 영상 시각은 조회 시작시간보다 이전일 수 없습니다.",
+                    CreateError(
+                        "DAHUA_GROUP_SEEK_BEFORE_START",
+                        "이동할 영상 시각은 조회 시작시간보다 이전일 수 없습니다.",
+                        "Seek"));
+            }
+
+            if (targetTime >= groupSession.EndTime)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "이동할 영상 시각은 조회 종료시간보다 이전이어야 합니다.",
+                    CreateError(
+                        "DAHUA_GROUP_SEEK_AFTER_END",
+                        "이동할 영상 시각은 조회 종료시간보다 이전이어야 합니다.",
+                        "Seek"));
+            }
+
+            /*
+             * 현재 Dahua AlignPlaybackAsync는 정방향 정렬만 지원한다.
+             *
+             * 역방향 Seek는 이후 SetDirectionAsync와 함께
+             * 역재생 세션 재생성 방식으로 구현한다.
+             */
+            if (groupSession.Direction
+                != NvrPlaybackDirection.Forward)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.NotSupported,
+                    "현재 Dahua 그룹 Seek는 정방향 재생만 지원합니다.",
+                    CreateError(
+                        "DAHUA_GROUP_REVERSE_SEEK_NOT_SUPPORTED",
+                        "현재 Dahua 그룹 Seek는 정방향 재생만 지원합니다.",
+                        "Seek"));
+            }
+
+            /*
+             * 기존 Dahua AlignPlaybackAsync는 현재 1배속 정렬만 지원한다.
+             *
+             * 배속 상태의 Seek는 SetSpeedAsync 구현 이후
+             * 임시 1배속 전환 및 기존 배속 복원 방식으로 확장한다.
+             */
+            if (groupSession.Speed
+                != NvrPlaybackSpeed.Normal)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.NotSupported,
+                    "현재 Dahua 그룹 Seek는 1배속에서만 지원합니다.",
+                    CreateError(
+                        "DAHUA_GROUP_SEEK_SPEED_NOT_SUPPORTED",
+                        "현재 Dahua 그룹 Seek는 1배속에서만 지원합니다.",
+                        "Seek"));
+            }
+
+            /*
+             * 재생 중 또는 일시정지 상태에서만 Seek를 허용한다.
+             */
+            if (groupSession.State != NvrPlaybackState.Playing
+                && groupSession.State != NvrPlaybackState.Paused)
+            {
+                return NvrResult.Fail(
+                    NvrResultStatus.Failed,
+                    "Dahua 재생 그룹을 이동할 수 없는 상태입니다. "
+                    + "State="
+                    + groupSession.State,
+                    CreateError(
+                        "DAHUA_GROUP_INVALID_SEEK_STATE",
+                        "Dahua 재생 그룹을 이동할 수 없는 상태입니다.",
+                        "Seek"));
+            }
+
+            bool wasPlaying =
+                groupSession.State
+                    == NvrPlaybackState.Playing;
+
+            /*
+             * 재생 중 Seek라면 먼저 전체 채널을 Pause한다.
+             *
+             * 채널이 움직이는 상태에서 순차적으로 Seek하면
+             * 채널마다 기준 시각이 달라질 수 있기 때문이다.
+             */
+            if (wasPlaying)
+            {
+                NvrResult pauseResult =
+                    await PauseAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (pauseResult == null
+                    || !pauseResult.Success)
+                {
+                    return NvrResult.Fail(
+                        pauseResult == null
+                            ? NvrResultStatus.Failed
+                            : pauseResult.Status,
+
+                        pauseResult == null
+                            ? "Dahua 재생 그룹 일시정지 결과가 없습니다."
+                            : pauseResult.Message,
+
+                        pauseResult == null
+                            ? CreateError(
+                                "DAHUA_GROUP_SEEK_PAUSE_RESULT_EMPTY",
+                                "Dahua 재생 그룹 일시정지 결과가 없습니다.",
+                                "Seek")
+                            : pauseResult.Error);
+                }
+            }
+
+            IList<DahuaPlaybackGroupChannel> channels =
+                groupSession.GetChannels();
+
+            foreach (DahuaPlaybackGroupChannel channel
+                in channels)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    /*
+                     * 일부 채널의 위치가 이미 변경되었을 수 있으므로
+                     * 자동 재개하지 않고 전체 그룹을 Paused 상태로 유지한다.
+                     */
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    groupSession.SetSynchronizationStatus(
+                        false,
+                        null,
+                        "Dahua 그룹 Seek가 취소되어 "
+                        + "일시정지 상태로 유지합니다.");
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Cancelled,
+                        "Dahua 재생 그룹 이동 요청이 취소되었습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_SEEK_CANCELLED",
+                            "Dahua 재생 그룹 이동 요청이 취소되었습니다.",
+                            "Seek"));
+                }
+
+                if (channel == null
+                    || channel.Session == null)
+                {
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    groupSession.SetSynchronizationStatus(
+                        false,
+                        null,
+                        "Dahua 채널 세션 오류로 "
+                        + "그룹을 일시정지 상태로 유지합니다.");
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                        CreateError(
+                            "DAHUA_GROUP_CHANNEL_SESSION_INVALID",
+                            "Dahua 재생 그룹의 채널 세션 정보가 없습니다.",
+                            "Seek"));
+                }
+
+                /*
+                 * CamViewer의 공통 영상 시각을
+                 * 해당 채널의 실제 NVR 영상 시각으로 변환한다.
+                 */
+                DateTime providerTargetTime =
+                    channel.ToProviderTime(
+                        targetTime);
+
+                var alignmentRequest =
+                    new NvrPlaybackAlignmentRequest
+                    {
+                        TargetTime =
+                            providerTargetTime,
+
+                        Direction =
+                            NvrPlaybackDirection.Forward,
+
+                        Speed =
+                            NvrPlaybackSpeed.Normal,
+
+                        /*
+                         * 모든 채널 정렬이 끝난 뒤 한 번에 Resume할 수 있도록
+                         * 각 채널은 정렬 후 Paused 상태로 유지한다.
+                         */
+                        RemainPaused =
+                            true
+                    };
+
+                NvrResult<INvrPlaybackSession> alignmentResult =
+                    await _provider.AlignPlaybackAsync(
+                        channel.Session,
+                        alignmentRequest,
+                        cancellationToken);
+
+                if (alignmentResult == null
+                    || !alignmentResult.Success
+                    || alignmentResult.Data == null)
+                {
+                    /*
+                     * 일부 채널만 새로운 위치에 도착했을 수 있으므로
+                     * 자동 재개하지 않는다.
+                     *
+                     * 사용자가 같은 Seek 명령을 다시 실행하거나
+                     * 그룹을 다시 열 수 있도록 Paused + Ready 상태로 유지한다.
+                     */
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    groupSession.SetReady(
+                        true,
+                        "일부 Dahua 채널의 위치 이동에 실패하여 "
+                        + "그룹을 일시정지 상태로 유지합니다.");
+
+                    groupSession.SetSynchronizationStatus(
+                        false,
+                        null,
+                        "일부 Dahua 채널의 Seek 정렬에 실패했습니다.");
+
+                    return NvrResult.Fail(
+                        alignmentResult == null
+                            ? NvrResultStatus.Failed
+                            : alignmentResult.Status,
+
+                        alignmentResult == null
+                            ? "Dahua 채널 정렬 결과가 없습니다."
+                            : alignmentResult.Message,
+
+                        alignmentResult == null
+                            ? CreateError(
+                                "DAHUA_GROUP_ALIGNMENT_RESULT_EMPTY",
+                                "Dahua 채널 정렬 결과가 없습니다.",
+                                "Seek")
+                            : alignmentResult.Error);
+                }
+
+                DahuaPlaybackSession alignedSession =
+                    alignmentResult.Data
+                        as DahuaPlaybackSession;
+
+                if (alignedSession == null)
+                {
+                    groupSession.SetState(
+                        NvrPlaybackState.Paused);
+
+                    groupSession.SetSynchronizationStatus(
+                        false,
+                        null,
+                        "Dahua 채널 정렬 결과의 세션 형식이 올바르지 않습니다.");
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua Provider가 다른 형식의 재생 세션을 반환했습니다.",
+                        CreateError(
+                            "INVALID_DAHUA_ALIGNMENT_SESSION",
+                            "Dahua Provider가 다른 형식의 재생 세션을 반환했습니다.",
+                            "Seek"));
+                }
+
+                /*
+                 * 현재 구현은 같은 DahuaPlaybackSession을 반환하지만,
+                 * 향후 Provider 내부에서 세션을 재생성할 가능성에 대비한다.
+                 */
+                if (!object.ReferenceEquals(
+                        channel.Session,
+                        alignedSession))
+                {
+                    DahuaPlaybackSession previousSession =
+                        channel.Session;
+
+                    try
+                    {
+                        await _provider.StopAsync(
+                            previousSession,
+                            CancellationToken.None);
+                    }
+                    catch
+                    {
+                        /*
+                         * 이전 세션 정리 실패가
+                         * 새 세션 등록을 막지 않게 한다.
+                         */
+                    }
+
+                    channel.ReplaceSession(
+                        alignedSession);
+                }
+            }
+
+            /*
+             * 모든 채널 정렬이 성공한 경우에만
+             * 그룹의 공통 영상재생시간을 변경한다.
+             */
+            groupSession.SetCurrentPlaybackTime(
+                targetTime);
+
+            if (groupSession.ChannelCount <= 1)
+            {
+                groupSession.SetSynchronizationStatus(
+                    true,
+                    0d,
+                    "단일 Dahua 채널의 위치 이동이 완료되었습니다.");
+            }
+            else
+            {
+                /*
+                 * 각 채널은 목표 시각 부근까지 정렬되었지만
+                 * 실제 채널 간 최대 시간차는 아직 계산하지 않았다.
+                 *
+                 * 이후 SynchronizeAsync에서 실제 OSD를 비교한다.
+                 */
+                groupSession.SetSynchronizationStatus(
+                    false,
+                    null,
+                    "Dahua 채널 위치 이동이 완료되었습니다. "
+                    + "실제 채널 간 동기화 확인이 필요합니다.");
+            }
+
+            /*
+             * Seek 이전에 재생 중이었다면
+             * 모든 채널 정렬이 완료된 후 다시 재생한다.
+             *
+             * Seek 이전이 Paused 상태였다면 그대로 유지한다.
+             */
+            if (wasPlaying)
+            {
+                NvrResult resumeResult =
+                    await ResumeAsync(
+                        groupSession,
+                        cancellationToken);
+
+                if (resumeResult == null
+                    || !resumeResult.Success)
+                {
+                    /*
+                     * ResumeAsync 실패 시에도 모든 채널은
+                     * Paused 상태로 복원되므로 안전한 상태가 유지된다.
+                     */
+                    return NvrResult.Fail(
+                        resumeResult == null
+                            ? NvrResultStatus.Failed
+                            : resumeResult.Status,
+
+                        resumeResult == null
+                            ? "Dahua 재생 그룹 재개 결과가 없습니다."
+                            : resumeResult.Message,
+
+                        resumeResult == null
+                            ? CreateError(
+                                "DAHUA_GROUP_SEEK_RESUME_RESULT_EMPTY",
+                                "Dahua 재생 그룹 재개 결과가 없습니다.",
+                                "Seek")
+                            : resumeResult.Error);
+                }
+
+                return NvrResult.Ok(
+                    "Dahua 재생 그룹의 위치를 이동하고 재생을 재개했습니다.");
+            }
+
+            groupSession.SetState(
+                NvrPlaybackState.Paused);
+
+            groupSession.SetReady(
+                true,
+                "Dahua 재생 그룹의 위치를 이동했습니다.");
+
+            return NvrResult.Ok(
+                "Dahua 재생 그룹의 위치를 이동했습니다.");
         }
+
+
 
         /// <summary>
         /// Dahua 재생 그룹의 방향을 변경한다.
@@ -1135,6 +1940,55 @@ namespace CamViewer.Nvr.Dahua.Playback
              */
             groupSession.SetReady(false, "Dahua 재생 그룹 준비 실패로 세션을 정리했습니다.");
         }
+
+
+        /// <summary>
+        /// PauseAsync 처리 중 이미 일시정지된 Dahua 채널들을
+        /// 다시 재생 상태로 복원한다.
+        ///
+        /// 일부 채널의 Resume 실패가 나머지 채널 복원을
+        /// 막지 않도록 독립적으로 처리한다.
+        /// </summary>
+        private async Task ResumePausedChannelsAsync(IList<DahuaPlaybackGroupChannel> channels)
+        {
+            if (channels == null
+                || channels.Count == 0)
+            {
+                return;
+            }
+
+            /*
+             * Pause 실행 순서의 역순으로 Resume한다.
+             */
+            for (int index = channels.Count - 1;
+                index >= 0;
+                index--)
+            {
+                DahuaPlaybackGroupChannel channel =
+                    channels[index];
+
+                if (channel == null
+                    || channel.Session == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await _provider.ResumeAsync(
+                        channel.Session,
+                        CancellationToken.None);
+                }
+                catch
+                {
+                    /*
+                     * 롤백 중 발생한 예외가
+                     * 원래 Pause 실패 결과를 덮어쓰지 않게 한다.
+                     */
+                }
+            }
+        }
+
 
         /// <summary>
         /// StartAsync 처리 중 이미 재개된 Dahua 채널들을
