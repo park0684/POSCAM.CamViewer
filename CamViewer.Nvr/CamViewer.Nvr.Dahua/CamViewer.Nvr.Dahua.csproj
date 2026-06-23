@@ -49,15 +49,18 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Native\DahuaNative.cs" />
-    <Compile Include="Native\Kernel32Native.cs" />
+    <Compile Include="Diagnostics\DahuaLogWriter.cs" />
+    <Compile Include="Models\DahuaLoginSession.cs" />
+    <Compile Include="Playback\DahuaPlaybackEngine.cs" />
+    <Compile Include="Playback\DahuaPlaybackGroupChannel.cs" />
+    <Compile Include="Playback\DahuaPlaybackGroupSession.cs" />
+    <Compile Include="Playback\DahuaPlaybackSession.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Providers\DahuaNvrProvider.cs" />
-    <Compile Include="Sdk\DahuaEncodeConfigReader.cs" />
-    <Compile Include="Sdk\DahuaEncodeConfigResult.cs" />
-    <Compile Include="Sdk\DahuaLoginSession.cs" />
-    <Compile Include="Sdk\DahuaPlaybackSession.cs" />
-    <Compile Include="Sdk\DahuaSdkClient.cs" />
+    <Compile Include="Sdk\DahuaDeviceClient.cs" />
+    <Compile Include="Sdk\DahuaNativeLibraryLoader.cs" />
+    <Compile Include="Sdk\DahuaPlaybackClient.cs" />
+    <Compile Include="Sdk\DahuaPlayGroupClient.cs" />
     <Compile Include="Sdk\DahuaSdkRuntime.cs" />
   </ItemGroup>
   <ItemGroup>
