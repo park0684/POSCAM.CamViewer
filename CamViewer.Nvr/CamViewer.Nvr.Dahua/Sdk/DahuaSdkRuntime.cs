@@ -1,115 +1,43 @@
-﻿using System;
-using System.IO;
-using CamViewer.Nvr.Core.Enums;
+﻿using CamViewer.Nvr.Core.Enums;
 using CamViewer.Nvr.Core.Results;
-using CamViewer.Nvr.Dahua.Native;
+using CamViewer.Nvr.Dahua.Diagnostics;
+using NetSDKCS;
+using System;
+using System.Runtime.InteropServices;
 
 namespace CamViewer.Nvr.Dahua.Sdk
 {
     /// <summary>
-    /// Dahua NetSDK의 프로세스 단위 초기화와 정리를 관리한다.
+    /// Dahua NetSDK의 프로세스 전역 초기화와 해제를 관리한다.
     ///
-    /// 여러 NVR Provider 인스턴스가 동시에 사용되더라도 SDK 초기화는 한 번만 수행하고,
-    /// 마지막 Provider가 해제될 때 SDK를 정리한다.
+    /// 첫 번째 Provider가 Acquire를 호출할 때 SDK를 초기화하고,
+    /// 마지막 Provider가 Release를 호출할 때 SDK를 정리한다.
     /// </summary>
     internal static class DahuaSdkRuntime
     {
-        private static readonly object SyncRoot = new object();
+        private static readonly object SyncRoot =
+            new object();
 
-        private static int _referenceCount;
+        /*
+         * 네이티브 SDK가 콜백 함수 포인터를 계속 사용하므로
+         * Delegate를 정적 필드에 보관한다.
+         */
+        private static readonly fDisConnectCallBack DisconnectCallback =
+            OnDisconnected;
+
+        private static readonly fHaveReConnectCallBack ReconnectCallback =
+            OnReconnected;
+
         private static bool _initialized;
+        private static int _referenceCount;
 
-        // 콜백이 GC에 의해 정리되지 않도록 정적 필드로 유지한다.
-        private static DahuaNative.fDisConnect _disconnectCallback;
-        private static DahuaNative.fHaveReConnect _reconnectCallback;
+        internal static event Action<IntPtr, string, int>
+            DeviceDisconnected;
 
-        /// <summary>
-        /// Dahua SDK를 초기화하고 사용 참조 수를 증가시킨다.
-        /// </summary>
-        public static NvrResult Acquire()
-        {
-            lock (SyncRoot)
-            {
-                if (_initialized)
-                {
-                    _referenceCount++;
+        internal static event Action<IntPtr, string, int>
+            DeviceReconnected;
 
-                    return NvrResult.Ok("Dahua SDK가 이미 초기화되어 있습니다.");
-                }
-
-                var nativePathResult = ConfigureNativeLibraryPath();
-
-                if (!nativePathResult.Success)
-                {
-                    return nativePathResult;
-                }
-
-                //_disconnectCallback = OnDisconnected;
-                //_reconnectCallback = OnReconnected;
-
-                bool initResult = DahuaNative.CLIENT_Init(
-                    _disconnectCallback,
-                    IntPtr.Zero);
-
-                if (!initResult)
-                {
-                    return CreateSdkFailure(
-                        "SDK_INIT_FAILED",
-                        "Dahua SDK 초기화에 실패했습니다.",
-                        "CLIENT_Init");
-                }
-
-                // 네트워크가 일시적으로 끊긴 경우 자동 재연결을 사용한다.
-                DahuaNative.CLIENT_SetAutoReconnect(
-                    _reconnectCallback,
-                    IntPtr.Zero);
-
-                // 접속 대기 시간과 재시도 횟수.
-                DahuaNative.CLIENT_SetConnectTime(5000, 3);
-
-                _initialized = true;
-                _referenceCount = 1;
-
-                return NvrResult.Ok("Dahua SDK 초기화가 완료되었습니다.");
-            }
-        }
-
-        /// <summary>
-        /// Dahua SDK 사용 참조 수를 감소시키고,
-        /// 마지막 참조가 해제되면 SDK 리소스를 정리한다.
-        /// </summary>
-        public static void Release()
-        {
-            lock (SyncRoot)
-            {
-                if (!_initialized)
-                {
-                    return;
-                }
-
-                if (_referenceCount > 0)
-                {
-                    _referenceCount--;
-                }
-
-                if (_referenceCount > 0)
-                {
-                    return;
-                }
-
-                DahuaNative.CLIENT_Cleanup();
-
-                _disconnectCallback = null;
-                _reconnectCallback = null;
-                _initialized = false;
-                _referenceCount = 0;
-            }
-        }
-
-        /// <summary>
-        /// Dahua SDK 초기화 여부를 반환한다.
-        /// </summary>
-        public static bool IsInitialized
+        internal static bool IsInitialized
         {
             get
             {
@@ -120,123 +48,382 @@ namespace CamViewer.Nvr.Dahua.Sdk
             }
         }
 
-        /// <summary>
-        /// Dahua SDK native DLL 검색 경로를 설정한다.
-        ///
-        /// 개발/배포 구조가 달라질 수 있으므로 여러 후보 경로를 순서대로 확인한다.
-        /// </summary>
-        private static NvrResult ConfigureNativeLibraryPath()
+        internal static int ReferenceCount
         {
-            string baseDirectory =
-                AppDomain.CurrentDomain.BaseDirectory;
-
-            string providerAssemblyPath =
-                typeof(DahuaSdkRuntime).Assembly.Location;
-
-            string providerDirectory =
-                Path.GetDirectoryName(providerAssemblyPath) ?? string.Empty;
-
-            string[] candidateDirectories =
+            get
             {
-        Path.Combine(baseDirectory, "native", "Dahua"),
-        Path.Combine(baseDirectory, "native", "dahua"),
-        Path.Combine(baseDirectory, "providers", "Dahua", "native"),
-        Path.Combine(baseDirectory, "providers", "Dahua", "native", "Dahua"),
-        Path.Combine(providerDirectory, "native"),
-        Path.Combine(providerDirectory, "native", "Dahua")
-    };
+                lock (SyncRoot)
+                {
+                    return _referenceCount;
+                }
+            }
+        }
 
-            foreach (string nativeDirectory in candidateDirectories)
+        /// <summary>
+        /// Dahua SDK 사용 참조를 획득한다.
+        /// </summary>
+        internal static NvrResult Acquire()
+        {
+            lock (SyncRoot)
             {
-                if (!Directory.Exists(nativeDirectory))
+                if (_initialized)
+                {
+                    checked
+                    {
+                        _referenceCount++;
+                    }
+
+                    return NvrResult.Ok(
+                        "기존 Dahua SDK 초기화 상태를 재사용합니다. "
+                        + "ReferenceCount="
+                        + _referenceCount);
+                }
+
+                try
+                {
+                    /*
+                     * NetSDKCS가 처음 네이티브 P/Invoke를 실행하기 전에
+                     * CamViewer의 제조사별 native\Dahua 폴더에서
+                     * dhnetsdk.dll을 명시적으로 로드한다.
+                     */
+                    NvrResult nativeLoadResult =
+                        DahuaNativeLibraryLoader.Load();
+
+                    if (nativeLoadResult == null
+                        || !nativeLoadResult.Success)
+                    {
+                        ResetState();
+
+                        return nativeLoadResult
+                            ?? NvrResult.Fail(
+                                NvrResultStatus.SdkError,
+                                "Dahua 네이티브 SDK 로드 결과가 없습니다.",
+                                CreateError(
+                                    "DAHUA_NATIVE_LOAD_RESULT_EMPTY",
+                                    "Dahua 네이티브 SDK 로드 결과가 없습니다.",
+                                    "DahuaNativeLibraryLoader.Load"));
+                    }
+
+                    bool initialized =
+                        NETClient.InitWithDefaultSetting(
+                            DisconnectCallback,
+                            ReconnectCallback,
+                            IntPtr.Zero,
+                            null);
+
+                    if (!initialized)
+                    {
+                        DahuaNativeLibraryLoader.Unload();
+
+                        ResetState();
+
+                        return NvrResult.Fail(
+                            NvrResultStatus.SdkError,
+                            "Dahua SDK 초기화에 실패했습니다.",
+                            CreateError(
+                                "DAHUA_SDK_INITIALIZE_FAILED",
+                                GetLastErrorSafe(),
+                                "NETClient.InitWithDefaultSetting"));
+                    }
+
+                    _initialized =
+                        true;
+
+                    _referenceCount =
+                        1;
+
+                    DahuaLogWriter.Write(
+                        "INFO",
+                        "SDK.Initialize",
+                        "Dahua SDK 초기화 성공");
+
+                    return NvrResult.Ok(
+                        "Dahua SDK를 초기화했습니다.");
+                }
+                catch (DllNotFoundException ex)
+                {
+                    DahuaNativeLibraryLoader.Unload();
+
+                    ResetState();
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.SdkError,
+                        "Dahua SDK 네이티브 DLL을 찾지 못했습니다.",
+                        CreateError(
+                            "DAHUA_SDK_DLL_NOT_FOUND",
+                            ex.Message,
+                            "NETClient.InitWithDefaultSetting"));
+                }
+                catch (BadImageFormatException ex)
+                {
+                    DahuaNativeLibraryLoader.Unload();
+
+                    ResetState();
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.SdkError,
+                        "Dahua SDK DLL과 CamViewer의 플랫폼이 일치하지 않습니다. "
+                        + "모두 x64로 빌드해야 합니다.",
+                        CreateError(
+                            "DAHUA_SDK_PLATFORM_MISMATCH",
+                            ex.Message,
+                            "NETClient.InitWithDefaultSetting"));
+                }
+                catch (EntryPointNotFoundException ex)
+                {
+                    DahuaNativeLibraryLoader.Unload();
+
+                    ResetState();
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.SdkError,
+                        "Dahua SDK DLL에서 필요한 초기화 함수를 찾지 못했습니다.",
+                        CreateError(
+                            "DAHUA_SDK_ENTRYPOINT_NOT_FOUND",
+                            ex.Message,
+                            "NETClient.InitWithDefaultSetting"));
+                }
+                catch (Exception ex)
+                {
+                    DahuaNativeLibraryLoader.Unload();
+
+                    ResetState();
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.SdkError,
+                        "Dahua SDK 초기화 중 오류가 발생했습니다.",
+                        CreateError(
+                            "DAHUA_SDK_INITIALIZE_EXCEPTION",
+                            ex.Message,
+                            "NETClient.InitWithDefaultSetting"));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Dahua SDK 사용 참조를 반환한다.
+        /// </summary>
+        internal static NvrResult Release()
+        {
+            lock (SyncRoot)
+            {
+                if (!_initialized)
+                {
+                    ResetState();
+
+                    return NvrResult.Ok(
+                        "Dahua SDK가 이미 정리된 상태입니다.");
+                }
+
+                if (_referenceCount > 0)
+                {
+                    _referenceCount--;
+                }
+
+                if (_referenceCount > 0)
+                {
+                    return NvrResult.Ok(
+                        "Dahua SDK 참조를 반환했습니다. "
+                        + "ReferenceCount="
+                        + _referenceCount);
+                }
+
+                try
+                {
+                    NETClient.Cleanup();
+
+                    DahuaNativeLibraryLoader.Unload();
+
+                    DahuaLogWriter.Write(
+                        "INFO",
+                        "SDK.Cleanup",
+                        "Dahua SDK 정리 완료");
+
+                    ResetState();
+
+                    return NvrResult.Ok(
+                        "Dahua SDK를 정리했습니다.");
+                }
+                catch (Exception ex)
+                {
+                    DahuaNativeLibraryLoader.Unload();
+
+                    ResetState();
+
+                    return NvrResult.Fail(
+                        NvrResultStatus.SdkError,
+                        "Dahua SDK 정리 중 오류가 발생했습니다.",
+                        CreateError(
+                            "DAHUA_SDK_CLEANUP_EXCEPTION",
+                            ex.Message,
+                            "NETClient.Cleanup"));
+                }
+            }
+        }
+
+        private static void OnDisconnected(
+            IntPtr loginHandle,
+            IntPtr deviceIpPointer,
+            int devicePort,
+            IntPtr userData)
+        {
+            string deviceIp =
+                ConvertAnsiString(
+                    deviceIpPointer);
+
+            DahuaLogWriter.Write(
+                "WARN",
+                "SDK.Disconnected",
+                "Handle="
+                + loginHandle
+                + ", Host="
+                + deviceIp
+                + ", Port="
+                + devicePort);
+
+            RaiseEvent(
+                DeviceDisconnected,
+                loginHandle,
+                deviceIp,
+                devicePort);
+        }
+
+        private static void OnReconnected(
+            IntPtr loginHandle,
+            IntPtr deviceIpPointer,
+            int devicePort,
+            IntPtr userData)
+        {
+            string deviceIp =
+                ConvertAnsiString(
+                    deviceIpPointer);
+
+            DahuaLogWriter.Write(
+                "INFO",
+                "SDK.Reconnected",
+                "Handle="
+                + loginHandle
+                + ", Host="
+                + deviceIp
+                + ", Port="
+                + devicePort);
+
+            RaiseEvent(
+                DeviceReconnected,
+                loginHandle,
+                deviceIp,
+                devicePort);
+        }
+
+        private static void RaiseEvent(
+            Action<IntPtr, string, int> handler,
+            IntPtr loginHandle,
+            string deviceIp,
+            int devicePort)
+        {
+            if (handler == null)
+            {
+                return;
+            }
+
+            Delegate[] subscribers =
+                handler.GetInvocationList();
+
+            foreach (Delegate subscriber
+                in subscribers)
+            {
+                Action<IntPtr, string, int> callback =
+                    subscriber
+                        as Action<IntPtr, string, int>;
+
+                if (callback == null)
                 {
                     continue;
                 }
 
-                bool pathResult =
-                    Kernel32Native.SetDllDirectory(nativeDirectory);
-
-                if (!pathResult)
+                try
                 {
-                    return NvrResult.Fail(
-                        NvrResultStatus.SdkError,
-                        "Dahua SDK DLL 검색 경로를 설정할 수 없습니다.",
-                        new NvrErrorInfo
-                        {
-                            ErrorCode = "SET_DLL_DIRECTORY_FAILED",
-                            ErrorMessage = nativeDirectory,
-                            Operation = "SetDllDirectory"
-                        });
+                    callback(
+                        loginHandle,
+                        deviceIp,
+                        devicePort);
                 }
+                catch
+                {
+                    /*
+                     * 구독자 예외를 네이티브 콜백 경계 밖으로 보내지 않는다.
+                     */
+                }
+            }
+        }
 
-                return NvrResult.Ok(
-                    "Dahua SDK native 경로가 설정되었습니다. "
-                    + nativeDirectory);
+        private static string ConvertAnsiString(
+            IntPtr value)
+        {
+            if (value == IntPtr.Zero)
+            {
+                return string.Empty;
             }
 
-            return NvrResult.Fail(
-                NvrResultStatus.SdkError,
-                "Dahua SDK native 폴더를 찾을 수 없습니다."
-                + Environment.NewLine
-                + "검색 경로:"
-                + Environment.NewLine
-                + string.Join(Environment.NewLine, candidateDirectories),
-                new NvrErrorInfo
-                {
-                    ErrorCode = "NATIVE_DIRECTORY_NOT_FOUND",
-                    ErrorMessage = string.Join(";", candidateDirectories),
-                    Operation = "ConfigureNativeLibraryPath"
-                });
+            try
+            {
+                return Marshal.PtrToStringAnsi(
+                    value)
+                    ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
         }
 
-        /// <summary>
-        /// NVR 연결이 끊겼을 때 Dahua SDK에서 호출하는 콜백.
-        /// 향후 로그 기록 기능을 연결한다.
-        /// </summary>
-        private static void OnDisconnected(
-            long loginId,
-            IntPtr dvrIp,
-            int dvrPort,
-            IntPtr userData)
+        internal static string GetLastErrorSafe()
         {
-            // SDK 콜백 스레드에서 UI를 직접 조작하면 안 된다.
-            // 향후 로그 또는 Provider 이벤트로 전달한다.
+            try
+            {
+                string error =
+                    NETClient.GetLastError();
+
+                return string.IsNullOrWhiteSpace(
+                        error)
+                    ? "Dahua SDK 상세 오류가 없습니다."
+                    : error;
+            }
+            catch (Exception ex)
+            {
+                return "Dahua SDK 오류 조회 실패: "
+                    + ex.Message;
+            }
         }
 
-        /// <summary>
-        /// NVR 연결이 복구되었을 때 Dahua SDK에서 호출하는 콜백.
-        /// 향후 로그 기록 기능을 연결한다.
-        /// </summary>
-        private static void OnReconnected(
-            long loginId,
-            IntPtr dvrIp,
-            int dvrPort,
-            IntPtr userData)
-        {
-            // SDK 콜백 스레드에서 UI를 직접 조작하면 안 된다.
-            // 향후 로그 또는 Provider 이벤트로 전달한다.
-        }
-
-        /// <summary>
-        /// Dahua SDK 오류 결과를 생성한다.
-        /// </summary>
-        private static NvrResult CreateSdkFailure(
+        internal static NvrErrorInfo CreateError(
             string errorCode,
-            string message,
+            string errorMessage,
             string operation)
         {
-            uint nativeErrorCode = DahuaNative.CLIENT_GetLastError();
+            return new NvrErrorInfo
+            {
+                ErrorCode =
+                    errorCode,
 
-            return NvrResult.Fail(
-                NvrResultStatus.SdkError,
-                message,
-                new NvrErrorInfo
-                {
-                    ErrorCode = errorCode,
-                    ErrorMessage = message,
-                    NativeErrorCode = nativeErrorCode.ToString(),
-                    Operation = operation
-                });
+                ErrorMessage =
+                    errorMessage,
+
+                NativeErrorCode =
+                    GetLastErrorSafe(),
+
+                Operation =
+                    operation
+            };
+        }
+
+        private static void ResetState()
+        {
+            _initialized =
+                false;
+
+            _referenceCount =
+                0;
         }
     }
 }

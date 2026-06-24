@@ -50,6 +50,9 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Abstractions\INvrPlaybackAlignmentProvider.cs" />
+    <Compile Include="Abstractions\INvrPlaybackEngine.cs" />
+    <Compile Include="Abstractions\INvrPlaybackEngineProvider.cs" />
+    <Compile Include="Abstractions\INvrPlaybackGroupSession.cs" />
     <Compile Include="Abstractions\INvrPlaybackPositionProvider.cs" />
     <Compile Include="Abstractions\INvrPlaybackSession.cs" />
     <Compile Include="Abstractions\INvrProvider.cs" />
@@ -69,6 +72,9 @@
     <Compile Include="Events\PlaybackStateChangedEventArgs.cs" />
     <Compile Include="Models\NvrConnectionInfo.cs" />
     <Compile Include="Models\NvrPlaybackAlignmentRequest.cs" />
+    <Compile Include="Models\NvrPlaybackGroupChannelRequest.cs" />
+    <Compile Include="Models\NvrPlaybackGroupRequest.cs" />
+    <Compile Include="Models\NvrPlaybackGroupStatus.cs" />
     <Compile Include="Models\NvrPlaybackRequest.cs" />
     <Compile Include="Models\NvrRecordQueryRequest.cs" />
     <Compile Include="Models\NvrVideoSourceInfo.cs" />
