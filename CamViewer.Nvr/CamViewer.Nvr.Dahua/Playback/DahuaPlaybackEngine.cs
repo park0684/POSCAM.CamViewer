@@ -509,11 +509,22 @@ namespace CamViewer.Nvr.Dahua.Playback
                         "SetDirection");
                 }
 
+                if (!groupSession.IsReady)
+                {
+                    return Fail(
+                        NvrResultStatus.Failed,
+                        "Dahua 재생 그룹이 준비되지 않았습니다.",
+                        "DAHUA_GROUP_NOT_READY",
+                        "SetDirection");
+                }
+
                 if (groupSession.Direction
                     == direction)
                 {
                     return NvrResult.Ok(
-                        "Dahua 재생 그룹이 이미 요청한 방향입니다.");
+                        direction == NvrPlaybackDirection.Reverse
+                            ? "Dahua 재생 그룹이 이미 역재생 방향입니다."
+                            : "Dahua 재생 그룹이 이미 정방향입니다.");
                 }
 
                 DateTime currentTime =
@@ -521,8 +532,14 @@ namespace CamViewer.Nvr.Dahua.Playback
                         groupSession,
                         false);
 
-                if (direction == NvrPlaybackDirection.Reverse
-                    && currentTime <= groupSession.StartTime)
+                currentTime =
+                    groupSession.ClampTime(
+                        currentTime);
+
+                if (direction
+                        == NvrPlaybackDirection.Reverse
+                    && currentTime
+                        <= groupSession.StartTime)
                 {
                     return Fail(
                         NvrResultStatus.NotSupported,
@@ -531,59 +548,30 @@ namespace CamViewer.Nvr.Dahua.Playback
                         "SetDirection");
                 }
 
-                bool wasPaused =
-                    groupSession.State
-                        == NvrPlaybackState.Paused;
-
-                if (groupSession.UsesPlayGroup)
+                if (direction
+                        == NvrPlaybackDirection.Forward
+                    && currentTime
+                        >= groupSession.EndTime)
                 {
-                    NvrResult result =
-                        DahuaPlayGroupClient.SetDirection(
-                            groupSession.PlayGroupHandle,
-                            direction);
-
-                    if (!result.Success)
-                    {
-                        return result;
-                    }
-
-                    foreach (DahuaPlaybackGroupChannel channel
-                        in groupSession.GetChannels())
-                    {
-                        channel.Session.SetDirection(
-                            direction);
-
-                        if (!wasPaused)
-                        {
-                            channel.Session.SetState(
-                                direction == NvrPlaybackDirection.Reverse
-                                    ? NvrPlaybackState.Rewinding
-                                    : NvrPlaybackState.Playing);
-                        }
-                    }
-
-                    groupSession.SetCurrentPlaybackTime(
-                        currentTime);
-
-                    groupSession.SetDirection(
-                        direction);
-
-                    groupSession.SetState(
-                        wasPaused
-                            ? NvrPlaybackState.Paused
-                            : direction == NvrPlaybackDirection.Reverse
-                                ? NvrPlaybackState.Rewinding
-                                : NvrPlaybackState.Playing);
-
-                    return result;
+                    return Fail(
+                        NvrResultStatus.NotSupported,
+                        "조회 종료시간에서는 정방향 재생을 시작할 수 없습니다.",
+                        "DAHUA_FORWARD_AT_END_NOT_SUPPORTED",
+                        "SetDirection");
                 }
 
-                /*
-                 * 단일채널은 방향 변경 그룹 API가 없으므로
-                 * 현재 시각에서 핸들을 다시 만든다.
-                 */
-                NvrPlaybackSpeed speed =
+                NvrPlaybackState previousState =
+                    groupSession.State;
+
+                NvrPlaybackDirection previousDirection =
+                    groupSession.Direction;
+
+                NvrPlaybackSpeed previousSpeed =
                     groupSession.Speed;
+
+                bool shouldResume =
+                    previousState == NvrPlaybackState.Playing
+                    || previousState == NvrPlaybackState.Rewinding;
 
                 NvrResult stopResult =
                     StopNativeResources(
@@ -591,6 +579,13 @@ namespace CamViewer.Nvr.Dahua.Playback
 
                 if (!stopResult.Success)
                 {
+                    groupSession.SetState(
+                        NvrPlaybackState.Faulted);
+
+                    groupSession.SetReady(
+                        false,
+                        "기존 Dahua 재생 그룹 정리에 실패했습니다.");
+
                     return stopResult;
                 }
 
@@ -599,24 +594,110 @@ namespace CamViewer.Nvr.Dahua.Playback
                         groupSession,
                         currentTime,
                         direction,
-                        speed,
+                        previousSpeed,
                         true);
 
                 if (!buildResult.Success)
                 {
+                    StopNativeResources(
+                        groupSession);
+
+                    NvrResult rollbackResult =
+                        BuildNativeResources(
+                            groupSession,
+                            currentTime,
+                            previousDirection,
+                            previousSpeed,
+                            true);
+
+                    if (rollbackResult.Success
+                        && shouldResume)
+                    {
+                        rollbackResult =
+                            ResumeNative(
+                                groupSession);
+                    }
+
+                    if (!rollbackResult.Success)
+                    {
+                        groupSession.SetState(
+                            NvrPlaybackState.Faulted);
+
+                        groupSession.SetReady(
+                            false,
+                            "방향 전환 실패 후 기존 재생 방향도 복원하지 못했습니다.");
+
+                        return Fail(
+                            NvrResultStatus.Failed,
+                            "Dahua 재생방향 변경에 실패했고 "
+                            + "기존 재생방향도 복원하지 못했습니다."
+                            + Environment.NewLine
+                            + "방향 변경 오류: "
+                            + buildResult.Message
+                            + Environment.NewLine
+                            + "복원 오류: "
+                            + rollbackResult.Message,
+                            "DAHUA_DIRECTION_ROLLBACK_FAILED",
+                            "SetDirection");
+                    }
+
                     return buildResult;
                 }
 
-                if (!wasPaused)
-                {
-                    return ResumeNative(
+                IList<DahuaChannelTimeSnapshot> rebuiltSnapshots =
+                    GetChannelTimeSnapshots(
                         groupSession);
+
+                double? rebuiltDrift =
+                    CalculateMaximumDriftSeconds(
+                        rebuiltSnapshots);
+
+                groupSession.SetSynchronizationStatus(
+                    rebuiltDrift.HasValue
+                        && rebuiltDrift.Value <= 1.0d,
+                    rebuiltDrift,
+                    rebuiltDrift.HasValue
+                        ? "방향 전환 후 채널 시간차 "
+                            + rebuiltDrift.Value.ToString("0.0")
+                            + "초"
+                        : "방향 전환 후 채널 시간을 측정하지 못했습니다.");
+
+                if (shouldResume)
+                {
+                    NvrResult resumeResult =
+                        ResumeNative(
+                            groupSession);
+
+                    if (!resumeResult.Success)
+                    {
+                        groupSession.SetState(
+                            NvrPlaybackState.Faulted);
+
+                        return resumeResult;
+                    }
                 }
 
                 return NvrResult.Ok(
                     direction == NvrPlaybackDirection.Reverse
-                        ? "Dahua 단일채널을 역재생 방향으로 변경했습니다."
-                        : "Dahua 단일채널을 정방향으로 변경했습니다.");
+                        ? "Dahua 재생 그룹을 현재 시각에서 역재생으로 재구성했습니다."
+                        : "Dahua 재생 그룹을 현재 시각에서 정방향으로 재구성했습니다.");
+            }
+            catch (OperationCanceledException)
+            {
+                return Fail(
+                    NvrResultStatus.Cancelled,
+                    "Dahua 재생방향 변경이 취소되었습니다.",
+                    "DAHUA_DIRECTION_CHANGE_CANCELLED",
+                    "SetDirection");
+            }
+            catch (Exception ex)
+            {
+                return Fail(
+                    NvrResultStatus.UnknownError,
+                    "Dahua 재생방향 변경 중 오류가 발생했습니다. "
+                    + ex.Message,
+                    "DAHUA_DIRECTION_CHANGE_EXCEPTION",
+                    "SetDirection");
             }
             finally
             {
@@ -658,6 +739,133 @@ namespace CamViewer.Nvr.Dahua.Playback
                     GetCommonPlaybackTime(
                         groupSession,
                         false);
+
+                NvrPlaybackSpeed previousSpeed =
+                    groupSession.Speed;
+
+                NvrPlaybackDirection previousDirection =
+                    groupSession.Direction;
+
+                NvrPlaybackState previousState =
+                    groupSession.State;
+
+                bool shouldResume =
+                    previousState == NvrPlaybackState.Playing
+                    || previousState == NvrPlaybackState.Rewinding;
+
+                /*
+                 * 고배속에서 1배속으로 돌아올 때는
+                 * 기존 디코더 버퍼를 그대로 둔 채 속도 명령만 보내지 않는다.
+                 *
+                 * 8배속 재생 과정에서 채널별 버퍼 위치가 달라질 수 있으므로
+                 * 현재 공통 시각에서 PlaybackHandle과 PlayGroup을 다시 구성한다.
+                 */
+                if (previousSpeed != NvrPlaybackSpeed.Normal
+                    && speed == NvrPlaybackSpeed.Normal)
+                {
+                    NvrResult stopResult =
+                        StopNativeResources(
+                            groupSession);
+
+                    if (!stopResult.Success)
+                    {
+                        groupSession.SetState(
+                            NvrPlaybackState.Faulted);
+
+                        return stopResult;
+                    }
+
+                    NvrResult buildResult =
+                        BuildNativeResources(
+                            groupSession,
+                            currentTime,
+                            previousDirection,
+                            speed,
+                            true);
+
+                    if (!buildResult.Success)
+                    {
+                        StopNativeResources(
+                            groupSession);
+
+                        NvrResult rollbackResult =
+                            BuildNativeResources(
+                                groupSession,
+                                currentTime,
+                                previousDirection,
+                                previousSpeed,
+                                true);
+
+                        if (rollbackResult.Success
+                            && shouldResume)
+                        {
+                            rollbackResult =
+                                ResumeNative(
+                                    groupSession);
+                        }
+
+                        if (!rollbackResult.Success)
+                        {
+                            groupSession.SetState(
+                                NvrPlaybackState.Faulted);
+
+                            groupSession.SetReady(
+                                false,
+                                "배속 변경 실패 후 기존 배속도 복원하지 못했습니다.");
+
+                            return Fail(
+                                NvrResultStatus.Failed,
+                                "Dahua 1배속 전환에 실패했고 "
+                                + "기존 배속도 복원하지 못했습니다."
+                                + Environment.NewLine
+                                + "배속 변경 오류: "
+                                + buildResult.Message
+                                + Environment.NewLine
+                                + "복원 오류: "
+                                + rollbackResult.Message,
+                                "DAHUA_SPEED_ROLLBACK_FAILED",
+                                "SetSpeed");
+                        }
+
+                        return buildResult;
+                    }
+
+                    IList<DahuaChannelTimeSnapshot> snapshots =
+                        GetChannelTimeSnapshots(
+                            groupSession);
+
+                    double? driftSeconds =
+                        CalculateMaximumDriftSeconds(
+                            snapshots);
+
+                    groupSession.SetSynchronizationStatus(
+                        driftSeconds.HasValue
+                            && driftSeconds.Value <= 1.0d,
+                        driftSeconds,
+                        driftSeconds.HasValue
+                            ? "1배속 재구성 후 채널 시간차 "
+                                + driftSeconds.Value.ToString("0.0")
+                                + "초"
+                            : "1배속 재구성 후 채널 시간을 측정하지 못했습니다.");
+
+                    if (shouldResume)
+                    {
+                        NvrResult resumeResult =
+                            ResumeNative(
+                                groupSession);
+
+                        if (!resumeResult.Success)
+                        {
+                            groupSession.SetState(
+                                NvrPlaybackState.Faulted);
+
+                            return resumeResult;
+                        }
+                    }
+
+                    return NvrResult.Ok(
+                        "Dahua 재생 그룹을 현재 시각에서 1배속으로 재구성했습니다.");
+                }
 
                 NvrResult result;
 
@@ -708,6 +916,24 @@ namespace CamViewer.Nvr.Dahua.Playback
                 groupSession.SetSpeed(
                     speed);
 
+                IList<DahuaChannelTimeSnapshot> currentSnapshots =
+                    GetChannelTimeSnapshots(
+                        groupSession);
+
+                double? currentDrift =
+                    CalculateMaximumDriftSeconds(
+                        currentSnapshots);
+
+                groupSession.SetSynchronizationStatus(
+                    currentDrift.HasValue
+                        && currentDrift.Value <= 1.0d,
+                    currentDrift,
+                    currentDrift.HasValue
+                        ? "배속 변경 후 채널 시간차 "
+                            + currentDrift.Value.ToString("0.0")
+                            + "초"
+                        : "배속 변경 후 채널 시간을 측정하지 못했습니다.");
+
                 return result;
             }
             finally
@@ -749,46 +975,156 @@ namespace CamViewer.Nvr.Dahua.Playback
                         "단일채널은 별도의 동기화가 필요하지 않습니다.");
                 }
 
-                NvrResult<DateTime> timeResult =
-                    DahuaPlayGroupClient.QueryTime(
-                        groupSession.PlayGroupHandle);
+                NvrPlaybackState previousState =
+                    groupSession.State;
 
-                if (!timeResult.Success)
+                NvrPlaybackDirection previousDirection =
+                    groupSession.Direction;
+
+                NvrPlaybackSpeed previousSpeed =
+                    groupSession.Speed;
+
+                bool shouldResume =
+                    previousState == NvrPlaybackState.Playing
+                    || previousState == NvrPlaybackState.Rewinding;
+
+                /*
+                 * 수동 동기화는 표시된 시간차가 작더라도
+                 * 사용자가 체감상 불일치를 확인하고 실행하는 명령이다.
+                 *
+                 * 따라서 PlayGroup 시간만 조회하고 성공 처리하지 않고,
+                 * 그룹을 일시정지한 뒤 개별 PlaybackHandle의 OSD 시간을 읽는다.
+                 */
+                if (shouldResume)
                 {
-                    groupSession.SetSynchronizationStatus(
-                        true,
-                        null,
-                        "Dahua PlayGroup이 동기 재생을 관리하지만 "
-                        + "현재 그룹 시간은 조회하지 못했습니다.");
+                    NvrResult pauseResult =
+                        PauseNative(
+                            groupSession);
 
-                    /*
-                     * PlayGroup 구성 자체가 유지되고 있으므로
-                     * 시간 조회 실패를 재생 실패로 확대하지 않는다.
-                     */
-                    return NvrResult.Ok(
-                        "Dahua PlayGroup이 채널 동기 재생을 관리합니다. "
-                        + "이번 호출에서는 그룹 시간을 갱신하지 못했습니다.");
+                    if (!pauseResult.Success)
+                    {
+                        return pauseResult;
+                    }
                 }
 
-                DahuaPlaybackGroupChannel baseChannel =
-                    groupSession.GetBaseChannel();
+                await Task.Delay(
+                    120)
+                    .ConfigureAwait(false);
 
-                DateTime commonTime =
-                    baseChannel == null
-                        ? timeResult.Data
-                        : baseChannel.ToCommonTime(
-                            timeResult.Data);
+                IList<DahuaChannelTimeSnapshot> beforeSnapshots =
+                    GetChannelTimeSnapshots(
+                        groupSession);
+
+                DateTime targetTime =
+                    SelectSynchronizationTarget(
+                        groupSession,
+                        beforeSnapshots);
+
+                targetTime =
+                    groupSession.ClampTime(
+                        targetTime);
+
+                NvrResult stopResult =
+                    StopNativeResources(
+                        groupSession);
+
+                if (!stopResult.Success)
+                {
+                    groupSession.SetState(
+                        NvrPlaybackState.Faulted);
+
+                    return stopResult;
+                }
+
+                /*
+                 * 모든 채널을 같은 공통 시각에서 다시 연다.
+                 * 이 과정이 기존 디코더 버퍼를 비우는 실질적인 동기화다.
+                 */
+                NvrResult buildResult =
+                    BuildNativeResources(
+                        groupSession,
+                        targetTime,
+                        previousDirection,
+                        previousSpeed,
+                        true);
+
+                if (!buildResult.Success)
+                {
+                    groupSession.SetState(
+                        NvrPlaybackState.Faulted);
+
+                    groupSession.SetReady(
+                        false,
+                        "Dahua 수동 동기화 재구성에 실패했습니다.");
+
+                    return buildResult;
+                }
+
+                await Task.Delay(
+                    120)
+                    .ConfigureAwait(false);
+
+                IList<DahuaChannelTimeSnapshot> afterSnapshots =
+                    GetChannelTimeSnapshots(
+                        groupSession);
+
+                double? driftSeconds =
+                    CalculateMaximumDriftSeconds(
+                        afterSnapshots);
 
                 groupSession.SetCurrentPlaybackTime(
-                    commonTime);
+                    targetTime);
 
                 groupSession.SetSynchronizationStatus(
-                    true,
-                    null,
-                    "Dahua 공식 PlayGroup 동기 재생 상태입니다.");
+                    driftSeconds.HasValue
+                        && driftSeconds.Value <= 1.0d,
+                    driftSeconds,
+                    driftSeconds.HasValue
+                        ? "수동 동기화 후 채널 시간차 "
+                            + driftSeconds.Value.ToString("0.0")
+                            + "초"
+                        : "수동 동기화는 완료했지만 채널 시간을 재측정하지 못했습니다.");
+
+                if (shouldResume)
+                {
+                    NvrResult resumeResult =
+                        ResumeNative(
+                            groupSession);
+
+                    if (!resumeResult.Success)
+                    {
+                        groupSession.SetState(
+                            NvrPlaybackState.Faulted);
+
+                        return resumeResult;
+                    }
+                }
 
                 return NvrResult.Ok(
-                    "Dahua 공식 PlayGroup이 채널 동기 재생을 관리합니다.");
+                    driftSeconds.HasValue
+                        ? "Dahua 재생 그룹을 수동 동기화했습니다. "
+                            + "현재 시간차 "
+                            + driftSeconds.Value.ToString("0.0")
+                            + "초"
+                        : "Dahua 재생 그룹을 수동 동기화했습니다. "
+                            + "채널 시간 재측정은 실패했습니다.");
+            }
+            catch (OperationCanceledException)
+            {
+                return Fail(
+                    NvrResultStatus.Cancelled,
+                    "Dahua 영상 동기화가 취소되었습니다.",
+                    "DAHUA_SYNCHRONIZE_CANCELLED",
+                    "Synchronize");
+            }
+            catch (Exception ex)
+            {
+                return Fail(
+                    NvrResultStatus.UnknownError,
+                    "Dahua 영상 동기화 중 오류가 발생했습니다. "
+                    + ex.Message,
+                    "DAHUA_SYNCHRONIZE_EXCEPTION",
+                    "Synchronize");
             }
             finally
             {
@@ -823,24 +1159,86 @@ namespace CamViewer.Nvr.Dahua.Playback
                             "GetStatus"));
                 }
 
+                IList<DahuaChannelTimeSnapshot> channelSnapshots =
+                    GetChannelTimeSnapshots(
+                        groupSession);
+
+                double? driftSeconds =
+                    CalculateMaximumDriftSeconds(
+                        channelSnapshots);
+
                 DateTime fallbackTime =
                     groupSession.CurrentPlaybackTime;
 
-                NvrResult<DateTime> timeResult =
-                    QueryCommonPlaybackTime(
-                        groupSession);
+                DateTime playbackTime =
+                    SelectSynchronizationTarget(
+                        groupSession,
+                        channelSnapshots);
 
                 bool providerTimeAvailable =
-                    timeResult != null
-                    && timeResult.Success;
+                    channelSnapshots != null
+                    && channelSnapshots.Count > 0;
 
-                DateTime playbackTime =
-                    providerTimeAvailable
-                        ? timeResult.Data
-                        : fallbackTime;
+                if (!providerTimeAvailable)
+                {
+                    NvrResult<DateTime> groupTimeResult =
+                        QueryCommonPlaybackTime(
+                            groupSession);
+
+                    if (groupTimeResult != null
+                        && groupTimeResult.Success)
+                    {
+                        playbackTime =
+                            groupTimeResult.Data;
+
+                        providerTimeAvailable =
+                            true;
+                    }
+                    else
+                    {
+                        playbackTime =
+                            fallbackTime;
+                    }
+                }
+
+                playbackTime =
+                    groupSession.ClampTime(
+                        playbackTime);
 
                 groupSession.SetCurrentPlaybackTime(
                     playbackTime);
+
+                bool synchronized =
+                    groupSession.ChannelCount <= 1
+                    || (
+                        driftSeconds.HasValue
+                        && driftSeconds.Value <= 1.0d
+                    );
+
+                string synchronizationMessage;
+
+                if (groupSession.ChannelCount <= 1)
+                {
+                    synchronizationMessage =
+                        "단일채널은 별도의 동기화가 필요하지 않습니다.";
+                }
+                else if (driftSeconds.HasValue)
+                {
+                    synchronizationMessage =
+                        "채널별 실제 재생시간 차이 "
+                        + driftSeconds.Value.ToString("0.0")
+                        + "초";
+                }
+                else
+                {
+                    synchronizationMessage =
+                        "채널별 실제 재생시간을 측정하지 못했습니다.";
+                }
+
+                groupSession.SetSynchronizationStatus(
+                    synchronized,
+                    driftSeconds,
+                    synchronizationMessage);
 
                 var status =
                     new NvrPlaybackGroupStatus
@@ -865,14 +1263,14 @@ namespace CamViewer.Nvr.Dahua.Playback
                             && groupSession.IsPlayGroupReady,
 
                         IsSynchronized =
-                            groupSession.IsSynchronized,
+                            synchronized,
 
                         MaximumDriftSeconds =
-                            groupSession.MaximumDriftSeconds,
+                            driftSeconds,
 
                         Message =
                             providerTimeAvailable
-                                ? groupSession.StatusMessage
+                                ? synchronizationMessage
                                 : "제조사 시간을 확인하지 못해 "
                                     + "마지막 정상시간 또는 추정시간을 사용합니다."
                     };
@@ -884,10 +1282,6 @@ namespace CamViewer.Nvr.Dahua.Playback
                         "Dahua 재생 그룹 상태를 조회했습니다.");
                 }
 
-                /*
-                 * 상태 데이터는 사용할 수 있으므로 PartialSuccess로 반환한다.
-                 * 공통 서비스는 Success와 Data를 기준으로 추정시간을 유지할 수 있다.
-                 */
                 return new NvrResult<NvrPlaybackGroupStatus>
                 {
                     Success =
@@ -900,17 +1294,182 @@ namespace CamViewer.Nvr.Dahua.Playback
                         status.Message,
 
                     Data =
-                        status,
-
-                    Error =
-                        timeResult == null
-                            ? null
-                            : timeResult.Error
+                        status
                 };
             }
             finally
             {
                 _operationGate.Release();
+            }
+        }
+
+        /// <summary>
+        /// PlayGroup에 포함된 각 PlaybackHandle의 실제 OSD 시간을 조회한다.
+        ///
+        /// 채널별 제어 명령은 보내지 않으며,
+        /// GetPlayBackOsdTime 조회만 수행하므로 PlayGroup 제어 원칙을 위반하지 않는다.
+        /// </summary>
+        private IList<DahuaChannelTimeSnapshot>
+            GetChannelTimeSnapshots(
+                DahuaPlaybackGroupSession groupSession)
+        {
+            var snapshots =
+                new List<DahuaChannelTimeSnapshot>();
+
+            if (groupSession == null)
+            {
+                return snapshots;
+            }
+
+            foreach (DahuaPlaybackGroupChannel channel
+                in groupSession.GetChannels())
+            {
+                if (channel == null
+                    || channel.Session == null
+                    || !channel.Session.IsValid)
+                {
+                    continue;
+                }
+
+                NvrResult<DateTime> timeResult =
+                    DahuaPlaybackClient.QueryTime(
+                        channel.Session);
+
+                if (timeResult == null
+                    || !timeResult.Success)
+                {
+                    continue;
+                }
+
+                DateTime commonTime =
+                    channel.ToCommonTime(
+                        timeResult.Data);
+
+                commonTime =
+                    groupSession.ClampTime(
+                        commonTime);
+
+                snapshots.Add(
+                    new DahuaChannelTimeSnapshot
+                    {
+                        Channel =
+                            channel,
+
+                        ProviderTime =
+                            timeResult.Data,
+
+                        CommonTime =
+                            commonTime
+                    });
+            }
+
+            return snapshots;
+        }
+
+        /// <summary>
+        /// 채널별 실제 공통시간의 최대 차이를 계산한다.
+        /// 두 채널 이상을 측정하지 못하면 null을 반환하여
+        /// 0초로 오인하지 않게 한다.
+        /// </summary>
+        private static double? CalculateMaximumDriftSeconds(
+            IList<DahuaChannelTimeSnapshot> snapshots)
+        {
+            if (snapshots == null
+                || snapshots.Count < 2)
+            {
+                return null;
+            }
+
+            DateTime minimumTime =
+                snapshots.Min(
+                    snapshot =>
+                        snapshot.CommonTime);
+
+            DateTime maximumTime =
+                snapshots.Max(
+                    snapshot =>
+                        snapshot.CommonTime);
+
+            return Math.Abs(
+                (
+                    maximumTime
+                    - minimumTime
+                ).TotalSeconds);
+        }
+
+        /// <summary>
+        /// 좌측 기준 채널의 실제 시간을 동기화 기준으로 사용한다.
+        /// 좌측 채널 시간을 확인하지 못하면 방향에 따라
+        /// 정방향은 가장 앞선 시간, 역방향은 가장 뒤로 진행된 시간을 사용한다.
+        /// </summary>
+        private DateTime SelectSynchronizationTarget(
+            DahuaPlaybackGroupSession groupSession,
+            IList<DahuaChannelTimeSnapshot> snapshots)
+        {
+            if (groupSession == null)
+            {
+                return DateTime.MinValue;
+            }
+
+            if (snapshots == null
+                || snapshots.Count == 0)
+            {
+                return GetCommonPlaybackTime(
+                    groupSession,
+                    false);
+            }
+
+            DahuaPlaybackGroupChannel baseChannel =
+                groupSession.GetBaseChannel();
+
+            if (baseChannel != null)
+            {
+                DahuaChannelTimeSnapshot baseSnapshot =
+                    snapshots.FirstOrDefault(
+                        snapshot =>
+                            snapshot.Channel != null
+                            && snapshot.Channel.ChannelNo
+                                == baseChannel.ChannelNo
+                            && snapshot.Channel.ScreenPosition
+                                == baseChannel.ScreenPosition);
+
+                if (baseSnapshot != null)
+                {
+                    return baseSnapshot.CommonTime;
+                }
+            }
+
+            return groupSession.Direction
+                    == NvrPlaybackDirection.Reverse
+                ? snapshots.Min(
+                    snapshot =>
+                        snapshot.CommonTime)
+                : snapshots.Max(
+                    snapshot =>
+                        snapshot.CommonTime);
+        }
+
+        /// <summary>
+        /// 채널별 실제 OSD 시간 측정 결과.
+        /// </summary>
+        private sealed class DahuaChannelTimeSnapshot
+        {
+            internal DahuaPlaybackGroupChannel Channel
+            {
+                get;
+                set;
+            }
+
+            internal DateTime ProviderTime
+            {
+                get;
+                set;
+            }
+
+            internal DateTime CommonTime
+            {
+                get;
+                set;
             }
         }
 
